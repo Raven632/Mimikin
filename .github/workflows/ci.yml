@@ -117,7 +117,7 @@ jobs:
 
     - name: Отчёт Playwright
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: e2e-report
         path: tests/e2e/report
