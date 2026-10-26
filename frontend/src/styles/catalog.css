@@ -1,0 +1,458 @@
+/* Новинки игр: источники, фильтры, карточки, подробный просмотр, «Хочу поиграть» (Catalog) */
+
+/* Окно новинок: шире статистики, сетка карточек */
+.stats-content.catalog-content { width: min(1400px, calc(96 * var(--vw))); }
+
+.catalog-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; position: relative; z-index: 5; }
+
+/* Поиск и списки — одной полосой: поиск забирает свободное место, списки — по своей подписи */
+.catalog-filters .search-box { flex: 1 1 240px; min-width: 0; }
+
+.catalog-filters .picker { min-width: 150px; flex: 0 1 auto; }
+
+/* Списки фильтров на широком экране стоят в ряду как есть; на телефоне — под кнопкой (ниже) */
+.catalog-filter-list { display: contents; }
+
+.catalog-chosen { margin-bottom: 14px; }
+
+.catalog-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 26px 20px; }
+
+.catalog-card {
+  display: flex;
+  flex-direction: column;
+  text-align: left;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  transition: transform 0.2s;
+}
+
+/* Карточка без рамки и подложки, как на витрине Steam: рамка — только у обложки, текст под ней свободно */
+@media (hover: hover) {
+  .catalog-card:hover .catalog-cover { border-color: rgba(201, 168, 76, 0.6); }
+  .catalog-card:hover .catalog-card-title { color: var(--gold-light); }
+}
+
+.catalog-card:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.catalog-cover { position: relative; aspect-ratio: 16 / 9; background: var(--bg-deep); overflow: hidden; border: 1px solid rgba(201, 168, 76, 0.12); border-radius: 8px; transition: border-color 0.2s; }
+
+.catalog-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.catalog-cover-empty {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-ui);
+  color: var(--gold-dim);
+}
+
+.catalog-status,
+.catalog-owned{
+  position: absolute;
+  z-index: 1;
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: rgba(8, 6, 8, 0.85);
+}
+
+.catalog-status { left: 8px; top: 8px; color: var(--text-dim); }
+
+.catalog-owned { right: 8px; bottom: 8px; color: var(--gold-light); }
+
+.catalog-owned.update { color: #7fc7a5; }
+
+.catalog-card-info { display: flex; flex-direction: column; gap: 4px; padding: 11px 2px 0; }
+
+.catalog-card-title {
+  font-family: var(--font-ui);
+  font-size: 1.02rem;
+  font-weight: 600;
+  transition: color 0.15s;
+  line-height: 1.3;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.catalog-card-line {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  /* До двух строк: части строки фактов разделены воздухом, в одну на узкой карточке не влезают */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+}
+/* Часть строки целиком: автор из двух слов не рвётся посередине, а уходит на вторую строку; слишком длинная — с «…» */
+.catalog-card-line .meta-part, .shelf-note .meta-part { display: inline-block; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; vertical-align: top; }
+
+/* Теги строки списка: одна тихая строка через запятую, как жанры в «Продолжить»; свои — светлым золотом */
+.catalog-card-tags { min-width: 0; overflow: hidden; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; text-overflow: ellipsis; }
+.catalog-card-tags .fav { color: var(--gold-light); }
+.catalog-card-tags .more { color: var(--gold-muted); }
+
+.catalog-more { margin: 22px auto 0; }
+
+/* Подробный просмотр игры из новинок */
+/* Тихая кнопка (controls.css) — текст вровень с краем окна */
+.catalog-back { margin-bottom: 14px; margin-left: -8px; }
+
+.catalog-back:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.catalog-detail-title { margin-bottom: 8px; }
+
+.catalog-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.catalog-detail-meta .catalog-owned { position: static; }
+
+.catalog-detail-media { margin: 14px 0; overflow: hidden; }
+
+.catalog-detail-main {
+  display: block;
+  width: 100%;
+  max-height: calc(60 * var(--vh));
+  object-fit: contain;
+  background: var(--bg-deep);
+  border-radius: var(--radius-sm);
+}
+
+.catalog-detail-thumbs { display: flex; gap: 8px; margin-top: 8px; overflow-x: auto; }
+
+.catalog-thumb {
+  flex: 0 0 auto;
+  width: 120px;
+  aspect-ratio: 16 / 9;
+  padding: 0;
+  cursor: pointer;
+  overflow: hidden;
+  border: 1px solid rgba(201, 168, 76, 0.2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+}
+
+.catalog-thumb.active { border-color: var(--gold); }
+
+.catalog-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.catalog-detail-tags { margin: 12px 0 18px; }
+
+.catalog-detail-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+.catalog-detail-actions a.meta-status-btn { text-decoration: none; }
+
+/* Скрытие обложек касается и новинок */
+.covers-hidden .catalog-cover img, .covers-hidden .catalog-detail-main, .covers-hidden .catalog-detail-fill {
+  filter: blur(18px) brightness(0.55) saturate(0.7);
+  transform: scale(1.1);
+}
+
+.covers-hidden .catalog-thumb img { filter: blur(8px) brightness(0.55) saturate(0.7); }
+
+/* Заголовок новинок длинный — на телефоне не заходит под крестик закрытия */
+.catalog-content .stats-title { padding-right: 36px; }
+
+.catalog-status.free { color: #7fc7a5; }
+
+.catalog-status.paid { color: var(--gold-light); }
+
+.catalog-detail-text { white-space: pre-line; margin: 14px 0; }
+
+/* «Хочу поиграть»: звёздочка на обложке — рядом с карточкой, в общей обёртке */
+.catalog-card-box { position: relative; display: flex; min-width: 0; }
+
+.catalog-card-box > .catalog-card { flex: 1; min-width: 0; }
+
+.catalog-wish {
+  position: absolute;
+  z-index: 2;
+  top: 6px;
+  right: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 50%;
+  border: 1px solid rgba(201, 168, 76, 0.35);
+  background: rgba(19, 17, 26, 0.8);
+  color: var(--gold-muted);
+  transition: color 0.2s, border-color 0.2s, transform 0.2s;
+}
+
+.catalog-wish.on { color: var(--gold-light); border-color: var(--gold); }
+
+.catalog-wish.on svg path, .catalog-wish-btn.on svg path { fill: currentColor; }
+
+.catalog-wish:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+@media (hover: hover) {
+  .catalog-wish:hover { color: var(--gold-light); border-color: var(--gold); }
+}
+
+/* Новость игры из списка: новая версия и статус — зелёным, скидка — золотом */
+
+.catalog-sources .chip.has-news::after {
+  content: '';
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-left: 7px;
+  vertical-align: middle;
+  border-radius: 50%;
+  background: #7fc7a5;
+}
+
+/* «Новинки»: поиск, списки и «Фильтры» — тоже одной высоты (было 43–47 и 52) */
+.catalog-filters .search-box input, .catalog-filters .picker-btn, .catalog-filters .filters-toggle {
+  height: 42px;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+@media (hover: hover) {
+  .catalog-back:hover { color: var(--gold-light); }
+}
+
+/* Название игры в подробном просмотре новинок — как в окне игры: читаемым шрифтом, без капса */
+.stats-title.catalog-detail-title {
+  font-family: var(--font-ui);
+  font-weight: 700;
+  font-size: 1.6rem;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+@media (max-width: 700px) {
+  .catalog-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px 12px; }
+  .catalog-card-title { font-size: var(--fs-sm); }
+  /* По два списка в ряд, ровно по половине: пятый не растягивается на всю ширину.
+     И ниже, чем в библиотеке, — чтобы карточки начинались на первом экране */
+  .catalog-filters { gap: 8px; }
+  .catalog-filters .picker { min-width: 0; flex: 0 0 calc(50% - 4px); }
+  /* Поиск и «Фильтры» — в одну строку, списки раскрываются под ними; у itch.io поиска нет —
+     кнопка на всю строку */
+  .catalog-filters .search-box { flex: 1 1 0; }
+  .catalog-filter-list { display: none; }
+  .catalog-filter-list.open { display: flex; flex-wrap: wrap; gap: 8px; flex: 1 1 100%; }
+  .catalog-filters > .filters-toggle:first-child { flex: 1 1 100%; justify-content: center; }
+  .catalog-status,
+.catalog-owned{ font-size: 11px; }
+}
+
+/* ---------- Шапка: название, источники вкладками, вид и «?» — одной строкой ---------- */
+.catalog-head { display: flex; align-items: flex-end; gap: 12px 28px; padding-right: 44px; margin-bottom: 16px; border-bottom: 1px solid rgba(201, 168, 76, 0.14); }
+.catalog-head .stats-title { margin: 0 0 12px; padding-right: 0; }
+.filter-chips.catalog-sources { flex: 1; min-width: 0; margin: 0; gap: 22px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+.filter-chips.catalog-sources::-webkit-scrollbar { display: none; }
+.filter-chips.catalog-sources .chip {
+  flex: 0 0 auto; height: auto; min-height: 0; padding: 0 0 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 0;
+  background: none; color: var(--text-dim); font-size: var(--fs-sm); letter-spacing: 0; white-space: nowrap;
+}
+.filter-chips.catalog-sources .chip.active { color: var(--gold-light); border-bottom-color: var(--gold); background: none; }
+.filter-chips.catalog-sources .chip.catalog-wish-tab { margin-left: auto; color: var(--gold-muted); }
+.filter-chips.catalog-sources .chip.catalog-wish-tab.active { color: var(--gold-light); }
+@media (hover: hover) {
+  .filter-chips.catalog-sources .chip:not(.active):hover { color: var(--gold); background: none; }
+}
+.filter-chips.catalog-sources .chip:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.catalog-tools { display: flex; align-items: center; gap: 8px; padding-bottom: 8px; }
+.catalog-view { display: flex; border: 1px solid var(--line-chip); border-radius: var(--radius-sm); overflow: hidden; }
+.catalog-view button {
+  display: flex; align-items: center; justify-content: center; width: 32px; height: 30px; padding: 0; border: 0;
+  background: none; color: var(--text-dim); cursor: pointer; font: 600 var(--fs-sm) var(--font-ui);
+}
+.catalog-view button[aria-pressed="true"] { background: rgba(201, 168, 76, 0.16); color: var(--gold-light); }
+/* «?» у источника — тихий знак из controls.css, размером с подпись кнопок рядом */
+.catalog-help { width: 1rem; height: 1rem; margin-left: 4px; }
+.catalog-view button:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (hover: hover) {
+  .catalog-view button:hover { color: var(--gold-light); }
+}
+.catalog-hint { margin: -6px 0 14px; }
+
+/* ---------- Карточка: строка «версия · автор» и низ — главное число слева, «когда» справа ---------- */
+.catalog-card-foot { display: flex; justify-content: space-between; gap: 10px; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.catalog-card-foot > span { overflow: hidden; text-overflow: ellipsis; }
+
+/* ---------- Список: строка на игру, как поиск Steam ---------- */
+.catalog-rows { display: flex; flex-direction: column; border-top: 1px solid rgba(201, 168, 76, 0.12); }
+.catalog-row-box { position: relative; border-bottom: 1px solid rgba(201, 168, 76, 0.12); }
+.catalog-card.catalog-row { display: grid; grid-template-columns: 176px minmax(0, 1fr) auto; gap: 18px; align-items: center; width: 100%; padding: 12px 52px 12px 4px; }
+.catalog-row-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.catalog-row-stats { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.catalog-row-box .catalog-wish { top: 50%; right: 6px; transform: translateY(-50%); }
+@media (hover: hover) {
+  .catalog-card.catalog-row:hover { background: rgba(201, 168, 76, 0.04); }
+  .catalog-row-box:hover .catalog-wish { transform: translateY(-50%); }
+}
+@media (max-width: 700px) {
+  .catalog-card.catalog-row { grid-template-columns: 112px minmax(0, 1fr); gap: 4px 12px; padding: 10px 44px 10px 0; }
+  .catalog-row .catalog-cover { grid-row: span 2; }
+  .catalog-row-stats { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; white-space: normal; }
+  .catalog-card-tags { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+}
+
+/* ---------- Окно игры в две колонки: слева картинки, справа сведения и кнопки, описание — под ними ---------- */
+.catalog-detail-grid {
+  display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(300px, 1fr); grid-template-rows: auto 1fr;
+  grid-template-areas: "media head" "media side" "text text"; gap: 0 32px; align-items: start;
+}
+.catalog-detail-head { grid-area: head; }
+.catalog-detail-head .catalog-detail-title { margin: 0 0 6px; }
+.catalog-detail-grid .catalog-detail-media { grid-area: media; margin: 0; }
+.catalog-detail-side { grid-area: side; display: flex; flex-direction: column; gap: 14px; padding-top: 8px; }
+.catalog-detail-side .catalog-detail-meta { margin: 0; }
+.catalog-detail-side .jd-steps-box { margin-top: 0; }
+.catalog-detail-side .catalog-detail-tags { margin: 0; }
+.catalog-detail-grid .catalog-detail-text { grid-area: text; max-width: 860px; margin: 24px 0 0; padding-top: 18px; border-top: 1px solid rgba(201, 168, 76, 0.12); }
+/* Картинка целиком, по бокам — она же размытая: у узких и высоких нет чёрных полос */
+.catalog-detail-frame { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 8px; background: var(--bg-deep); }
+.catalog-detail-fill { position: absolute; inset: -24px; width: calc(100% + 48px); height: calc(100% + 48px); object-fit: cover; filter: blur(26px) brightness(0.45); }
+.catalog-detail-frame .catalog-detail-main { position: relative; width: 100%; height: 100%; max-height: none; object-fit: contain; background: none; border-radius: 0; }
+.catalog-detail-actions { display: flex; flex-direction: column; gap: 8px; }
+.catalog-detail-actions-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.catalog-detail-actions-row > * { flex: 1 1 auto; justify-content: center; }
+.meta-status-btn.catalog-primary { width: 100%; justify-content: center; background: var(--gold); border-color: var(--gold); color: #120e08; font-weight: 700; }
+.meta-status-btn.catalog-primary:disabled { opacity: 0.55; }
+@media (hover: hover) {
+  .meta-status-btn.catalog-primary:not(:disabled):hover { background: var(--gold-light); border-color: var(--gold-light); color: #120e08; }
+}
+/* Уже 900 px вкладки не помещаются в строку — переносятся, а не уезжают за край вместе с «Хочу поиграть»;
+   и выше — под палец */
+@media (max-width: 900px) {
+  .filter-chips.catalog-sources { flex-wrap: wrap; overflow-x: visible; row-gap: 2px; }
+  .filter-chips.catalog-sources .chip { padding-top: 12px; }
+  .filter-chips.catalog-sources .chip.catalog-wish-tab { margin-left: 0; }
+  .catalog-view button { width: 40px; height: 38px; }
+  .catalog-detail-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: "head" "media" "side" "text"; gap: 14px; }
+  .catalog-detail-side { padding-top: 0; }
+  .catalog-detail-grid .catalog-detail-text { margin-top: 6px; }
+}
+@media (max-width: 700px) {
+  /* Крестик закрытия — в правом верхнем углу окна: вид и «?» встают левее него */
+  .catalog-head { flex-wrap: wrap; padding-right: 0; }
+  .catalog-head .stats-title { flex: 1 1 auto; }
+  .catalog-tools { order: 1; padding-bottom: 12px; margin-right: 44px; }
+  .filter-chips.catalog-sources { order: 2; flex: 1 1 100%; gap: 2px 18px; }
+}
+
+/* Ход загрузки «Загрузить» (components/JdProgress.jsx): пять шагов точками на линии, под ними — полоса и что сейчас */
+.jd-steps-box { margin-top: 14px; padding: 14px 16px; border: 1px solid var(--gold-dim); border-radius: var(--radius-lg); background: var(--bg-mid); }
+
+.jd-steps { display: flex; margin: 0; padding: 0; list-style: none; }
+
+.jd-steps li { position: relative; flex: 1; text-align: center; font-size: var(--fs-2xs); color: var(--text-dim); }
+
+/* Линия к предыдущему шагу — от его точки до своей */
+.jd-steps li + li::before { content: ""; position: absolute; top: 9px; right: 50%; width: 100%; height: 2px; background: #2a2530; }
+
+.jd-steps li.done::before, .jd-steps li.now::before, .jd-steps li.bad::before { background: var(--gold); }
+
+.jd-dot {
+  position: relative; z-index: 1;
+  display: flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; margin: 0 auto 6px;
+  border: 2px solid #2a2530; border-radius: 50%;
+  background: var(--bg-deep); font-size: 11px; font-weight: 700;
+}
+
+.jd-steps li.done .jd-dot { border-color: var(--gold); background: var(--gold); color: var(--bg-deep); }
+
+.jd-steps li.now { color: var(--gold-light); }
+
+.jd-steps li.now .jd-dot { border-color: var(--gold); box-shadow: 0 0 0 4px rgba(201, 168, 76, 0.18); }
+
+.jd-steps li.bad { color: #d08a7a; }
+
+.jd-steps li.bad .jd-dot { border-color: #b06a6a; color: #d08a7a; }
+
+.jd-bar { height: 6px; margin: 14px 0 0; overflow: hidden; border-radius: var(--radius-pill); background: #221d26; }
+
+.jd-bar i { display: block; height: 100%; background: var(--gold); transition: width 0.6s ease; }
+
+/* Перенос и распаковка — без байтов: полоса целиком, медленно дышит */
+.jd-bar.transfer i,
+.jd-bar.import i{ animation: jd-breathe 1.6s ease-in-out infinite alternate; }
+
+.jd-bar.collect i { animation: jd-run 1.4s ease-in-out infinite; }
+
+@keyframes jd-breathe { from { opacity: 0.35; } to { opacity: 0.8; } }
+
+@keyframes jd-run { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+
+.jd-line { display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline; margin: 10px 0 0; font-size: var(--fs-sm); color: var(--text); }
+
+.jd-line.bad { color: #d08a7a; }
+
+.jd-line.ok { color: var(--gold-light); }
+
+.jd-file { color: var(--text-dim); font-size: var(--fs-2xs); overflow-wrap: anywhere; }
+
+.jd-open { padding: 0; border: 0; background: none; color: var(--gold); font: inherit; text-decoration: underline; cursor: pointer; }
+
+.jd-open:hover { color: var(--gold-light); }
+
+/* На обложке: значок вместо статуса игры и тонкая полоса по низу */
+
+@media (prefers-reduced-motion: reduce) {
+  .jd-bar i,
+.jd-bar.collect i,
+.jd-bar.transfer i,
+.jd-bar.import i{ animation: none; transition: none; }
+}
+
+/* «Новинки» страницей (вкладка в шапке): по ширине страницы, без рамки окна и места под крестик */
+.catalog-page { max-width: var(--content-width); margin: 0 auto; padding: 10px 20px 64px; box-sizing: border-box; }
+.catalog-page .catalog-head { padding-right: 0; }
+@media (max-width: 700px) {
+  .catalog-page { padding: 6px 16px 48px; }
+  .catalog-page .catalog-tools { margin-right: 0; }
+  /* Узкая карточка: оценка с лайками и «когда» — в две строки, а не обрезками по краям */
+  .catalog-card-foot { flex-wrap: wrap; white-space: normal; }
+}
+
+/* Над выдачей: «Скрыть мои» и «Следить» за отбором */
+.catalog-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: -6px 0 16px; }
+.catalog-check { display: inline-flex; align-items: center; gap: 8px; font-size: var(--fs-sm); color: var(--text-dim); cursor: pointer; }
+.catalog-check:has(input:checked) { color: var(--text); }
+
+/* «Похожие» под окном игры: две ленты небольших карточек, листаются вбок */
+
+.jd-target { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--gold-muted); }
+
+/* Окно автора (AuthorView): имя автора ссылкой — в строке карточки, в «Ещё от …» и в окне игры */
+
+/* Окно «Загрузить в Mimikin?» от закладки: сведения слева, поля — во всю ширину */
+.jd-panel { text-align: left; }
+.jd-panel .confirm-title { text-align: center; }
+.jd-panel-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px 14px; margin: 0; font-size: var(--fs-sm); }
+.jd-panel-facts dt { color: var(--text-dim); }
+.jd-panel-facts dd { margin: 0; color: var(--text); overflow-wrap: anywhere; }
+.jd-panel-url { max-height: 4.5em; overflow: hidden; font-size: var(--fs-xs); }
+.jd-panel .confirm-text { text-align: left; font-size: var(--fs-sm); }
+.jd-panel .auth-error:empty { display: none; }
+.meta-status-btn.catalog-primary.jd-bookmark { width: auto; flex: none; padding-inline: 20px; cursor: grab; text-decoration: none; }

@@ -1,0 +1,373 @@
+/* Шапка: знак Mimikin, меню «⋯», место на диске (Header, HeaderMenu, StorageMonitor) */
+
+/* Шапка — одна узкая строка (Header.jsx): знак слева, меню справа. Внизу — ровная тонкая золотая линия. Прилипает к верху; под ней прилипает панель поиска (Toolbar меряет высоту шапки) */
+header {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding: calc(10px + var(--safe-top)) 0 10px;
+  background: rgba(8,6,8,0.96);
+  border-bottom: 1px solid rgba(201,168,76,0.18);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.header-inner {
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.header-side { display: flex; justify-content: flex-end; }
+
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; color: var(--gold); text-decoration: none; border-radius: var(--radius-sm); }
+
+.brand:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+
+.brand-mark { display: block; flex-shrink: 0; }
+
+/* Живой мимик (BrandMark live, mimicMood.js): место знака всегда 32 × 32, сам знак — целое число клеток по центру.
+   svg больше места на запас клеток (монета над крышкой, обложка справа от рта), лежит поверх и мышь не принимает.
+   Касание не выделяет и не увеличивает: пять щелчков подряд — не двойной тап */
+.brand { touch-action: manipulation; user-select: none; -webkit-user-select: none; -webkit-tap-highlight-color: transparent; }
+.brand-slot { display: grid; place-items: center; width: 32px; height: 32px; flex-shrink: 0; }
+.brand-mark.m16 { position: relative; }
+.brand-mark.m16 svg { position: absolute; overflow: visible; pointer-events: none; shape-rendering: crispEdges; }
+.mood-coin { fill: var(--gold-light); }
+.mood-spit { fill: var(--text); }
+
+/* Название — пиксельным Tiny5, как у знака-мимика: только 24px и обычным начертанием (жирный браузер дорисовал бы сам) */
+.brand-title {
+  margin: 0;
+  font-family: var(--font-head);
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--gold);
+}
+
+/* Разделы рядом со знаком: «Главная» и «Библиотека» — текстом; у открытого золотая черта по нижнему
+   краю шапки, как у вкладок Steam и Jellyfin */
+.main-nav { display: flex; align-items: center; gap: 4px; margin: 0 auto 0 24px; }
+
+.nav-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text-dim);
+  transition: color 0.2s, background 0.2s;
+}
+
+.nav-tab.active { color: var(--gold-light); }
+
+.nav-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: -10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--gold);
+}
+
+.nav-count { font-size: var(--fs-xs); font-weight: 500; color: var(--text-dim); }
+
+.nav-tab.active .nav-count { color: var(--gold-muted); }
+
+/* Новости «Хочу поиграть» у «Новинок» — зелёным, как отметка новостей на вкладке внутри */
+.nav-count.nav-news, .nav-tab.active .nav-count.nav-news { color: #7fc7a5; }
+
+@media (hover: hover) {
+  .nav-tab:not(.active):hover { color: var(--gold); background: rgba(201,168,76,0.06); }
+}
+
+.nav-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* Меню редких действий */
+.header-menu { position: relative; }
+
+.header-menu-btn {
+  position: relative;
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--gold-light);
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.header-menu-btn svg { width: 20px; height: 20px; }
+
+.header-menu-btn.active { border-color: var(--gold); background: rgba(201,168,76,0.12); }
+
+@media (hover: hover) {
+  .header-menu-btn:hover { background: var(--surface-btn); }
+}
+
+.header-menu-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.header-menu-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 8px);
+  z-index: 120;
+  min-width: 280px;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.75);
+}
+
+.header-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 11px 14px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--text-dim);
+  text-align: left;
+  transition: background 0.2s, color 0.2s;
+}
+
+@media (hover: hover) {
+  .header-menu-item:hover { background: rgba(201,168,76,0.1); color: var(--gold-light); }
+}
+
+.header-menu-item:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+.header-menu-icon { display: inline-flex; color: var(--gold-muted); transition: color 0.2s; }
+
+.header-menu-item.mobile-only { display: none; }
+
+/* Подпись и строка под ней — что за пунктом (меню ⋯) */
+.header-menu-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+
+.header-menu-item .header-menu-badge { margin-left: auto; }
+
+@media (hover: hover) {
+  .header-menu-item:hover .header-menu-icon { color: var(--gold-light); }
+}
+
+/* Справка и настройки под пунктами меню, мелко: место на диске, язык, «Выйти» */
+.header-menu-extras {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 8px 6px;
+  margin-top: 6px;
+  border-top: 1px solid rgba(201,168,76,0.15);
+}
+
+.header-menu-extras .storage-monitor {
+  margin: 0;
+  padding: 0;
+  width: auto;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  background: none;
+  border: none;
+  font-size: var(--fs-2xs);
+}
+
+.menu-footer-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+.menu-langs { display: flex; gap: 4px; }
+
+.menu-lang {
+  padding: 5px 9px;
+  background: transparent;
+  border: 1px solid var(--line-chip);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.menu-lang.active { border-color: var(--gold); color: var(--gold-light); background: rgba(201,168,76,0.12); }
+
+@media (hover: hover) {
+  .menu-lang:not(.active):hover { border-color: var(--gold); color: var(--gold); }
+}
+
+.menu-lang:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+@media (hover: hover) {
+  .menu-logout:hover { color: #e8a0a0; }
+}
+
+.menu-logout:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* Виджет места на диске — в стиле темы: золото, серифный шрифт, по центру под шапкой */
+.storage-monitor {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  width: fit-content;
+  margin: 12px auto 0;
+  padding: 8px 18px;
+  background: var(--surface-plate);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+
+.storage-monitor b { color: var(--gold); font-weight: 700; margin-left: 8px; }
+
+/* Меню: число новостей у пункта и точка на «⋯», пока меню закрыто */
+.header-menu-badge {
+  margin-left: auto;
+  min-width: 20px;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  text-align: center;
+  background: #7fc7a5;
+  color: #13111a;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.header-menu-btn.has-news::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #7fc7a5;
+  box-shadow: 0 0 0 2px rgba(19, 17, 26, 0.9);
+}
+
+
+@media (max-width: 1100px) {
+  .header-menu-item.mobile-only { display: flex; }
+}
+
+@media (max-width: 700px) {
+  /* Под строкой состояния — фон шапки, ниже знак и меню */
+  header { padding: calc(6px + var(--safe-top)) 0 8px; }
+  .header-inner { gap: 8px; padding: 0 16px; }
+  .brand { gap: 10px; }
+  /* Пальцем пункты меню ⋯ нужны крупнее: в макете подпись 14px, а не 13 */
+  .header-menu-item { font-size: var(--fs-sm); padding: 12px 14px; }
+  .storage-monitor { gap: 14px; margin-top: 14px; font-size: var(--fs-xs); padding: 8px 12px; }
+  .main-nav { margin-left: 4px; }
+  .nav-tab { padding: 0 10px; font-size: var(--fs-sm); }
+  .nav-tab.active::after { left: 10px; right: 10px; bottom: -8px; }
+}
+
+/* Три раздела и знак на узком телефоне: разделы плотнее, число игр у «Библиотеки» прячем (число новостей
+   у «Новинок» остаётся) — иначе знак наезжал на «Главную» */
+@media (max-width: 430px) {
+  .header-inner { gap: 6px; }
+  .main-nav { margin-left: 0; min-width: 0; }
+  .nav-tab { padding: 0 7px; }
+  .nav-tab.active::after { left: 7px; right: 7px; }
+  .nav-tab .nav-count:not(.nav-news) { display: none; }
+}
+
+@media (max-width: 560px) {
+  /* На телефоне рядом с разделами место только знаку: название остаётся для экранного диктора */
+  .brand-title {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+}
+
+/* Загрузки JDownloader (components/JdProgress.jsx): значок с кольцом хода — виден, пока в списке что-то есть */
+.header-side { align-items: center; gap: 8px; }
+
+.jd-menu { position: relative; }
+
+/* На телефоне кольцо вставало на «Новинки», а список обрезался слева. Загрузки JDownloader там — в плашке внизу (TransferBar.jsx) */
+@media (max-width: 700px) { .jd-menu { display: none; } }
+
+.jd-ring {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; padding: 0; border: 0; border-radius: 50%; cursor: pointer;
+  background: conic-gradient(var(--gold-dim) 0 100%);
+}
+
+.jd-ring.going { background: conic-gradient(var(--gold) calc(var(--share, 0) * 100%), #2a2530 0); }
+
+.jd-ring.bad { background: conic-gradient(#b06a6a 0 100%); }
+
+.jd-ring > span { position: relative; display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 50%; background: var(--bg-deep); color: var(--gold); }
+
+.jd-ring svg { width: 16px; height: 16px; }
+
+.jd-ring b { position: absolute; right: -4px; top: -4px; min-width: 16px; height: 16px; padding: 0 4px; border-radius: var(--radius-pill); background: var(--gold); color: var(--bg-deep); font-size: 10px; line-height: 16px; }
+
+.jd-ring:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.jd-list {
+  position: absolute; right: 0; top: calc(100% + 10px); z-index: 60;
+  width: min(420px, calc(100 * var(--vw) - 32px)); max-height: min(480px, calc(70 * var(--vh))); overflow-y: auto;
+  padding: 8px 12px; border: 1px solid var(--gold-dim); border-radius: var(--radius-lg);
+  background: var(--bg-card); box-shadow: 0 12px 30px rgba(0, 0, 0, 0.6);
+}
+
+.jd-list-title { margin: 4px 0 6px; font-size: var(--fs-2xs); color: var(--text-dim); }
+
+.jd-item { padding: 10px 0; border-top: 1px solid #2a2530; }
+
+.jd-item-head { display: flex; gap: 8px; align-items: flex-start; justify-content: space-between; }
+
+.jd-item b { font-weight: 500; font-size: var(--fs-sm); color: var(--text); }
+
+.jd-item small { display: block; margin-top: 3px; font-size: var(--fs-2xs); color: var(--text-dim); }
+
+.jd-item small.ok { color: #a9d79c; }
+
+.jd-item small.bad { color: #d08a7a; }
+
+.jd-item .jd-bar { height: 4px; margin-top: 8px; }
+
+.jd-forget { flex-shrink: 0; display: flex; padding: 2px; border: 0; border-radius: var(--radius-sm); background: none; color: var(--text-dim); cursor: pointer; }
+
+.jd-forget:hover { color: var(--gold); }
+
+.jd-forget svg { width: 14px; height: 14px; }

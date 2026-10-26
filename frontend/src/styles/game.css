@@ -1,0 +1,1130 @@
+/* Окно игры: обложка, «Играть», оценка, статусы, сведения, кадры, правка (GameModal) */
+
+.modal-content {
+  background: var(--bg-card);
+  border: 1px solid rgba(232, 223, 200, 0.1);
+  border-radius: var(--radius-lg);
+  max-width: 1400px;
+  width: calc(92 * var(--vw));
+  max-height: calc(90 * var(--vh));
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  box-shadow: 0 25px 60px rgba(0,0,0,0.9);
+  /* clip, а не hidden: hidden давал прокрутить окно вбок программно — при открытии правки форма
+     уезжала влево на сотню точек */
+  overflow: clip;
+  margin: 0 auto;
+}
+
+.modal-header {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 40px;
+  padding: 40px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+/* Левая колонка — обложка, своё и источники. Не закреплена: под обложкой теперь своё, и закреплённая колонка выше
+   окна прятала бы низ. Ширина — доля окна с потолком: действия и вкладки живут справа, им нужна ширина */
+.modal-side {
+  align-self: flex-start;
+  flex-shrink: 0;
+  width: clamp(200px, 25%, 300px);
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+}
+
+/* Рамка обложки подстраивается под её пропорции */
+.modal-cover-wrapper {
+  position: relative;
+  width: 100%;
+  height: auto; /* КРИТИЧЕСКИ ВАЖНО: высота теперь подстроится автоматически! */
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  /* На тёмном фоне окна обложка терялась: рамка заметнее, тень глубже */
+  border: 1px solid rgba(232, 223, 200, 0.12);
+  background: #0f0d15;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* Обложки нет или файл не загрузился — знак Mimikin на пустой плитке широкой обложки */
+.modal-side .modal-placeholder { width: 300px; max-width: 100%; aspect-ratio: 4 / 3; color: var(--gold-dim); background: rgba(232, 223, 200, 0.03); }
+
+#modal-cover {
+  width: 100%; /* Растягивается на все 290px ширины */
+  height: auto; /* КРИТИЧЕСКИ ВАЖНО: сохраняет естественную высоту арта */
+  /* Вертикальная витрина Steam (600×900) иначе вытягивала колонку выше окна,
+     и кнопки под ней уходили за край */
+  max-height: calc(45 * var(--vh));
+  object-fit: contain;
+  display: block;
+}
+
+/* Правая колонка: название и сведения */
+.modal-info {
+  flex: 1;
+  min-width: 0; /* Гарантирует, что длинный текст перенесется на новую строку */
+  display: flex;
+  flex-direction: column;
+  position: relative;
+}
+
+.modal-title-block {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-bottom: 10px;
+  /* Справа место под крестик: он висит поверх, и длинное название уходило под него */
+  padding-right: 48px;
+}
+
+/* Японское название, которое заменили английским из папки */
+.modal-original-title { font-size: var(--fs-md); color: var(--text-dim); letter-spacing: 0.02em; }
+
+#modal-title {
+  margin: 0;
+  font-family: var(--font-ui);
+  color: var(--gold-light);
+  line-height: 1.2;
+}
+
+.grimoire-source-logo {
+  object-fit: contain;
+  transition: opacity 0.3s ease;
+  max-width: 18px;
+  max-height: 18px;
+  opacity: 1;
+}
+
+.meta-item { display: flex; align-items: baseline; gap: 8px; font-family: var(--font-ui); font-size: var(--fs-md); }
+
+.meta-label { color: var(--text-dim); font-size: var(--fs-sm); }
+
+.meta-value { color: var(--text); letter-spacing: 0.5px; }
+
+/* Оценка в окне игры: цели под палец, наведение показывает будущую оценку */
+.modal-rating { display: flex; align-items: center; gap: 2px; justify-content: flex-start; }
+
+.rating-star {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: var(--fs-xl);
+  line-height: 1;
+  color: rgba(201,168,76,0.22);
+  transition: color 0.15s, transform 0.15s;
+}
+
+.rating-star.active { color: var(--gold); }
+
+.rating-star:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; border-radius: var(--radius-sm); }
+
+/* Отклик на нажатие (pulse.js): два кадра цвета по 80 мс, без увеличения. !important — чтобы кадр перекрыл цвет состояния
+   («горит», «нажата») и его плавный переход: вспышка должна идти кадрами, а не затухать */
+:is(button, span)[data-f="1"] { color: var(--flash) !important; transition: none !important; }
+:is(button, span)[data-f="2"] { color: var(--gold-light) !important; transition: none !important; }
+/* Искры нажатой звезды — крест из четырёх точек 2×2 вокруг значка, только в первом кадре; расстояние от размера звезды.
+   Сама псевдо-ячейка прозрачна — рисуются только тени */
+:is(button, span)[data-spark] { position: relative; }
+:is(button, span)[data-spark]::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 2px; height: 2px; margin: -1px 0 0 -1px;
+  --r: calc(0.5em + 4px);
+  box-shadow: 0 calc(-1 * var(--r)) var(--gold-light), 0 var(--r) var(--gold-light), calc(-1 * var(--r)) 0 var(--gold-light), var(--r) 0 var(--gold-light);
+  pointer-events: none;
+}
+
+/* «Обзор»: когда запускали, где остановился, сколько наиграно */
+.modal-progress { margin: 0; font-size: var(--fs-md); color: var(--text); text-align: left; }
+
+/* Статусы — одна сегментированная кнопка из четырёх частей */
+.status-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0;
+  border: 1px solid rgba(232, 223, 200, 0.12);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* Статус, найденный сам (gameStatus.js): пунктиром — видно, что его никто не ставил */
+.chip.auto { border-style: dashed; color: var(--gold-light); }
+
+.grimoire-action-btn svg { color: var(--gold-muted); }
+
+.grimoire-action-btn { flex: 1 1 auto; }
+
+/* «⋯» рядом с «Изменить»: меню открывается вниз — ряд стоит вверху окна, и вверх оно уходило за край */
+.modal-more { position: relative; flex: 0 0 auto; display: flex; }
+
+.grimoire-action-btn.modal-more-btn { flex: 0 0 auto; padding: 8px 12px; }
+
+.grimoire-action-btn.modal-more-btn.open { border-color: var(--gold); }
+
+.modal-more-list {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 6px);
+  z-index: 30;
+  min-width: 200px;
+  width: max-content;
+  max-width: min(320px, calc(100vw - 32px));
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid rgba(201,168,76,0.3);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.75);
+}
+
+.modal-more-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--text);
+}
+
+.modal-more-item svg { flex-shrink: 0; color: var(--gold-muted); }
+a.modal-more-item { text-decoration: none; box-sizing: border-box; }
+.modal-more-size { margin-left: auto; padding-left: 12px; white-space: nowrap; color: var(--gold-muted); font-variant-numeric: tabular-nums; }
+
+.modal-more-item.danger, .modal-more-item.danger svg { color: #e8a0a0; }
+
+@media (hover: hover) {
+  .modal-more-item:hover { background: rgba(201,168,76,0.1); }
+  .modal-more-item.danger:hover { background: rgba(192, 85, 85, 0.12); }
+}
+
+.modal-more-item:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+/* Удаление — того же веса, что остальные редкие действия, но краснеет при наведении */
+.grimoire-action-btn.danger svg { color: #b06a6a; }
+
+@media (hover: hover) {
+  .grimoire-action-btn.danger:hover {
+    border-color: #c05555;
+    color: #e8a0a0;
+    background: rgba(192, 85, 85, 0.1);
+    text-shadow: none;
+    box-shadow: none;
+  }
+}
+
+/* Теги — мелкими плашками без прокрутки внутри окна: первые 12 и «ещё N» */
+.modal-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 24px; flex-shrink: 0; font-size: var(--fs-xs); }
+
+/* Теги — заливкой без рамки: рамки у каждого тега, кнопки и статуса делали окно похожим на черновой макет */
+.modal-tags .tag {
+  padding: 3px 10px;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  border: 1px solid transparent;
+  background: rgba(232, 223, 200, 0.07);
+  border-radius: var(--radius-sm);
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.modal-tags .tag-more {
+  font: inherit;
+  cursor: pointer;
+  color: var(--gold);
+  background: none;
+}
+
+@media (hover: hover) {
+  .modal-tags .tag-more:hover { color: var(--gold-light); }
+}
+
+/* Тег-кнопка выглядит как обычный тег, но ведёт себя как ссылка на фильтр.
+   Кнопка не наследует шрифт и цвет — задаём явно, иначе будет системный серый. */
+.modal-tags .tag-link {
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+@media (hover: hover) {
+  .modal-tags .tag-link:hover { border-color: var(--gold); color: var(--gold); background: rgba(201,168,76,0.12); }
+}
+
+.modal-tags .tag-link:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.modal-description {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  line-height: 1.65;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-width: 72ch;
+  margin: 0;
+}
+
+.modal-description.clamped { display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+
+.modal-desc-more { align-self: flex-start; margin-top: 6px; padding: 4px 0; border: none; background: none; color: var(--gold-light); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.modal-desc-more:hover { color: var(--gold); }
+.modal-desc-more:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 2px; }
+
+/* Правка сведений (GameEdit) — как окно с формой: заголовок, обложка слева, разделы формы справа,
+   кнопки внизу окна. Поля, подписи, пояснения и разделы — те же, что в «Настройках» и на входе
+   (auth-field, set-section), кнопки — из общей системы (controls.css) */
+.edit-layout {
+  position: relative;
+  z-index: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 36px 40px 32px;
+  display: grid;
+  grid-template-columns: clamp(220px, 28%, 340px) minmax(0, 1fr);
+  grid-template-areas: "head head" "cover form";
+  gap: 28px 40px;
+  align-items: start;
+}
+
+/* Справа — место под крестик окна */
+.edit-head { grid-area: head; padding-right: 48px; min-width: 0; }
+
+.stats-title.edit-title { margin: 0 0 4px; }
+
+.edit-game { margin: 0; font-size: var(--fs-md); color: var(--text-dim); overflow-wrap: anywhere; }
+
+/* Обложка закреплена, пока прокручивается форма */
+.edit-cover { grid-area: cover; position: sticky; top: 0; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.edit-cover-frame {
+  border: 1px solid rgba(201,168,76,0.2);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: #0f0d15;
+}
+
+/* Выбрана новая — рамка золотая: видно, что это ещё не сохранено */
+.edit-cover-frame.changed { border-color: var(--gold); }
+
+.edit-cover-frame img { display: block; width: 100%; height: auto; max-height: calc(40 * var(--vh)); object-fit: contain; }
+
+.edit-cover-frame .cover-placeholder { aspect-ratio: 16 / 9; height: auto; }
+
+.covers-hidden .edit-cover-frame img { filter: blur(18px) brightness(0.55) saturate(0.7); transform: scale(1.1); }
+
+.edit-cover-side { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.edit-cover-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.edit-form { grid-area: form; display: flex; flex-direction: column; gap: 26px; max-width: 800px; min-width: 0; }
+
+/* Поля — по два в ряд, название — во всю ширину */
+.edit-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 16px; }
+
+.edit-field { min-width: 0; }
+
+.edit-field.wide { grid-column: 1 / -1; }
+
+.edit-field .auth-hint, .edit-error { line-height: 1.4; }
+
+.edit-error { font-size: var(--fs-sm); color: #e8a0a0; }
+
+.edit-empty {
+  margin: 0;
+  padding: 12px 14px;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  border: 1px dashed rgba(201,168,76,0.25);
+  border-radius: var(--radius-sm);
+}
+
+/* Источники — ведомость: сайт и что найдено, подписи колонок сверху, под каждой строкой линия */
+.edit-links { list-style: none; margin: 0 0 12px; padding: 0; }
+
+.edit-links-head, .edit-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) 44px;
+  column-gap: 12px;
+  align-items: center;
+}
+
+.edit-links-head { padding-bottom: 8px; border-bottom: 1px solid rgba(201,168,76,0.3); font-size: var(--fs-xs); color: var(--text-dim); }
+
+.edit-link { min-height: 48px; border-bottom: 1px solid rgba(201,168,76,0.12); }
+
+.edit-link-site {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: var(--fs-md);
+  text-decoration: none;
+}
+
+.edit-link-site b { color: var(--gold-light); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.edit-link-found { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-md); color: var(--text-dim); }
+
+/* Знак сайта: первая буква золотом в чёрной рамке; незнакомый сайт — значок ссылки */
+.edit-link-logo {
+  width: 24px;
+  height: 24px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(201,168,76,0.45);
+  border-radius: 3px;
+  background: #0a0810;
+  color: var(--gold);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+}
+
+.edit-link-logo svg { width: 14px; height: 14px; }
+
+.edit-link-site:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 2px; }
+
+@media (hover: hover) {
+  .edit-link-site:hover b { text-decoration: underline; }
+}
+
+.edit-link-remove {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: none;
+  color: var(--text-dim);
+  transition: color 0.2s, background 0.2s;
+}
+
+.edit-link-remove svg { width: 16px; height: 16px; }
+
+.edit-link-remove:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+@media (hover: hover) {
+  .edit-link-remove:hover { color: #e8a0a0; background: rgba(192,85,85,0.12); }
+}
+
+/* Поле ссылки и «Добавить» — одной высоты */
+.edit-add { display: flex; gap: 8px; }
+
+.edit-add input { flex: 1; min-width: 0; }
+
+.edit-add .edit-add-btn { min-height: 48px; }
+
+/* Кнопки правки — внизу окна, вне прокрутки: видны при любой длине формы.
+   «Отмена» слева, «Сохранить» справа — как в окне подтверждения */
+.edit-footer {
+  position: relative;
+  z-index: 1;
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 40px;
+  border-top: 1px solid rgba(201,168,76,0.15);
+  background: rgba(13,11,18,0.94);
+}
+
+.edit-footer .cancel-btn, .edit-footer .save-btn { flex: none; min-width: 128px; }
+
+.edit-footer .save-btn:disabled { opacity: 0.75; }
+
+@media (pointer: coarse) {
+  .edit-link-remove { width: 44px; height: 44px; }
+}
+
+@media (max-width: 900px) {
+  /* Одна колонка: заголовок, обложка строкой (картинка слева, кнопки справа), форма */
+  .edit-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "head" "cover" "form"; gap: 22px; padding: 28px 28px 24px; }
+  .edit-cover { position: static; display: grid; grid-template-columns: 136px minmax(0, 1fr); gap: 10px 16px; }
+  .edit-cover > .set-title { grid-column: 1 / -1; }
+  .edit-cover-frame img { max-height: 200px; }
+  .edit-form { max-width: none; }
+  .edit-footer { padding: 12px 28px; }
+}
+
+@media (max-width: 560px) {
+  /* Крестик окна лежит поверх прокрутки и закрывал поля; выйти из правки — «Отмена» внизу */
+  .modal-content.editing > .modal-actions-top { display: none; }
+  .edit-head { padding-right: 0; }
+  .edit-layout { padding: 22px 16px 20px; }
+  .edit-grid { grid-template-columns: minmax(0, 1fr); }
+  .edit-cover { grid-template-columns: 104px minmax(0, 1fr); }
+  .edit-cover-actions { flex-direction: column; align-items: stretch; }
+  .edit-footer { padding: 12px 16px; }
+  .edit-footer .cancel-btn, .edit-footer .save-btn { flex: 1; min-width: 0; }
+}
+
+/* «Играть» — главное действие окна, залитая */
+#modal-play-btn {
+  padding: 0 30px;
+  min-height: 48px;
+  cursor: pointer;
+  background: var(--gold);
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-sm);
+  color: var(--bg-deep);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 700;
+}
+
+#modal-title { font-weight: 700; }
+
+#modal-title { letter-spacing: -0.01em; }
+
+#modal-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+#modal-play-btn .glyph { font-size: 1.1em; }
+
+#modal-play-btn:disabled { opacity: 0.7; cursor: progress; }
+
+@media (hover: hover) {
+  #modal-play-btn:not(:disabled):hover {
+    background: var(--gold-light);
+    border-color: var(--gold-light);
+  }
+}
+
+#modal-play-btn:focus-visible { outline: 2px solid var(--gold-light); outline-offset: 3px; }
+
+/* «Играть»: светлеет на pointerdown, а не после отпускания — сразу за ним идёт переход (LaunchIntro) */
+#modal-play-btn:not(:disabled):active { background: var(--gold-light); border-color: var(--gold-light); transition: none; }
+
+/* Обложка-призрак, что летит из карточки в окно (windowFly.js): на время полёта настоящая спрятана */
+.modal-ghost {
+  display: none;
+  position: fixed;
+  z-index: 20;
+  transform-origin: 0 0;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  pointer-events: none;
+  will-change: transform;
+}
+.modal-ghost.fly { display: block; }
+.modal-content[data-flying] #modal-cover,
+.modal-content[data-flying] .modal-placeholder { visibility: hidden; }
+
+.covers-hidden #modal-cover {
+  filter: blur(18px) brightness(0.55) saturate(0.7);
+  /* размытие «съедает» края — увеличиваем, чтобы не было прозрачной кромки */
+  transform: scale(1.1);
+}
+
+/* Миниатюры в галерее — 145 px против 493 px у обложки. Те же 18 px дают там 12%
+   ширины вместо 4% и превращают кадр в однотонное пятно. Размытие должно быть
+   пропорционально размеру картинки, а не одинаковым в пикселях.
+   Наведение сюда же: правило .screen-thumb:hover img весит столько же, сколько
+   правило скрытия, и при равном весе побеждает то, что ниже в файле — оно снимало блюр. */
+.covers-hidden .game-screens img, .covers-hidden .screen-thumb:hover img {
+  filter: blur(8px) brightness(0.55) saturate(0.7);
+  transform: scale(1.1);
+}
+
+/* Состояние поиска метаданных в окне игры. Показывается, только если что-то не так:
+   у готовых игр строки нет, чтобы не шуметь */
+.meta-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 18px;
+  flex-wrap: wrap;
+  margin: -4px 0 20px;
+  padding: 12px 14px;
+  border-radius: var(--radius-sm);
+  border: 1px dashed rgba(201,168,76,0.35);
+  background: rgba(201,168,76,0.05);
+}
+
+.meta-status.error { border-color: rgba(214, 120, 96, 0.5); background: rgba(214, 120, 96, 0.06); }
+
+.meta-status-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+}
+
+.meta-status-text b { color: var(--text); font-weight: 600; }
+
+.meta-status-hint { font-size: var(--fs-sm); }
+
+/* Скриншоты игры со страницы магазина */
+.game-screens {
+  /* Сетка 3 в ряд (на телефоне — 2): лентой по 132 пикселя кадры было не разглядеть */
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  /* Отступ до «Тегов» даёт их подзаголовок */
+  margin: 0;
+  /* Окно — колонка, которая сжимает детей, когда содержимое длиннее экрана: лента кадров сжималась первой,
+     до 6 пикселей при картинках в 74 */
+  flex-shrink: 0;
+}
+
+.game-screens img {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(201, 168, 76, 0.25);
+  filter: brightness(0.85);
+  transition: transform 0.25s, filter 0.25s, border-color 0.25s;
+}
+
+.screen-thumb { padding: 0; border: none; background: none; cursor: pointer; line-height: 0; flex-shrink: 0; overflow: hidden; border-radius: var(--radius-sm); }
+/* В сетке кадры крупнее: на телефоне — два в ряд */
+@media (max-width: 700px) {
+  .game-screens { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+@media (hover: hover) {
+  .screen-thumb:hover img { filter: brightness(1); border-color: var(--gold); }
+}
+
+.screen-thumb:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+/* Просмотрщик кадра. Лежит выше окна игры (оно 2000), фон приглушает всё под собой,
+   клик по фону закрывает — как в любой галерее. */
+.lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(40px + var(--safe-top)) 20px calc(40px + var(--safe-bottom));
+  background: rgba(8, 6, 8, 0.93);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  animation: lightbox-in 0.2s ease-out;
+}
+
+.lightbox img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(201, 168, 76, 0.35);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.7);
+}
+
+/* Клавиша H: просмотрщик лежит в body, вне .app-container — размывает себя сам (useCoversHidden в GameModal) */
+.lightbox.covers-hidden img { filter: blur(18px) brightness(0.55) saturate(0.7); }
+
+.lightbox-close, .lightbox-nav {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(20, 18, 26, 0.85);
+  color: var(--gold);
+  border: 1px solid rgba(201, 168, 76, 0.3);
+  border-radius: 50%;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s, transform 0.2s;
+}
+
+.lightbox-close { top: 18px; right: 18px; width: 40px; height: 40px; font-size: var(--fs-xl); line-height: 1; }
+
+.lightbox-nav { top: 50%; transform: translateY(-50%); width: 46px; height: 46px; font-size: 2rem; line-height: 1; }
+
+.lightbox-nav.prev { left: 14px; }
+
+.lightbox-nav.next { right: 14px; }
+
+@media (hover: hover) {
+  .lightbox-close:hover, .lightbox-nav:hover { background: rgba(201, 168, 76, 0.2); border-color: var(--gold); }
+}
+
+.lightbox-counter {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  color: var(--gold-muted);
+}
+
+/* Окно игры: полоса сверху — настоящий кадр из игры, затемнён вдвое, под ней тонкая золотая линия. Лежит
+   внутри прокручиваемой шапки, так что уезжает вместе с текстом. Обложка и правая колонка выше неё (z-index) */
+.modal-strip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 132px;
+  overflow: hidden;
+  border-bottom: 1px solid rgba(201, 168, 76, 0.3);
+  background: #000;
+  pointer-events: none;
+}
+
+.modal-strip img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 40%; filter: brightness(0.5); display: block; }
+
+/* Вдвое затемнить мало: на светлом кадре (зелёная карта) полоса выходила ярче названия под ней.
+   Второй слой темнее книзу — к заголовку полоса уходит почти в фон окна */
+.modal-strip::after { content: ''; position: absolute; inset: 0; background: linear-gradient(rgba(5, 4, 9, 0.3), rgba(5, 4, 9, 0.6)); }
+
+.modal-header.has-strip > .modal-side, .modal-header.has-strip > .modal-info { position: relative; z-index: 1; }
+
+/* Название — под полосой: сверху в шапке 40px отступа, полоса 132px, ещё воздух */
+.modal-header.has-strip .modal-info { padding-top: 104px; }
+
+.modal-header.has-strip .modal-cover-wrapper { border-color: rgba(201, 168, 76, 0.3); }
+
+/* Кадр — тоже картинка игры: при скрытых обложках его тоже не показываем */
+.covers-hidden .modal-strip { display: none; }
+
+@media (max-width: 1000px) {
+  .modal-strip { display: none; }
+  .modal-header.has-strip .modal-info { padding-top: 0; }
+}
+
+.modal-content > .modal-header { position: relative; z-index: 1; background: transparent; }
+
+.covers-hidden .modal-hero-bg { display: none; }
+
+.modal-content .status-row .chip {
+  min-height: 40px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 0;
+  border-left: 1px solid rgba(232, 223, 200, 0.12);
+  background: transparent;
+  white-space: normal;
+  line-height: 1.2;
+  font-size: var(--fs-xs);
+}
+
+.modal-content .status-row .chip:first-child { border-left: none; }
+
+.modal-content .status-row .chip.active { background: rgba(201,168,76,0.18); color: var(--gold-light); }
+
+.modal-content .status-row .chip.auto {
+  color: var(--gold-light);
+  text-decoration: underline dotted rgba(201,168,76,0.7);
+  text-underline-offset: 4px;
+}
+
+@media (hover: hover) {
+  .modal-content .status-row .chip:not(.active):hover { background: rgba(201,168,76,0.08); color: var(--gold); }
+}
+
+.lightbox-close svg { width: 20px; height: 20px; }
+
+.lightbox-nav svg { width: 26px; height: 26px; }
+
+.rating-star .glyph { vertical-align: -0.1em; }
+
+@media (max-width: 1000px) {
+  /* Полторы колонки помещаются примерно до 1000px: обложка (минимум 240) плюс
+     отступы и зазор съедают 320px, и текстовой колонке остаётся меньше 400 —
+     заголовок с датами уже не встают в строку. Ниже этой границы кладём обложку
+     сверху, а тексту отдаём всю ширину окна. */
+  .modal-header { flex-direction: column; flex-wrap: nowrap; gap: 0; }
+  /* Одна колонка в порядке важности: обложка, название, «Играть» с оценкой и статусом,
+     потом всё остальное. Обе колонки растворяются (display: contents), и их части
+     встают по order — так не приходится дублировать разметку для телефона */
+  .modal-side, .modal-info { display: contents; }
+  /* Одна колонка (планшет, телефон): обложка своего размера, без серых полей по бокам */
+  .modal-cover-wrapper {
+    order: 1;
+    align-items: center;
+    justify-content: center;
+    display: block;
+    width: fit-content;
+    max-width: 100%;
+    margin: 0 auto 18px;
+    background: none;
+    max-height: none;
+  }
+  #modal-cover { object-fit: contain; width: auto; max-width: 100%; height: auto; max-height: 320px; }
+  .modal-info > * { order: 4; min-width: 0; }
+  .modal-info > .modal-title-block { order: 2; }
+  /* Столбец окна ограничен по высоте, и флекс ужимал его части, чтобы влезли.
+     Обложку с overflow: hidden он сжимал до полоски — прокручивается окно, а не они */
+  .modal-cover-wrapper, .modal-info > *, .modal-mine, .modal-src { flex-shrink: 0; }
+}
+
+@media (max-width: 700px) {
+  /* На телефоне крестик окна игры лежит прямо на обложке — на светлой картинке его было не видно:
+     тёмная круглая подложка */
+  .modal-content > .modal-actions-top .modal-close {
+    background: rgba(8, 6, 8, 0.72);
+    color: var(--text);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+  }
+  /* Прокрутили — крестик на полосе во всю ширину: контент уходит под неё, а не под значок (раньше «Играть» и
+     крестик ложились друг на друга) */
+  .modal-content > .modal-actions-top.scrolled {
+    top: 0;
+    left: 0;
+    right: 0;
+    justify-content: flex-end;
+    padding: 8px 15px;
+    background: var(--bg-card);
+    border-bottom: 1px solid rgba(232, 223, 200, 0.1);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  }
+  .modal-content > .modal-actions-top.scrolled .modal-close { background: none; box-shadow: none; }
+  /* Две ссылки галерей в одном поле — каждая своей строкой, а не по слову */
+  .meta-item { flex-wrap: wrap; }
+}
+
+@media (max-width: 700px) {
+  /* 100% — от окна за вычетом отступов: 90vh в веб-приложении залезало под строку состояния */
+  .modal-content {
+    width: 100%;
+    max-width: calc(calc(100 * var(--vw)) - 20px);
+    max-height: 100%;
+    border-radius: var(--radius-lg);
+    margin: 0;
+  }
+  /* Раскладку в колонку задаёт блок выше (1000px), здесь только телефонные мелочи */
+  .modal-header { padding: 15px; gap: 15px; }
+  .modal-cover-wrapper { box-shadow: none; border-color: rgba(232, 223, 200, 0.08); }
+  /* Обложка на телефоне — от края до края окна, а не рамкой с полями: полям там тесно, а картинка — первое, что видно */
+  .modal-side > .modal-cover-wrapper {
+    width: auto;
+    max-width: none;
+    margin: -15px -15px 18px;
+    border-width: 0 0 1px;
+    border-radius: 0;
+  }
+  .modal-side > .modal-cover-wrapper #modal-cover { width: 100%; }
+  .modal-title-block { margin-bottom: 15px; width: 100%; }
+  #modal-title { word-break: break-word; }
+  #modal-play-btn { font-size: var(--fs-md); }
+}
+
+#modal-title { font-size: 2rem; }
+
+#modal-title.long { font-size: 1.5rem; }
+
+@media (max-width: 700px) {
+  #modal-play-btn { flex: 1 1 100%; }
+  a.meta-value { display: inline-flex; align-items: center; min-height: 32px; }
+}
+
+@media (max-width: 600px) {
+  /* На телефоне стрелки мельче и ближе к краю, иначе перекрывают саму картинку */
+  .lightbox { padding: 60px 8px; }
+  .lightbox-nav { width: 38px; height: 38px; font-size: var(--fs-xl); }
+  .lightbox-nav.prev { left: 6px; }
+  .lightbox-nav.next { right: 6px; }
+}
+
+@media (max-width: 560px) {
+  #modal-title { font-size: 1.4rem; }
+  #modal-title.long { font-size: 1.2rem; }
+}
+
+@keyframes lightbox-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Что у игры нашлось, а чего нет — строкой пунктов с галочкой или крестиком */
+.meta-parts { display: flex; flex-wrap: wrap; gap: 4px 14px; margin: 4px 0 2px; padding: 0; list-style: none; }
+
+.meta-parts li { display: inline-flex; align-items: center; gap: 5px; }
+
+.meta-parts li.ok { color: var(--text-dim); }
+
+.meta-parts li.ok .glyph { color: #7fc7a5; }
+
+.meta-parts li.no { color: var(--text); }
+
+.meta-parts li.no .glyph { color: #d67860; }
+
+/* Любимый тег в окне игры — первым, с сердцем */
+.tag.tag-fav { border-color: rgba(201, 168, 76, 0.6); color: var(--gold-light); display: inline-flex; align-items: center; gap: 5px; }
+
+.tag.tag-fav .glyph { color: var(--gold); }
+
+/* «Как искали» и «Возможно, это она» — внутри строки о неполных данных, на всю её ширину */
+.lookup-help { flex-basis: 100%; display: flex; flex-direction: column; gap: 12px; padding-top: 12px; border-top: 1px solid rgba(201,168,76,0.15); font-size: var(--fs-sm); color: var(--text-dim); }
+.lookup-log summary { cursor: pointer; color: var(--gold-muted); width: fit-content; }
+.lookup-log summary:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.lookup-log ul { margin: 8px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+.lookup-step b { color: var(--text); font-weight: 600; }
+.lookup-step.found b { color: #7fc7a5; }
+.lookup-step.down b { color: #d67860; }
+.lookup-help a { color: inherit; text-decoration: none; border-bottom: 1px dotted currentColor; }
+.lookup-maybe { display: flex; flex-direction: column; gap: 6px; }
+.lookup-maybe-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.lookup-maybe-head b { color: var(--text); font-weight: 600; }
+.lookup-candidates { margin: 2px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.lookup-candidates li { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 6px 8px; border-radius: var(--radius-sm); background: rgba(255,255,255,0.03); }
+.lookup-site { width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
+.lookup-candidates .lookup-title { color: var(--text); border: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lookup-meta { flex: 1; min-width: 0; color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.lookup-candidates .meta-status-btn { margin-left: auto; }
+
+@media (hover: hover) {
+  .lookup-help a:hover, .lookup-log summary:hover { color: var(--gold-light); }
+}
+
+@media (max-width: 640px) {
+  .lookup-candidates li { flex-wrap: wrap; }
+  .lookup-meta { flex-basis: 100%; order: 3; }
+}
+
+/* «Перевод» в окне игры: язык выключателем, ход, загрузка готового перевода */
+.tl-bar { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 18px; padding: 12px 14px; border-radius: var(--radius-sm); border: 1px solid rgba(201,168,76,0.18); background: rgba(201,168,76,0.03); font-size: var(--fs-sm); color: var(--text-dim); }
+.tl-head { display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap; }
+.tl-title { color: var(--text); font-weight: 600; }
+.tl-langs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tl-track { height: 6px; border-radius: 3px; background: rgba(255,255,255,0.06); overflow: hidden; }
+.tl-track span { display: block; height: 100%; background: var(--gold); transition: width 0.4s ease; }
+.tl-error { color: #d67860; }
+.tl-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.tl-note { font-size: var(--fs-xs); }
+.tl-check { display: flex; flex-direction: column; gap: 8px; }
+.tl-check-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.tl-check-ok { color: var(--gold); }
+.tl-check-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.tl-check-list li { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; border-radius: var(--radius-sm); background: rgba(255,255,255,0.03); overflow-wrap: anywhere; }
+.tl-check-kind { font-size: var(--fs-xs); color: var(--gold); }
+.tl-check-src { font-size: var(--fs-xs); white-space: pre-line; }
+.tl-check-text { color: var(--text); white-space: pre-line; }
+.set-tl-used { margin-top: -10px; }
+
+/* В карточке игры перевод — одной строкой (TranslateBar): язык выпадающим списком, ход, «Пауза»/«Продолжить» и
+   «Настройки перевода»; под ней — что требует внимания. Остальное — в окне «Настройки перевода» (.tl-window) */
+.tl-row { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+/* Язык перевода — тот же список, что у жанров (Picker): в строке карточки он не растягивается на ширину, как в панели фильтров */
+.picker.tl-select { flex: 0 0 auto; min-width: 150px; }
+.picker.tl-select .picker-btn { min-height: 34px; padding: 0 36px 0 12px; font-weight: 600; }
+.tl-row-status { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.tl-settings-btn { display: inline-flex; align-items: center; gap: 6px; }
+.tl-settings-btn svg { width: 16px; height: 16px; }
+.tl-alerts { flex-basis: 100%; display: flex; gap: 6px; flex-wrap: wrap; }
+.tl-alert { padding: 3px 10px; border: 1px solid rgba(201,168,76,0.4); border-radius: var(--radius-pill); background: transparent; color: var(--gold);
+  font: inherit; font-size: var(--fs-xs); cursor: pointer; }
+.tl-alert:hover, .tl-alert:focus-visible { background: rgba(201,168,76,0.1); outline: none; }
+.tl-alert.bad { border-color: rgba(214,120,96,0.6); color: #e39a86; }
+.tl-alert.bad:hover { background: rgba(214,120,96,0.1); }
+/* Окно «Настройки перевода» — то же, что «Настройки» библиотеки; под заголовком — название игры */
+.tl-window-game { display: block; margin-top: 4px; font-size: var(--fs-sm); font-weight: 500; color: var(--text-dim); letter-spacing: 0; text-transform: none; }
+.tl-panel { font-size: var(--fs-sm); color: var(--text-dim); }
+.tl-panel .set-section { gap: 10px; }
+
+/* Поиск данных вживую (LookupSteps): шаги по сайтам, последний — «ищем дальше…» */
+.lookup-live { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: var(--fs-sm); color: var(--text-dim); }
+.lookup-live .lookup-step.found b { color: var(--gold); }
+.lookup-live .lookup-step.pending { font-style: italic; animation: lookup-pulse 1.4s ease-in-out infinite; }
+@keyframes lookup-pulse { 50% { opacity: 0.45; } }
+@media (prefers-reduced-motion: reduce) { .lookup-live .lookup-step.pending { animation: none; } }
+.lookup-credits { font-size: var(--fs-xs); color: var(--text-dim); }
+
+/* Окно очереди поиска (LookupQueue) */
+.queue-content { max-width: 560px; }
+.queue-head { display: flex; align-items: center; justify-content: space-between; gap: 10px 14px; flex-wrap: wrap; margin-bottom: 8px; }
+.queue-now { margin-bottom: 10px; }
+.queue-game { color: var(--text); font-weight: 600; overflow-wrap: anywhere; }
+.queue-list { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
+.queue-list li { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.queue-list .queue-game { font-weight: 400; }
+
+/* «Найти строки» в переводе: поиск, отметить, перевести заново */
+.tl-lines { display: flex; flex-direction: column; gap: 8px; }
+.tl-lines-search { display: flex; gap: 8px; }
+.tl-lines-search input { flex: 1; min-width: 0; padding: 7px 10px; border-radius: var(--radius-sm); border: 1px solid rgba(201,168,76,0.25); background: rgba(0,0,0,0.3); color: var(--text); font: inherit; }
+.tl-lines-search input:focus { outline: none; border-color: var(--gold); }
+.tl-lines-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.tl-lines-all { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+.tl-lines-item label { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; }
+.tl-lines-item input { margin-top: 3px; }
+
+/* «Проверить в игре» и предупреждение об ошибках после перевода */
+.tl-gamecheck { display: flex; flex-direction: column; gap: 6px; }
+.tl-gamecheck-head { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; }
+.tl-gamecheck-run { display: flex; flex-direction: column; gap: 6px; }
+.tl-gamecheck-steps { list-style: none; margin: 0; padding: 0; display: flex; gap: 6px 12px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-dim); }
+.tl-gamecheck-steps li.ok { color: var(--gold); }
+.tl-gamecheck-steps li.bad { color: #d67860; }
+.tl-gamecheck-frame { width: min(100%, 360px); aspect-ratio: 16 / 10; border: 1px solid rgba(201,168,76,0.25); border-radius: var(--radius-sm); background: #000; pointer-events: none; }
+.tl-warn { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border-radius: var(--radius-sm); border: 1px solid rgba(214,120,96,0.45); background: rgba(214,120,96,0.08); color: var(--text); }
+.tl-warn .meta-status-btn { align-self: flex-start; }
+
+/* «Продолжить с…» под «Играть» (ContinueFrom): в карточке — одна строка; список сейвов и моментов всплывает поверх
+   окна (как меню «⋯»), компактными строками, и окно не раздвигает */
+.continue-from { position: relative; }
+.continue-from-btn { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%; min-height: 36px; padding: 0 12px;
+  border: 1px solid rgba(201,168,76,0.4); border-radius: var(--radius-sm); background: rgba(201,168,76,0.05); color: var(--gold-light);
+  font: inherit; font-weight: 600; font-size: var(--fs-xs); cursor: pointer; transition: border-color 0.2s, background 0.2s; }
+.continue-from-btn:hover, .continue-from-btn:focus-visible, .continue-from.open .continue-from-btn { border-color: var(--gold); background: rgba(201,168,76,0.12); outline: none; }
+.continue-from-count { color: var(--text-dim); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.continue-from-caret { display: inline-block; transition: transform 0.2s; }
+.continue-from.open .continue-from-caret { transform: rotate(180deg); }
+.continue-from-panel { position: fixed; z-index: 2100;
+  display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid rgba(201,168,76,0.35); border-radius: var(--radius-lg);
+  background: var(--bg-mid); box-shadow: 0 18px 44px rgba(0,0,0,0.75); overflow-y: auto; overscroll-behavior: contain; }
+.continue-from-tabs { display: flex; gap: 6px; padding: 2px 2px 6px; position: sticky; top: -8px; background: var(--bg-mid); z-index: 1; }
+.continue-from-tabs .chip { min-height: 28px; padding: 2px 10px; font-size: var(--fs-2xs); }
+.continue-from-empty { font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; padding: 4px 2px; }
+.continue-item { position: relative; display: flex; flex-direction: column; }
+.continue-item-play { display: flex; gap: 10px; align-items: center; width: 100%; padding: 4px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.continue-item-play:hover, .continue-item-play:focus-visible { border-color: rgba(201,168,76,0.55); background: rgba(201,168,76,0.06); outline: none; }
+.continue-item-play img, .continue-item-ph { flex: 0 0 80px; width: 80px; height: 45px; border-radius: 4px; object-fit: cover; background: var(--bg-deep); }
+.continue-item-ph { display: flex; align-items: center; justify-content: center; color: var(--gold-dim); font-size: 1.1rem; }
+.continue-item-text { min-width: 0; display: flex; flex-direction: column; gap: 1px; padding-right: 52px; }
+.continue-item-name { font-size: var(--fs-xs); color: var(--text); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.continue-item-sub { font-size: var(--fs-2xs); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.continue-from-all { align-self: flex-start; margin: 4px 2px 0; padding: 0; border: 0; background: none; color: var(--gold); font: inherit;
+  font-size: var(--fs-2xs); cursor: pointer; display: inline-flex; align-items: center; gap: 6px; }
+.continue-from-all:hover { color: var(--gold-light); text-decoration: underline; }
+.continue-item-input { margin: 2px 0 4px 94px; width: calc(100% - 94px); font: inherit; font-size: var(--fs-xs); padding: 3px 6px; border-radius: var(--radius-sm); border: 1px solid var(--gold); background: var(--bg-deep); color: var(--text); }
+/* Подписать и убрать момент — справа, при наведении (на сенсорном экране — всегда) */
+.continue-item-tools { position: absolute; top: 50%; transform: translateY(-50%); right: 6px; display: flex; gap: 4px; opacity: 0; transition: opacity 0.2s; }
+.continue-item:hover .continue-item-tools, .continue-item:focus-within .continue-item-tools { opacity: 1; }
+@media (hover: none) { .continue-item-tools { opacity: 1; } }
+.continue-item-tools button { width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; border-radius: var(--radius-pill);
+  border: 1px solid rgba(201,168,76,0.35); background: rgba(8,6,8,0.85); color: var(--text); cursor: pointer; }
+.continue-item-tools button svg { width: 12px; height: 12px; }
+.continue-item-tools button:hover { color: var(--gold-light); border-color: var(--gold); }
+.covers-hidden .continue-item-play img { filter: blur(12px) brightness(0.6); }
+
+/* Строка главного под названием: кто, когда, оценка, версия */
+.modal-summary { display: flex; flex-wrap: wrap; gap: 4px 18px; margin: 4px 0 16px; font-size: var(--fs-md); color: var(--text-dim); }
+.modal-summary-dev{ color: var(--text); font-weight: 600; }
+
+/* Вкладки окна игры: золотая черта под выбранной; на узком экране — строка с прокруткой */
+.modal-tabs { display: flex; gap: 4px; margin: 6px 0 18px; border-bottom: 1px solid rgba(232, 223, 200, 0.08); overflow-x: auto; scrollbar-width: none; flex-shrink: 0; }
+.modal-tabs::-webkit-scrollbar { display: none; }
+/* Лента вкладок листается: затухает край, за которым ещё есть вкладки (отметка data-fade — GameModal, как у чипов статусов) */
+.modal-tabs[data-fade~="right"] {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+}
+.modal-tabs[data-fade~="left"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+  mask-image: linear-gradient(to right, transparent, #000 40px);
+}
+.modal-tabs[data-fade~="left"][data-fade~="right"] {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+  mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+}
+.modal-tab { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 6px; padding: 10px 16px; margin-bottom: -1px; border: none; border-bottom: 2px solid transparent;
+  background: none; color: var(--text-dim); font: 600 var(--fs-sm) var(--font-ui); cursor: pointer; }
+.modal-tab:hover { color: var(--text); }
+.modal-tab.active { color: var(--gold); border-bottom-color: var(--gold); }
+.modal-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+.modal-tab-count { padding: 0 6px; border-radius: var(--radius-pill); background: rgba(201, 168, 76, 0.16); color: var(--gold); font-size: var(--fs-2xs); }
+.modal-tab-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--gold); }
+.modal-tab-panel { display: flex; flex-direction: column; flex-shrink: 0; min-height: 120px; }
+
+/* Ряд действий под строкой главного, как в RomM: «Играть» — залитая первой, дальше — «Продолжить с…», галерея,
+   правка, «⋯». На телефоне «Играть» — на всю ширину */
+.modal-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 4px 0 20px; flex-shrink: 0; }
+.modal-actions .continue-from { min-width: 220px; }
+.modal-actions .continue-from-btn { min-height: 48px; }
+.modal-actions .grimoire-action-btn { flex: 0 0 auto; min-height: 48px; }
+/* Остальные действия — тихой заливкой без рамки: «Играть» — единственное золотое */
+.modal-actions .grimoire-action-btn, .modal-actions .continue-from-btn { border-color: transparent; background: rgba(232, 223, 200, 0.06); color: var(--text); }
+.modal-actions .grimoire-action-btn svg { color: var(--text-dim); }
+.modal-actions .grimoire-action-btn:hover, .modal-actions .continue-from-btn:hover, .modal-actions .continue-from-btn:focus-visible,
+.modal-actions .continue-from.open .continue-from-btn, .modal-actions .modal-more-btn.open {
+  border-color: transparent; background: rgba(232, 223, 200, 0.1); color: var(--gold-light); text-shadow: none; box-shadow: none; }
+
+/* Подзаголовки вкладок («Теги», «Кадры») — обычными буквами: мелкий капс над каждым блоком шумел */
+.modal-section-label { margin: 28px 0 12px; font: 400 24px/1.1 var(--font-head); color: var(--text); }
+.modal-tab-panel > .modal-section-label:first-child { margin-top: 4px; }
+
+/* Колонка под обложкой: «Моя игра» и источники — заголовок, под ним строки; блоки разделены чертой */
+.modal-side-title { margin: 0 0 10px; font: 400 24px/1.1 var(--font-head); color: var(--text); }
+.modal-mine, .modal-src { padding-top: 22px; border-top: 1px solid rgba(232, 223, 200, 0.08); }
+
+/* Своё — подпись над значением; статус — два на два: в узкой колонке четыре в ряд не помещаются */
+.modal-facts { display: flex; flex-direction: column; }
+.modal-fact { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 6px 0; font-size: var(--fs-md); }
+.modal-fact-label { font-size: var(--fs-sm); color: var(--text-dim); }
+.modal-fact-value { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; color: var(--text); min-width: 0; }
+.modal-side .status-row { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+.modal-side .status-row .chip:nth-child(3) { border-left: none; }
+.modal-side .status-row .chip:nth-child(n+3) { border-top: 1px solid rgba(232, 223, 200, 0.12); }
+
+/* Источники — строкой: значок, сайт, справа — что дал (не влезло — многоточие, целиком — в подсказке) */
+.src-row { display: flex; align-items: center; gap: 10px; min-height: 36px; border-top: 1px solid rgba(232, 223, 200, 0.06); color: var(--text);
+  font-size: var(--fs-sm); text-decoration: none; }
+.modal-side-title + .src-row { border-top: none; }
+.src-row:hover, .src-row:focus-visible { color: var(--gold-light); }
+.src-row:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 2px; }
+.src-row-name { flex-shrink: 0; }
+.src-row-info { margin-left: auto; min-width: 0; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.src-off { margin: 8px 0 0; font-size: var(--fs-xs); color: var(--text-dim); }
+
+/* «Сведения»: поля сеткой «подпись над значением», как «Dateiinfo» в RomM */
+.info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 18px 28px; }
+.info-grid .meta-item { display: flex; flex-direction: column; align-items: flex-start; gap: 4px; min-width: 0; }
+.info-grid .meta-label { font-size: var(--fs-sm); color: var(--text-dim); }
+.info-grid .meta-value { font-size: var(--fs-md); color: var(--text); overflow-wrap: anywhere; }
+
+/* Одна колонка (планшет, телефон): своё — сразу после действий и уведомлений, перед вкладками; источники — в самом
+   низу. Подпись — слева, значение — справа: так своё вдвое ниже; статус — снова четыре в ряд */
+@media (max-width: 1000px) {
+  .modal-mine { order: 5; margin-bottom: 18px; }
+  .modal-info > .modal-tabs, .modal-info > .modal-tab-panel { order: 6; }
+  .modal-src { order: 7; margin-top: 24px; }
+  .modal-fact { grid-template-columns: 150px minmax(0, 1fr); align-items: center; gap: 12px; }
+  .modal-side .status-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .modal-side .status-row .chip:nth-child(3) { border-left: 1px solid rgba(232, 223, 200, 0.12); }
+  .modal-side .status-row .chip:nth-child(n+3) { border-top: none; }
+  .modal-fact.modal-fact-status { grid-template-columns: minmax(0, 1fr); gap: 6px; }
+}
+
+@media (max-width: 700px) {
+  .modal-actions .continue-from { flex: 1 1 100%; }
+  .info-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+}
+
+/* Языки игры: тихая строка под «главным», чипами */
+.modal-ids { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: -8px 0 14px; font-size: var(--fs-sm); }
+.modal-lang {
+  display: inline-flex; align-items: center; min-height: 28px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid rgba(232, 223, 200, 0.12); color: var(--text-dim); font-variant-numeric: tabular-nums; letter-spacing: 0.04em;
+}
+.modal-lang.main { color: var(--text); font-weight: 600; }
+/* Перевод: золотая рамка; у перевода Mimikin ещё и пиксельный мимик — без точек и приписок в тексте */
+.modal-lang.tl { color: var(--gold-light); border-color: rgba(201, 168, 76, 0.4); }
+.modal-lang .brand-mark { width: 16px; height: 16px; margin-right: 6px; color: var(--gold); flex-shrink: 0; }
+@media (pointer: coarse) { .modal-lang{ min-height: 32px; } }

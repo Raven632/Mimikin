@@ -1,0 +1,54 @@
+# Автотесты интерфейса (запуск — run.sh). Свой сервер с демо-библиотекой и свой Playwright в отдельной
+# сети без выхода в интернет и без портов наружу: ни dev-библиотека, ни прод в тестах не участвуют
+name: showcase-e2e
+
+services:
+  # Не «app»: зона .app целиком в списке HSTS у Chrome, и он открывал бы http://app по HTTPS
+  mimikin:
+    # Тот же образ, что уходит на прод, собранный из рабочей копии
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: showcase-e2e-app
+    environment:
+      - GAMES_DIR=/games
+      - NODE_ENV=production
+      - OFFLINE=1
+      # Тесты ходят быстрее человека: обычных 200 запросов в минуту им мало
+      - API_RATE_LIMIT=5000
+      - REDIS_URL=memory
+      # Игры открываются на том же имени хоста, порт 3001 — внутри сети compose
+      - GAME_PORT=3001
+    volumes:
+      - games:/games
+    networks: [e2e]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/setup/status').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  runner:
+    build: .
+    image: showcase-e2e-runner
+    working_dir: /runner
+    # Chromium держит страницы в /dev/shm, а у Docker там по умолчанию 64 МБ
+    shm_size: "1gb"
+    init: true
+    environment:
+      - E2E_URL=http://mimikin:3000
+      - CI=${CI:-}
+      - VISUAL=${VISUAL:-}
+    volumes:
+      - .:/runner/e2e
+    networks: [e2e]
+    depends_on:
+      mimikin:
+        condition: service_healthy
+
+volumes:
+  games:
+
+networks:
+  e2e:
+    internal: true

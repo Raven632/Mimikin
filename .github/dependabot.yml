@@ -1,0 +1,39 @@
+# Dependabot раз в неделю проверяет зависимости и присылает pull request с обновлениями.
+# CI (ci.yml) гоняет на каждом таком PR тесты и сборку: сливать можно только зелёные.
+# Мелкие обновления (minor и patch) собраны в один PR на каждую часть, чтобы не было по PR на пакет
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /api
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      api-minor-patch:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      frontend-minor-patch:
+        update-types: [minor, patch]
+    open-pull-requests-limit: 5
+
+  # Базовые образы node в Dockerfile. Переход на новую мажорную версию Node — вручную, вместе с CI
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    ignore:
+      - dependency-name: node
+        update-types: [version-update:semver-major]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

@@ -1,0 +1,72 @@
+/* История сейвов (SaveHistory) */
+
+.save-history { display: flex; flex-direction: column; gap: 18px; padding-right: 40px; }
+
+.save-history-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+
+.save-history-head h2 { margin: 0; }
+
+.save-history-head .cancel-btn { flex: 0 0 auto; padding: 8px 16px; }
+
+.save-history-hint { margin: 0; font-size: var(--fs-sm); color: var(--text-dim); }
+
+.save-slot { display: flex; flex-direction: column; gap: 6px; }
+
+.save-slot h3 {
+  margin: 0 0 4px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(201,168,76,0.15);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--gold);
+}
+
+.save-version {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid rgba(201,168,76,0.12);
+  border-radius: var(--radius-sm);
+}
+
+.save-version.current { border-color: rgba(201,168,76,0.35); background: rgba(201,168,76,0.05); }
+
+.save-version-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+.save-version-when { color: var(--text); font-size: var(--fs-md); }
+
+.save-version.current .save-version-when { color: var(--gold-light); }
+
+.save-version-info { color: var(--text-dim); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+
+.save-version-reason { color: var(--gold-muted); font-size: var(--fs-sm); }
+
+.save-version-none { margin: 0; padding: 4px 12px; font-size: var(--fs-sm); color: var(--text-dim); }
+
+.save-version-btn {
+  flex-shrink: 0;
+  padding: 6px 12px;
+  cursor: pointer;
+  background: transparent;
+  border: 1px solid var(--gold-dim);
+  border-radius: var(--radius-sm);
+  color: var(--gold-light);
+  font-size: var(--fs-sm);
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.save-version-btn:disabled { opacity: 0.5; cursor: default; }
+
+@media (hover: hover) {
+  .save-version-btn:not(:disabled):hover { background: var(--gold); color: var(--bg-deep); }
+}
+
+.save-version-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+@media (max-width: 700px) {
+  .save-history { padding-right: 0; }
+}

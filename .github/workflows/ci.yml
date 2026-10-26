@@ -1,0 +1,152 @@
+name: Node.js CI
+
+on:
+  push:
+    branches: [ "main" ] # Запускает пайплайн при прямом пуше
+  pull_request:
+    branches: [ "main" ] # Проверяет код ДО слияния чужих веток
+
+jobs:
+  build-and-test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Настройка Node.js 24
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+
+    - name: Установка пакетов (Strict Mode)
+      working-directory: ./api
+      # CUDA для onnxruntime-node (≈300 МБ) тестам не нужна — распознавание в них подменяется
+      env:
+        ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      run: npm ci
+
+    # ffmpeg и ffprobe — как в образе (Dockerfile): тесты галереи режут им настоящие ролики и анимации
+    - name: Установка ffmpeg
+      run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+    - name: Запуск тестов
+      working-directory: ./api
+      env:
+        REDIS_URL: redis://localhost:6379
+      run: npm test
+      
+  # Служба распознавания текста на картинках (ocr/): разбор картинки на синтетических «надписях», без моделей
+  ocr-tests:
+    name: OCR service tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Настройка Python 3.12
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Установка пакетов (те же версии, что в образе службы)
+      run: pip install numpy==2.5.3 pillow==12.3.0 opencv-python-headless==5.0.0.93
+
+    - name: Запуск тестов
+      working-directory: ./ocr
+      run: python -m unittest -v test_pipeline
+
+  build-frontend:
+    name: Build frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Настройка Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Установка пакетов (Strict Mode)
+      working-directory: ./frontend
+      run: npm ci
+
+    # Линтер — до сборки: замечаний ноль, и новые не копятся (правила React — те же, что в редакторе)
+    - name: Линтер
+      working-directory: ./frontend
+      run: npm run lint
+
+    - name: Сборка фронтенда
+      working-directory: ./frontend
+      run: npm run build
+
+  # Автотесты интерфейса: образ библиотеки из этого коммита, демо-библиотека из выдуманных игр и
+  # Playwright — всё в контейнерах, в сети без интернета (tests/e2e/run.sh). Упали — отчёт с трассами
+  # и журнал сервера лежат в артефакте e2e-report
+  e2e:
+    name: UI tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Автотесты интерфейса
+      run: tests/e2e/run.sh
+      env:
+        CI: 'true'
+
+    - name: Отчёт Playwright
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-report
+        path: tests/e2e/report
+        retention-days: 7
+
+  # Тесты и сборка прошли — ветка deploy переезжает на этот коммит. Сервер забирает именно её
+  # (deploy/pull-deploy.sh): так ему не нужно спрашивать у API GitHub, зелёный ли CI, — у приватного
+  # репозитория этот вопрос без токена не задать. Более старый коммит, чей CI закончился позже,
+  # ветку назад не двигает
+  mark-deployable:
+    name: Mark for deploy
+    needs: [ build-and-test, ocr-tests, build-frontend, e2e ]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Ветка deploy — на этот коммит
+      run: |
+        git fetch origin deploy || true
+        if git rev-parse -q --verify origin/deploy >/dev/null && git merge-base --is-ancestor HEAD origin/deploy; then
+          echo "deploy уже на этом коммите или новее"
+        else
+          git push origin HEAD:refs/heads/deploy
+        fi

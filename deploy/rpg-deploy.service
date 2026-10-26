@@ -1,0 +1,12 @@
+[Unit]
+Description=RPG Library: pull-деплой из GitHub
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+# git и docker ищут настройки в ~ (~/.gitconfig, ~/.docker), а у системных сервисов $HOME пустой
+Environment=HOME=/root
+ExecStart=/opt/mimikin/deploy/pull-deploy.sh
+# У oneshot таймаута по умолчанию нет: зависшая сборка висела бы вечно
+TimeoutStartSec=30min

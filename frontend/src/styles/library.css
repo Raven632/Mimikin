@@ -1,0 +1,979 @@
+/* Библиотека: строка статусов, «Продолжить», полки, карточки игр, пустые экраны (App, GameCard, Shelves, ContinueCard, Welcome) */
+
+/* Строка под панелью: чипы статусов слева, «Продолжить» справа */
+.library-bar {
+  position: relative;
+  z-index: 1;
+  max-width: var(--content-width);
+  margin: 0 auto 22px;
+  padding: 0 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 20px;
+  flex-wrap: wrap;
+}
+
+/* Чипы статусов — «таблетки» в строку */
+.filter-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* Ошибка загрузки списка игр (StateView) — на всю ширину сетки, а не в одной ячейке */
+.library > .state { grid-column: 1 / -1; }
+
+/* Одна карточка игры — и на полках, и в «Вся библиотека» (как в Steam, Jellyfin, RomM): обложка во
+   всю яркость, под ней название и одна строка сведений. Раньше в сетке была своя карточка —
+   300px высотой, 4 в ряд, обложка наполовину под тёмной вуалью и название поверх капсом */
+.library {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  max-width: var(--content-width);
+  margin: 0 auto;
+  padding: 0 20px 80px;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 24px 16px;
+}
+
+/* Пока библиотека грузится: мимик (MimicLoader) по центру места под сетку, вместо пустых «томов» */
+.library-wait { grid-column: 1 / -1; display: flex; justify-content: center; padding-top: 120px; }
+
+.game-card:focus-visible { outline-offset: 3px; outline: none; }
+
+/* Карточка: сведения прижаты к низу — под коротким названием больше нет пустых двух строк,
+   а ряды по-прежнему ровные (высоту выравнивает сетка) */
+.game-card {
+  position: relative;
+  cursor: pointer;
+  text-decoration: none;
+  color: inherit;
+  display: flex;
+  flex-direction: column;
+  background: none;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
+  box-shadow: none;
+  transition: none;
+}
+
+.card-cover {
+  width: 100%;
+  overflow: hidden;
+  position: relative;
+  background: #0f0d15;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(201,168,76,0.15);
+  transition: border-color 0.2s, transform 0.2s, box-shadow 0.2s;
+}
+
+.card-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  /* Подгрузилась — проявляется (GameCard ставит .loaded), а не вспыхивает целиком */
+  opacity: 0;
+  filter: none;
+  transition: transform 0.4s ease, opacity 0.3s ease;
+}
+
+.card-cover img.loaded { opacity: 1; }
+
+.card-rating {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 10;
+  display: flex;
+  gap: 2px;
+  background: rgba(0,0,0,0.6);
+  padding: 4px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid rgba(201,168,76,0.2);
+  backdrop-filter: blur(4px);
+  opacity: 0;
+  transition: opacity 0.3s;
+}
+
+.game-card:hover .card-rating, .card-rating.has-rating { opacity: 1; }
+
+@media (hover: none) {
+  /* На сенсорных экранах наведения нет — без этого оценку вообще не поставить */
+  /* На сенсорном экране звёзды и «Избранное» на карточке — только показ: ставят их
+     в окне игры, где цели под палец. Пустые звёзды на каждой карточке — шум */
+  .card-rating { opacity: 1; background: rgba(0, 0, 0, 0.45); pointer-events: none; }
+  .card-rating:not(.has-rating) { display: none; }
+}
+
+.card-rating .star { color: rgba(255,255,255,0.2); font-size: 16px; cursor: pointer; transition: 0.2s; line-height: 1; }
+
+.card-rating .star.active { color: var(--gold); }
+
+.cover-placeholder {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #0f0d15;
+  gap: 8px;
+}
+
+.cover-placeholder .rune {
+  font-family: var(--font-ui);
+  font-size: 2.5rem;
+  color: var(--gold-dim);
+  opacity: 0.5;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.cover-placeholder .folder-name {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--gold-muted);
+  letter-spacing: 0;
+  transition: color 0.4s;
+  text-align: center;
+  padding: 0 12px;
+}
+
+.game-card:hover .cover-placeholder .rune { opacity: 1; color: var(--gold); }
+
+.game-card:hover .cover-placeholder .folder-name { color: var(--gold-light); }
+
+/* Язык игры в нижнем углу обложки — одним словом, в духе значков статуса */
+.card-lang {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  z-index: 2;
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  padding: 3px 8px;
+  border-radius: var(--radius-pill);
+  border: 1px solid currentColor;
+  background: rgba(19, 17, 26, 0.75);
+  color: var(--gold);
+}
+
+/* Статус — точка и слово обычными буквами, без рамки и капса (как .tl-alert) */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--fs-2xs);
+  letter-spacing: 0;
+}
+
+.status-badge::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.status-badge.playing { color: #7fc7a5; }
+
+.status-badge.done { color: var(--gold); }
+
+.status-badge.dropped { color: #b06a6a; }
+
+.status-badge.wish { color: #8f9ec7; }
+
+.card-playtime { white-space: nowrap; }
+
+.card-info { position: relative; z-index: 1; flex: 1; display: flex; flex-direction: column; padding: 10px 2px 0; }
+
+/* Версия, статус и время в игре. Высота постоянная, даже когда сведений нет:
+   иначе карточки одного ряда выходили бы разной высоты */
+.card-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  padding-top: 4px;
+  margin-top: 0;
+  min-height: 0;
+  gap: 4px 8px;
+}
+
+.card-version { font-family: var(--font-ui); }
+
+.card-pending { font-size: var(--fs-xs); line-height: 1; }
+
+.card-title {
+  font-family: var(--font-ui);
+  color: var(--text);
+  transition: color 0.3s;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.35;
+  min-height: 0;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.library-info {
+  position: relative;
+  z-index: 1;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  letter-spacing: 0;
+  padding-bottom: 20px;
+}
+
+/* Класс висит на корневом контейнере, поэтому одно правило накрывает
+   и карточки, и модальное окно. Наведение блюр не снимает. */
+.covers-hidden .card-cover img,
+.covers-hidden .game-card:hover .card-cover img,
+.covers-hidden .continue-cover img {
+  filter: blur(18px) brightness(0.55) saturate(0.7);
+  /* размытие «съедает» края — увеличиваем, чтобы не было прозрачной кромки */
+  transform: scale(1.1);
+}
+
+.scrape-progress {
+  display: block;
+  margin: 8px auto 0;
+  padding: 2px 8px;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--gold-muted);
+}
+/* Полоса открывает окно очереди поиска */
+.scrape-progress:hover, .scrape-progress:focus-visible { color: var(--gold); text-decoration: underline; }
+
+/* «Продолжить»: последняя запущенная игра — полосой в строке с чипами */
+.continue-strip {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 1 560px;
+  min-width: min(360px, 100%);
+  padding: 8px;
+  background: var(--surface-plate);
+  border-radius: var(--radius-lg);
+}
+
+.continue-cover {
+  width: 104px;
+  flex-shrink: 0;
+  aspect-ratio: 16/10;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: #0f0d15;
+}
+
+.continue-cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+.continue-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+
+.continue-title {
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.continue-meta {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.continue-btn {
+  flex-shrink: 0;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.continue-btn .glyph { font-size: 14px; }
+
+@media (hover: hover) {
+  .continue-btn:hover { background: var(--gold-light); }
+}
+
+.continue-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.continue-btn:active { background: var(--gold-light); transition: none; }
+
+/* «Играть» поверх обложки при наведении */
+.card-play {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 3;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  background: var(--gold);
+  color: var(--bg-deep);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.6);
+  opacity: 0;
+  transform: translate(-50%, -50%) scale(0.85);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  width: 52px;
+  height: 52px;
+}
+
+.card-play svg { width: 26px; height: 26px; fill: currentColor; margin-left: 3px; }
+
+.game-card:hover .card-play { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+.card-play:hover { background: var(--gold-light); }
+.card-play:active { background: var(--gold-light); }
+
+@media (hover: none) {
+  .card-play { display: none; }
+}
+
+/* Главная: «Продолжить» — крупно, во всю ширину колонки: первое, что видно */
+.home-continue { position: relative; z-index: 1; margin-bottom: 28px; }
+
+.home-continue .continue-strip { width: 100%; padding: 12px; gap: 20px; }
+
+.home-continue .continue-cover { width: 236px; }
+
+.home-continue .continue-title { font-size: var(--fs-lg); }
+
+.home-continue .continue-btn { min-height: var(--btn-h-lg); padding: 0 24px; }
+
+/* Полки главной (Shelves): лента карточек вбок, стрелки — на компьютере */
+.shelves { position: relative; z-index: 1; display: flex; flex-direction: column; gap: 26px; margin: 4px auto 36px; }
+
+.shelf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+
+/* Справа в шапке полки — стрелки (когда лента не помещается) и «Все» */
+.shelf-tools { display: flex; align-items: center; gap: 10px; }
+
+.shelf-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 32px;
+  padding: 0 14px;
+  background: var(--surface-btn);
+  border: 1px solid transparent;
+  border-radius: var(--radius-pill);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  white-space: nowrap;
+  color: var(--text);
+  transition: color 0.2s, background 0.2s;
+}
+
+.shelf-all svg { width: 16px; height: 16px; }
+
+@media (hover: hover) {
+  .shelf-all:hover { color: var(--gold-light); background: var(--surface-btn-hover); }
+}
+
+.shelf-all:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+@media (pointer: coarse) {
+  .shelf-all { min-height: 44px; }
+}
+
+/* «Во что поиграть?» у полки «Ещё не начаты» — та же тихая кнопка, что «Все», со значком кубика;
+   на телефоне — строкой под названием, вровень с ним */
+.shelf-random, .shelf-random-line { gap: 6px; padding-right: 10px; }
+
+.shelf-random-line { margin-left: -10px; }
+
+.hot-title-row { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; min-width: 0; }
+
+.shelf-tabs{ display: flex; gap: 6px; }
+
+.shelf-tabs .chip{ padding: 5px 12px; }
+
+/* Вкладка «Ваших игр»: значок, подпись, число */
+.shelf-tab { display: inline-flex; align-items: center; gap: 6px; }
+
+.shelf-tab svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+.shelf-tab .chip-count { margin-left: 2px; }
+
+.hot-hint { margin: -4px 0 12px; font-size: var(--fs-sm); color: var(--text-dim); }
+
+.shelf-title {
+  margin: 0;
+  /* Tiny5 — только 24px и только обычным начертанием: жирный браузер дорисовал бы сам */
+  font-family: var(--font-head);
+  font-size: 24px;
+  font-weight: 400;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: var(--gold-light);
+}
+
+.shelf-arrows { display: flex; gap: 6px; }
+
+.shelf-arrow {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid transparent;
+  background: var(--surface-btn);
+  color: var(--gold-light);
+  font-size: var(--fs-lg);
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (hover: hover) {
+  .shelf-arrow:hover { border-color: var(--gold); background: rgba(201,168,76,0.12); }
+}
+
+@media (hover: none) {
+  .shelf-arrows { display: none; }
+}
+
+/* Полка — та же карточка */
+.shelf-row {
+  display: grid;
+  grid-auto-flow: column;
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+  grid-auto-columns: 200px;
+  gap: 16px;
+}
+
+/* На компьютере шесть карточек — ровно в ширину колонки, как сетка библиотеки */
+@media (min-width: 1200px) {
+  .shelf-row { grid-auto-columns: calc((100% - 5 * 16px) / 6); }
+}
+
+.shelf-row::-webkit-scrollbar { display: none; }
+
+.shelf-card { scroll-snap-align: start; cursor: pointer; min-width: 0; outline: none; }
+
+/* Игра только что легла на полку (Shelves.jsx, событие rpg-landed). Первые 200 мс соседи сдвигаются, а новая
+   обложка ещё невидима; потом рамка тремя кадрами: белое 80 мс, светлое золото 160, золото 240 — и пропадает
+   (всего 480 мс). Ступени (step-end), без плавного хвоста: он читался бы как свечение. Рамка внутри обложки,
+   не снаружи: у ленты overflow, снаружи её срезало бы */
+.shelf-card.landed { animation: shelf-landed-hold 0.2s step-end; }
+@keyframes shelf-landed-hold { from, to { opacity: 0; } }
+.shelf-card.landed .shelf-cover::after {
+  content: ''; position: absolute; inset: 0; z-index: 2; box-sizing: border-box; border: 2px solid var(--flash);
+  border-radius: inherit; opacity: 0; pointer-events: none;
+  animation: shelf-landed-frame 0.48s step-end 0.2s forwards;
+}
+@keyframes shelf-landed-frame {
+  0% { opacity: 1; border-color: var(--flash); }
+  16.667% { border-color: var(--gold-light); }
+  50% { border-color: var(--gold); }
+  100% { opacity: 0; border-color: var(--gold); }
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Без сдвига: обложка на месте сразу, рамка стоит золотая 600 мс */
+  .shelf-card.landed { animation: none; }
+  .shelf-card.landed .shelf-cover::after { border-color: var(--gold); opacity: 1; animation: shelf-landed-still 0.6s step-end forwards; }
+  @keyframes shelf-landed-still { from { opacity: 1; } to { opacity: 0; } }
+}
+
+.shelf-cover {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  /* Пока обложка грузится — ровная заготовка без мерцания */
+  background: #0f0d15;
+  border: 1px solid rgba(201,168,76,0.15);
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.shelf-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+  filter: none;
+}
+
+.shelf-cover img.loaded { opacity: 1; }
+
+/* Широкий баннер — целиком, поверх своей же размытой копии (coverUrl.js, fitWide). Копия — под картинкой (z-index −1
+   внутри плитки), значки «в библиотеке» и звёздочка остаются сверху */
+.shelf-cover img.wide, .catalog-cover img.wide { object-fit: contain; }
+.shelf-cover:has(img.wide), .catalog-cover:has(img.wide) { isolation: isolate; }
+.shelf-cover:has(img.wide)::before, .catalog-cover:has(img.wide)::before {
+  content: ''; position: absolute; inset: 0; z-index: -1; background: var(--cover) center / cover; filter: blur(14px) brightness(0.55); transform: scale(1.15);
+}
+/* Обложки скрыты — копии нет: размыта она слабее, чем сама картинка в этом режиме */
+.covers-hidden .shelf-cover:has(img.wide)::before, .covers-hidden .catalog-cover:has(img.wide)::before { content: none; }
+
+.shelf-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--font-ui);
+  color: var(--gold-dim);
+}
+
+.shelf-card:hover .shelf-cover, .shelf-card:focus-visible .shelf-cover { border-color: var(--gold); }
+
+.shelf-card:focus-visible .shelf-cover {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.shelf-card:hover .card-play { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+
+.shelf-name {
+  font-size: var(--fs-sm);
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 10px;
+  font-weight: 500;
+}
+
+.shelf-note {
+  font-size: var(--fs-2xs);
+  color: var(--text-dim);
+  /* До двух строк: с воздухом вместо черты и словом «Версия» части в одну не помещаются */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  margin-top: 2px;
+}
+
+.covers-hidden .shelf-cover img { filter: blur(14px) brightness(0.5); }
+
+/* Главная: «Продолжить» и полки — в той же колонке, что и сетка */
+.shelves, .home-continue {
+  max-width: var(--content-width);
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: 20px;
+  padding-right: 20px;
+}
+
+.welcome { grid-column: 1 / -1; margin: 0 0 32px; }
+
+.welcome-title { margin-bottom: 10px; }
+
+/* Те же шесть мест, что у полки: первое — под архив, остальные едва видны */
+.welcome-row { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 16px; }
+
+.welcome-drop, .welcome-ghost { aspect-ratio: 16 / 10; box-sizing: border-box; border-radius: var(--radius-sm); }
+
+.welcome-ghost { border: 1px solid rgba(201,168,76,0.07); background: rgba(255,255,255,0.01); }
+
+.welcome-drop { position: relative; }
+
+/* Рамка из квадратиков по 4 px, как пиксели знака: четыре полосы-градиента по краям */
+.welcome-drop {
+  --dot: rgba(201,168,76,0.7);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 8px;
+  border: 0;
+  font: inherit;
+  text-align: center;
+  color: var(--gold-light);
+  background:
+    linear-gradient(90deg, var(--dot) 50%, transparent 0) top / 8px 4px repeat-x,
+    linear-gradient(90deg, var(--dot) 50%, transparent 0) bottom / 8px 4px repeat-x,
+    linear-gradient(0deg, var(--dot) 50%, transparent 0) left / 4px 8px repeat-y,
+    linear-gradient(0deg, var(--dot) 50%, transparent 0) right / 4px 8px repeat-y;
+}
+
+button.welcome-drop { cursor: pointer; transition: background-color 0.2s; }
+
+/* Мимик выглядывает из плитки (Welcome.jsx). Окно обрезки стоит низом на внешнем краю плитки, двигается только
+   transform самого рисунка (кадры по 80 мс задаёт скрипт, не плавность). Правая сторона — чтобы не лезть на подпись */
+.welcome-peek { position: absolute; right: 12px; bottom: 0; overflow: hidden; pointer-events: none; }
+.welcome-peek svg { display: block; width: 100%; height: 100%; color: var(--gold-dim); }
+button.welcome-drop:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+@media (hover: hover) { button.welcome-drop:hover { background-color: rgba(201,168,76,0.06); } }
+
+/* Значок загрузки 20 px; мимик в плитке (.welcome-peek) не он: его клетка должна остаться целой, 32 точки */
+.welcome-drop svg { width: 20px; height: 20px; }
+.welcome-drop .welcome-peek svg { width: 100%; height: 100%; }
+.welcome-drop-title { font-size: var(--fs-sm); font-weight: 600; }
+.welcome-drop-hint { font-size: var(--fs-xs); color: var(--text-dim); }
+
+.welcome-note { margin: 12px 0 0; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.5; }
+
+@media (max-width: 560px) {
+  /* Телефон: два места, как две колонки библиотеки */
+  .welcome-row { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .welcome-ghost:nth-child(n+3) { display: none; }
+}
+
+.game-card:hover { transform: none; box-shadow: none; border: none; }
+
+.game-card:hover .card-cover img { filter: none; }
+
+.game-card:hover .card-cover, .game-card:focus-visible .card-cover {
+  border-color: var(--gold);
+}
+
+.game-card:focus-visible .card-cover { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.game-card:hover .card-title { color: var(--gold-light); }
+
+.card-version, .card-playtime { font-size: var(--fs-2xs); letter-spacing: 0; color: var(--text-dim); }
+
+.shelf-card:hover .shelf-name { color: var(--gold-light); }
+
+.shelf-arrow svg { width: 16px; height: 16px; }
+
+.card-rating .star .glyph { vertical-align: -0.1em; }
+
+.card-playtime .glyph { vertical-align: -0.15em; }
+
+@media (max-width: 1200px) {
+  /* Ноутбук: «Продолжить» и так уходит под статусы — пусть тянется на всю строку, а не на половину */
+  .continue-strip { flex: 1 1 100%; }
+}
+
+@media (max-width: 1000px) {
+  /* Лента статусов листается: затухает тот край, за которым ещё есть чипы (StatusChips) */
+  .status-chips[data-fade~="right"] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  }
+  .status-chips[data-fade~="left"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+    mask-image: linear-gradient(to right, transparent, #000 40px);
+  }
+  .status-chips[data-fade~="left"][data-fade~="right"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+  }
+}
+
+@media (max-width: 700px) {
+  /* Чипы одной лентой с прокруткой, а не двумя рядами: на телефоне каждый ряд
+     отодвигает первую игру ещё на 40px */
+  .library-bar { margin-bottom: 18px; }
+  .filter-chips { flex: 1 1 100%; }
+}
+
+@media (max-width: 1000px) {
+  /* Планшет: статусы — лентой с прокруткой, как на телефоне, «Продолжить» — на всю ширину */
+  .status-chips { flex: 1 1 100%; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips { flex-wrap: nowrap; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips { flex-wrap: nowrap; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips { overflow-x: auto; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips { overflow-x: auto; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips { scrollbar-width: none; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips { scrollbar-width: none; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips { -webkit-overflow-scrolling: touch; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips { -webkit-overflow-scrolling: touch; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips::-webkit-scrollbar { display: none; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips::-webkit-scrollbar { display: none; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips .chip { flex-shrink: 0; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips .chip { flex-shrink: 0; }
+}
+
+@media (max-width: 700px) {
+  .filter-chips .chip { white-space: nowrap; }
+}
+
+@media (max-width: 1000px) {
+  .status-chips .chip { white-space: nowrap; }
+}
+
+@media (max-width: 700px) {
+  .continue-cover { width: 88px; }
+  .home-continue { margin-bottom: 22px; }
+  .home-continue .continue-strip { padding: 10px; gap: 14px; }
+  .home-continue .continue-cover { width: 120px; margin: -10px 0 -10px -10px; }
+  .home-continue .continue-title { font-size: var(--fs-md); }
+  /* Кнопка — значком: подпись съедала половину названия */
+  .continue-btn, .home-continue .continue-btn { width: 48px; padding: 0; }
+  .continue-btn .continue-btn-text { display: none; }
+  .continue-btn .glyph { font-size: 18px; }
+  /* «Наиграно» и «когда» — каждое своей строкой: в одну на телефоне не помещаются */
+  .continue-meta { white-space: normal; }
+  .continue-meta .meta-part { display: block; margin: 0; }
+  /* Место и уровень — до двух строк: в одну «Rooftop Kitchen» и уровень не помещались, уровень прятался в «…» */
+  .continue-info .continue-where > span { white-space: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+  .continue-meta-part { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Телефон: мелкие подписи — не меньше 11px; ссылка на галерею — цель под палец */
+  .card-lang{ font-size: 11px; }
+  .card-rating .star { font-size: 12px; }
+  .shelves { gap: 18px; margin-bottom: 22px; }
+  .shelf-row { grid-auto-columns: 156px; gap: 12px; }
+}
+
+@media (max-width: 560px) {
+  /* Телефон: две колонки. В одну на экран помещалось полторы игры, и библиотеку
+     из восьмидесяти приходилось листать полсотни экранов */
+  .library { padding-bottom: 60px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px 12px; }
+  .card-lang { right: 6px; bottom: 6px; padding: 2px 6px; letter-spacing: 0.04em; }
+  .card-rating { top: 6px; left: 6px; }
+  .card-info { padding: 8px 2px 0; }
+  .card-title { font-size: var(--fs-sm); }
+}
+
+/* Телефон: в шапке полки — название и «Все» в одну строку; переключатель подборок («Ваши игры»,
+   «Новинки») — под ними во всю ширину, лентой с прокруткой; «Во что поиграть?» — своей строкой ниже */
+.shelf-sub { display: none; }
+
+@media (max-width: 560px) {
+  .shelf-head .shelf-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  .shelf-head .shelf-tools { flex-shrink: 0; }
+  .shelf-tools .shelf-random { display: none; }
+  .shelf-sub { display: flex; margin: -10px 0 2px; }
+}
+
+/* Шапка полок главной — раскладка по месту, а не по ширине экрана (shelfHead.js, data-layout): подписи
+   разной длины на разных языках, числа на вкладках растут. row — всё в строку; stacked — переключатель
+   своей строкой под названием; compact — у невыбранных вкладок только значок и число. Подписи вкладок не
+   переносятся никогда; не влезло и так — лента листается, у края с продолжением — затухание */
+.shelf-head[data-layout] .hot-title-row { flex-wrap: nowrap; }
+.shelf-head[data-layout] .shelf-tools { flex-shrink: 0; }
+.shelf-head[data-layout] .shelf-tabs{ flex-wrap: nowrap; min-width: 0; overflow-x: auto; scrollbar-width: none; padding-block: 3px; margin-block: -3px; }
+.shelf-head[data-layout] .shelf-tabs::-webkit-scrollbar{ display: none; }
+.shelf-head[data-layout] .chip { flex-shrink: 0; white-space: nowrap; }
+.shelf-head[data-layout="stacked"],
+.shelf-head[data-layout="compact"] { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: 12px; row-gap: 8px; }
+.shelf-head[data-layout="stacked"] .hot-title-row,
+.shelf-head[data-layout="compact"] .hot-title-row { display: contents; }
+.shelf-head[data-layout="stacked"] .shelf-title,
+.shelf-head[data-layout="compact"] .shelf-title { grid-row: 1; grid-column: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.shelf-head[data-layout="stacked"] .shelf-tools,
+.shelf-head[data-layout="compact"] .shelf-tools { grid-row: 1; grid-column: 2; }
+.shelf-head[data-layout="compact"] .shelf-tab:not(.active) .shelf-tab-label { display: none; }
+.shelf-head[data-layout="compact"] .shelf-tabs .shelf-tab:not(.active) { gap: 4px; padding: 5px 10px; }
+.shelf-head[data-layout="compact"] .shelf-tab:not(.active) .chip-count { margin-left: 0; }
+
+/* Число игр на чипе статуса — тусклее подписи; статус без игр — приглушён целиком */
+.chip-count { margin-left: 7px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.chip.active .chip-count { color: var(--gold-muted); }
+
+.chip.chip-empty { opacity: 0.55; }
+
+/* Пояснение под заголовком полки библиотеки — как у «Новинок» */
+.shelves .shelf > .hot-hint { margin: -4px 0 12px; }
+
+/* «Продолжить»: обложка и название — одна кнопка, открывает окно игры */
+.continue-open {
+  display: flex;
+  align-items: center;
+  gap: inherit;
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  background: none;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.continue-open:disabled { cursor: default; }
+
+.continue-open:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+
+@media (hover: hover) {
+  .continue-open:not(:disabled):hover .continue-title { color: var(--gold-light); }
+}
+
+/* Узкий телефон (iPhone SE, 320px): у «Продолжить» обложка меньше — иначе на подпись, название и
+   время оставалось 80px и всё обрезалось (на 360–400px обложка-стенка шире, ей нужно 120) */
+@media (max-width: 340px) {
+  .home-continue .continue-cover { width: 84px; }
+  .home-continue .continue-strip { gap: 12px; }
+}
+
+/* «Продолжить» на главной: обложка — левая стенка карточки на всю высоту, резкая. Поля у карточки
+   лежат вокруг текста, а обложку отрицательными отступами выдвигаем к самому краю; углы срезает
+   overflow карточки. Высоту задаёт текст; 148px — чтобы обложка 16:10 не обрезалась сверху и снизу */
+.home-continue .continue-strip { position: relative; overflow: hidden; min-height: 148px; }
+
+.home-continue .continue-cover {
+  position: relative;
+  align-self: stretch;
+  aspect-ratio: auto;
+  margin: -12px 0 -12px -12px;
+  border-radius: 0;
+  cursor: pointer;
+}
+
+.home-continue .continue-cover img { position: absolute; inset: 0; }
+
+/* Оценка, новая версия, жанры — строкой под временем */
+.continue-facts {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Скриншоты в середине: на компьютере пошире — три, поуже — два, на планшете и телефоне их нет */
+.continue-shots { display: none; gap: 8px; flex-shrink: 0; }
+
+.continue-shot {
+  width: 168px;
+  aspect-ratio: 16/9;
+  padding: 0;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-sm);
+  background: #0f0d15;
+  overflow: hidden;
+  cursor: pointer;
+  line-height: 0;
+}
+
+.continue-shot img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+@media (hover: hover) {
+  .continue-shot:hover { border-color: var(--gold); }
+}
+
+.continue-shot:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.covers-hidden .continue-shot img { filter: blur(18px) brightness(0.55) saturate(0.7); transform: scale(1.1); }
+
+@media (min-width: 1200px) {
+  .continue-shots { display: flex; }
+  .continue-shot:nth-child(n+3) { display: none; }
+}
+
+@media (min-width: 1400px) {
+  .continue-shot:nth-child(n+3) { display: block; }
+}
+
+/* Справа: «Играть», под ним «Галерея» и «Сейвы» */
+.continue-actions { display: flex; flex-direction: column; align-items: stretch; gap: 8px; flex-shrink: 0; }
+
+.continue-more { display: flex; gap: 8px; }
+
+/* Под «Играть» — с чего продолжит: самый свежий сейв или момент (ContinueCard, resumePoint.js) */
+.continue-resume { max-width: 260px; font-size: var(--fs-2xs); color: var(--text-dim); text-align: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.continue-more .meta-status-btn { flex: 1; justify-content: center; gap: 6px; white-space: nowrap; }
+
+.continue-more svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+/* Телефон: без строки фактов, но «Играть» не вслепую: под карточкой — с чего продолжит и значки «Галереи» и
+   «Сейвов» (до них было три нажатия). Вторая строка сетки низкая, а «Играть» остаётся справа от названия */
+@media (max-width: 700px) {
+  .continue-facts { display: none; }
+  .continue-strip { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; row-gap: 8px; align-items: center; }
+  .continue-actions { display: contents; }
+  /* Обложка (если есть) занимает обе строки и первый столбец; без неё остальное встаёт на место по порядку */
+  .home-continue .continue-cover { grid-column: 1; grid-row: 1 / 3; }
+  .continue-open { grid-column: 2 / 4; grid-row: 1; }
+  .continue-btn { grid-column: 4; grid-row: 1; }
+  .continue-resume { grid-column: 2; grid-row: 2; max-width: none; text-align: left; }
+  .continue-more { grid-column: 3 / 5; grid-row: 2; justify-self: end; }
+  .continue-more .meta-status-btn { min-height: 34px; padding: 0 12px; }
+  .continue-more-text { display: none; }
+}
+
+/* «Продолжить»: где остановился — строкой под названием, со значком места */
+.continue-where {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--text);
+}
+
+.continue-where .glyph { flex-shrink: 0; color: var(--gold-muted); }
+
+.continue-where > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Любимые теги: «♥ monster girl» под названием игры с сайта, тег в окне игры — с сердцем */
+
+.fav-chips { margin-bottom: 10px; }
+
+.fav-chips .glyph { color: var(--gold); }
+
+/* Загрузилась — заготовка под картинкой остаётся ровной */
+.shelf-cover:has(img.loaded, .shelf-empty) { background: #0f0d15; }
+.gallery-tile:has(img.loaded, .gallery-tile-empty) { background: #000; }
+
+/* «Уменьшить движение»: обложка карточки появляется сразу, без проявления за 0,3 с */
+@media (prefers-reduced-motion: reduce) {
+  .card-cover img, .shelf-cover img { transition: none; }
+}

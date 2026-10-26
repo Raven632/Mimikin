@@ -1,0 +1,284 @@
+/* Общие элементы: кнопки, чипы, тост, состояния окон (StateView) */
+
+/* Кнопки: три вида и две высоты (Refactoring UI, Material 3). Было десять высот в одном окне игры
+   главная — золотая заливка: одно главное действие на экран («Играть», «Сохранить», «Войти»)
+   обычная — золотой контур
+   тихая — без рамки, для «Назад», «Выйти» и подобного
+   Высота 40px, крупная 48px; на сенсорных экранах не меньше 44px (Apple HIG, WCAG 2.5.8).
+   Файл подключается раньше остальных (styles/index.css): у компонента своё правило с тем же весом
+   идёт позже и главнее — поэтому здесь нет !important */
+.save-btn,
+.continue-btn,
+.auth-submit,
+.toast-action,
+.meta-status-btn,
+.grimoire-action-btn,
+.audit-retry,
+.cancel-btn,
+.confirm-actions button,
+.catalog-back,
+.menu-logout {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--btn-h);
+  padding: 0 16px;
+  box-sizing: border-box;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+
+/* главная */
+.save-btn, .continue-btn, .auth-submit, .confirm-actions .confirm-ok {
+  background: var(--gold);
+  border: 1px solid var(--gold);
+  color: var(--bg-deep);
+}
+
+@media (hover: hover) {
+  .save-btn:hover,
+  .continue-btn:hover,
+  .auth-submit:hover,
+  .confirm-actions .confirm-ok:hover {
+    background: var(--gold-light);
+    border-color: var(--gold-light);
+  }
+}
+
+/* обычная */
+.meta-status-btn,
+.grimoire-action-btn,
+.audit-retry,
+.toast-action,
+.confirm-actions .confirm-cancel,
+.cancel-btn {
+  background: var(--surface-btn);
+  border: 1px solid transparent;
+  color: var(--text);
+}
+
+/* Кнопки окна игры подсвечиваются и на сенсорных экранах, после касания: правило без @media (hover) */
+.grimoire-action-btn:hover {
+  background: var(--surface-btn-hover);
+}
+
+@media (hover: hover) {
+  .meta-status-btn:hover,
+  .grimoire-action-btn:hover,
+  .audit-retry:hover,
+  .toast-action:hover,
+  .confirm-actions .confirm-cancel:hover,
+  .cancel-btn:hover {
+    background: var(--surface-btn-hover);
+    color: var(--gold-light);
+  }
+}
+
+/* Второстепенная обычная — тусклее и при наведении */
+.meta-status-btn.subtle { color: var(--text-dim); }
+
+/* тихая */
+.catalog-back, .menu-logout { background: none; border: none; color: var(--text-dim); padding: 0 8px; }
+
+/* крупная */
+.auth-submit, .save-btn.welcome-btn, .confirm-actions button { min-height: var(--btn-h-lg); }
+
+/* Значок и подпись — одного роста */
+.meta-status-btn svg, .grimoire-action-btn svg, .save-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+
+.save-btn:disabled,
+.meta-status-btn:disabled,
+.grimoire-action-btn:disabled,
+.audit-retry:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* В ряду с «Отмена» главная кнопка шире */
+.save-btn { flex: 2; }
+.cancel-btn { flex: 1; }
+
+.meta-status-btn { flex-shrink: 0; }
+.meta-status-btn:focus-visible, .grimoire-action-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+/* Чипы: фильтры, статусы, вкладки источников */
+.chip {
+  padding: 8px 16px;
+  background: transparent;
+  border: 1px solid var(--line-chip);
+  border-radius: var(--radius-pill);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.chip.active { background: rgba(201, 168, 76, 0.12); border-color: var(--gold); color: var(--gold-light); }
+.chip:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+@media (hover: hover) {
+  .chip:hover { border-color: var(--gold); color: var(--gold); }
+}
+
+@media (pointer: coarse) {
+  .chip { min-height: 40px; }
+}
+
+/* Тост внизу экрана */
+.toast {
+  position: fixed;
+  bottom: calc(30px + var(--safe-bottom));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  padding: 14px 24px;
+  background: rgba(20,18,26,0.95);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  color: var(--text);
+  transition: opacity 0.15s ease-out;
+  opacity: 0;
+  max-width: calc(90 * var(--vw));
+  text-align: center;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.8);
+}
+
+.toast.show { opacity: 1; }
+/* Состояние — полосой слева, а не цветным текстом со свечением */
+.toast.success { border-left: 2px solid #7fc7a5; }
+.toast.error { border-left: 2px solid #b06a6a; }
+
+/* Тост с кнопкой («Отменить»): текст слева, кнопка справа; спрятанный тост кнопкой не мешает */
+.toast.has-action { display: flex; align-items: center; gap: 18px; padding: 10px 12px 10px 22px; text-align: left; }
+.toast:not(.show) { pointer-events: none; }
+.toast-action { flex-shrink: 0; }
+.toast-action:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* Состояния окон (StateView.jsx): слева, обычным текстом панели, там, где начался бы список */
+.state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  text-align: left;
+  padding: 14px 0;
+  color: var(--text-dim);
+}
+
+.state-title { margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; color: var(--text); font-size: var(--fs-md); max-width: 62ch; line-height: 1.5; }
+.state-title svg.glyph { width: 16px; height: 16px; color: var(--gold-muted); margin-right: -10px; }
+.state-hint { margin: 0; font-size: var(--fs-sm); max-width: 62ch; line-height: 1.5; }
+/* Ошибка — тонкая красная черта слева, как у тостов, а не цветной текст */
+.state-error { border-left: 2px solid #b06a6a; padding: 2px 0 2px 14px; }
+/* «Ещё раз» — текстовая ссылка со значком, а не кнопка-плитка: рядом с сообщением об ошибке плитка кричала громче его */
+.state-retry { display: inline-flex; align-items: center; gap: 6px; margin: 0; padding: 6px 0; background: none; border: 0; font: inherit; font-size: var(--fs-sm); font-weight: 600; color: var(--gold); cursor: pointer; }
+.state-retry svg { width: 14px; height: 14px; }
+.state-retry:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+@media (hover: hover) { .state-retry:hover { color: var(--gold-light); } }
+.state-action { background: none; border: 0; padding: 0; font: inherit; font-size: var(--fs-sm); color: var(--gold); cursor: pointer; }
+.state-action:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+@media (hover: hover) { .state-action:hover { color: var(--gold-light); text-decoration: underline; } }
+
+/* Загрузка — мимик (MimicLoader): сам появляется через 250 мс, ответ быстрее не мигает. Подпись внутри него,
+   поэтому и она не стоит одна на пустом месте. Полосы и плавного проявления больше нет */
+.state-loading { align-self: stretch; }
+.state-loading .state-title, .state-loading .state-hint { margin: 0; }
+
+/* Мимик-загрузчик (MimicLoader.jsx). --sz — сторона в css-точках, её считает crispSize.js так, чтобы клетка
+   была целым числом точек экрана; пока не показан — место занято, но не видно (visibility), вёрстка не прыгает */
+.mimic-wait { display: flex; align-items: center; gap: 12px; visibility: hidden; font-size: var(--fs-sm); line-height: 1.5; color: var(--text-dim); }
+.mimic-wait.show { visibility: visible; }
+.mimic-wait.col { flex-direction: column; justify-content: center; gap: 12px; text-align: center; }
+.mimic-wait.col > :first-child { margin-bottom: 4px; }
+.mimic, .mimic-cells { display: block; flex-shrink: 0; width: var(--sz, 48px); height: var(--sz, 48px); }
+.mimic { background: no-repeat 0 0 / calc(var(--sz, 48px) * 5) var(--sz, 48px); image-rendering: pixelated; }
+.mimic-cells .off { fill: rgba(201, 168, 76, 0.28); }
+.mimic-cells .on { fill: var(--gold); }
+.mimic-cells .eye { fill: var(--gold-light); }
+/* Анимация стартует, когда мимик показан: первый видимый кадр — «открыт». Ожидание: моргнул на 1,6 с (2 кадра),
+   прикрыл на 2,8 с (3 кадра). Кадры: 0 открыт, 1 моргнул, 2 прикрыл. Ступени без плавности: это смена кадров */
+.mimic-wait.show .mimic { animation: mimic-wait 3600ms step-end infinite; }
+.mimic-wait.show .mimic-cells .eye { animation: mimic-blink 3600ms step-end infinite; }
+@keyframes mimic-wait {
+  0% { background-position: 0 0; }
+  44.444% { background-position: calc(var(--sz, 48px) * -1) 0; }
+  48.889% { background-position: 0 0; }
+  77.778% { background-position: calc(var(--sz, 48px) * -2) 0; }
+  84.444% { background-position: 0 0; }
+}
+@keyframes mimic-blink { 0% { opacity: 1; } 44.444% { opacity: 0; } 48.889% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .mimic-wait.show .mimic, .mimic-wait.show .mimic-cells .eye { animation: none; }
+}
+
+/* Своя подсказка (components/Tip.jsx) вместо title=: тёмная плашка, золотая рамка 0.3, клавиша отдельным значком.
+   Без хвостика и без анимации. Выше окон и галереи */
+.tip {
+  position: fixed;
+  z-index: 10000;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: 6px 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  line-height: 1.35;
+  white-space: pre-line;
+  pointer-events: none;
+}
+.tip kbd {
+  min-width: 22px;
+  padding: 1px 6px;
+  text-align: center;
+  border: 1px solid rgba(201, 168, 76, 0.4);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--gold-light);
+  font-family: inherit;
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+}
+
+/* Тихий «?» (components/Help.jsx): размером с заглавную букву подписи, без кольца; золото — только при наведении, фокусе и открытом пояснении.
+   Область нажатия шире знака — на телефоне в него иначе не попасть */
+.help-mark {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 7px;
+  padding: 0;
+  vertical-align: -0.05em;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  opacity: 0.6;
+  font: inherit;
+  cursor: pointer;
+}
+.help-mark::after { content: ''; position: absolute; inset: -9px; }
+.help-mark svg { width: 100%; height: 100%; }
+.help-mark.on, .help-mark:focus-visible { color: var(--gold-light); opacity: 1; }
+.help-mark:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; border-radius: 2px; }
+@media (hover: hover) { .help-mark:hover { color: var(--gold-light); opacity: 1; } }

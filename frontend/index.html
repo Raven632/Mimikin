@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Mimikin</title>
+    <meta name="description" content="Своя библиотека игр на RPG Maker: играть в браузере, сейвы на сервере">
+    
+    <!-- Поддержка PWA и iOS -->
+    <link rel="manifest" href="/manifest.json">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Mimikin">
+    <meta name="theme-color" content="#080608">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="icon" href="/favicon.png" sizes="32x32" type="image/png">
+    <link rel="icon" href="/favicon-16.png" sizes="16x16" type="image/png">
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+
+    <!-- Шрифты свои (@font-face в styles/base.css; не /fonts — это путь API); заранее — два главных файла, русский и латинский текст.
+         crossorigin обязателен: без него браузер скачает шрифт дважды -->
+    <link rel="preload" href="/ui-fonts/fira-sans-cyrillic-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/ui-fonts/fira-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,8 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Автотесты интерфейса Mimikin (Playwright): свой сервер с демо-библиотекой, запуск — tests/e2e/run.sh",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

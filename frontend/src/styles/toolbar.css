@@ -1,0 +1,466 @@
+/* Панель над библиотекой: поиск, списки, «Фильтры», «Добавить игру», загрузка архива (Toolbar, Picker, SearchBox) */
+
+/* Панель поиска и фильтров прилипает к верху под шапкой: фильтровать, не прокручивая к началу
+   (особенно на планшете). Фон — отдельным слоем позади панели на всю ширину экрана: так он ничего
+   не обрезает, и раскрытые списки фильтров видны целиком. Тень снизу — когда панель прилипла */
+.controls-zone {
+  max-width: var(--content-width);
+  margin: 16px auto 14px;
+  padding: 0 20px;
+  display: flex;
+  gap: 15px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: var(--header-stuck, 0px);
+  z-index: 50;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  margin-top: 6px;
+  margin-bottom: 8px;
+}
+
+.search-box { flex: 2; min-width: 250px; position: relative; }
+
+/* Поле — одна нижняя черта (поиск, списки панели). Чтобы оно не выглядело как поле Material Design,
+   у фокуса и открытого списка слева вырастает короткая золотая метка 2px — наша деталь; черта при
+   этом золотая. Метка — фоном, поэтому работает и у input, и у button */
+.search-box input, .sort-box {
+  background-color: transparent;
+  background-image: linear-gradient(var(--gold-light), var(--gold-light));
+  background-repeat: no-repeat;
+  background-position: left bottom;
+  background-size: 0 2px;
+  border: 0;
+  border-bottom: 1px solid var(--line-field);
+  border-radius: 0;
+}
+
+.search-box input:focus, .sort-box:focus-visible, .sort-box[aria-expanded="true"] { border-bottom-color: var(--gold); background-size: 28px 2px; }
+
+.search-box input {
+  width: 100%;
+  padding: 16px 20px 16px 45px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  letter-spacing: 0;
+  color: var(--text);
+  outline: none;
+  transition: background-size 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.search-box input::placeholder { color: var(--text-dim); }
+
+/* Крестик «очистить» — когда в поле что-то есть; текст под него не заходит */
+.search-box.has-value input { padding-right: 50px; }
+
+.search-clear {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: var(--fs-xl);
+  line-height: 1;
+  font-family: inherit;
+  transition: color 0.2s, background 0.2s;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (hover: hover) {
+  .search-clear:hover { color: var(--gold-light); background: rgba(201,168,76,0.1); }
+}
+
+.search-clear:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+
+.search-icon {
+  position: absolute;
+  left: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 18px;
+  display: flex;
+  color: var(--gold-dim);
+  pointer-events: none;
+}
+
+.sort-box {
+  flex: 1;
+  min-width: 180px;
+  /* Справа место под стрелку: она нарисована фоном, и при узком списке
+     (на телефоне их теперь два в ряд) длинное название налезало на неё */
+  padding: 16px 38px 16px 20px;
+  text-overflow: ellipsis;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  color: var(--text);
+  outline: none;
+  cursor: pointer;
+  transition: background-size 0.2s, border-color 0.2s, color 0.2s;
+  appearance: none;
+  -webkit-appearance: none;
+  /* Стрелка и золотая метка — два фона одного поля */
+  background-image: linear-gradient(var(--gold-light), var(--gold-light)), url('data:image/svg+xml;utf8,<svg viewBox="0 0 24 24" width="24" height="24" xmlns="http://www.w3.org/2000/svg"><path d="M7 10l5 5 5-5" fill="none" stroke="%23c9a84c" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>');
+  background-repeat: no-repeat, no-repeat;
+  background-position: left bottom, right 10px center;
+  background-size: 0 2px, 24px 24px;
+}
+
+.sort-box:focus-visible, .sort-box[aria-expanded="true"] { background-size: 28px 2px, 24px 24px; }
+
+@media (hover: hover) { .sort-box:hover { border-bottom-color: var(--gold-dim); } }
+
+.sort-box option { background: var(--bg-deep); color: var(--text); }
+
+/* Списки панели — жанры, языки, сортировка: кнопка в стиле поля, окошко со строками.
+   У жанров сверху поиск, у коротких списков его нет */
+.picker { position: relative; flex: 1; min-width: 180px; display: flex; }
+
+.picker .picker-btn {
+  width: 100%;
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.picker-btn.has-value { border-bottom-color: var(--gold); color: var(--gold-light); }
+
+.picker-pop {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 30;
+  min-width: 100%;
+  width: max-content;
+  max-width: min(360px, calc(calc(100 * var(--vw)) - 40px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 18px 40px rgba(0,0,0,0.75);
+  overflow: hidden;
+}
+
+.picker-search {
+  margin: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  outline: none;
+  background: var(--bg-deep);
+  border: 1px solid var(--line-field);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+}
+
+.picker-search:focus { border-color: var(--gold); }
+
+.picker-search::placeholder { color: var(--text-dim); }
+
+.picker-pop.right { left: auto; right: 0; }
+
+.picker-backdrop { position: fixed; inset: 0; z-index: 29; }
+
+/* Кнопка открытого списка — над подложкой: повторный клик по ней закрывает список сам */
+.picker-btn[aria-expanded="true"] { position: relative; z-index: 31; }
+
+.picker-list { list-style: none; margin: 0; padding: 0 6px 6px; max-height: 320px; overflow-y: auto; }
+
+.picker-list:first-child { padding-top: 6px; }
+
+/* Фокус у списка без поиска виден по подсвеченной строке — рамка вокруг лишняя */
+.picker-list:focus { outline: none; }
+
+.picker-opt {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.picker-opt.active { background: rgba(201,168,76,0.12); color: var(--gold-light); }
+
+/* Подпись группы над её первым вариантом (Picker: group) — «Формат» в списке жанров */
+.picker-opt.group-start { flex-wrap: wrap; margin-top: 6px; }
+
+.picker-opt.group-start::before {
+  content: attr(data-group);
+  flex: 1 1 100%;
+  margin: -2px 0 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(201,168,76,0.18);
+  color: var(--gold-muted);
+  font-size: var(--fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.picker-opt.selected .picker-name { color: var(--gold); font-weight: 700; }
+
+.picker-count { font-size: var(--fs-sm); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.picker-empty { padding: 10px; color: var(--text-dim); }
+
+.upload-btn {
+  /* Раньше было flex: 1 1 100% — кнопка занимала отдельную строку целиком, и на
+     широком экране превращалась в пустую плашку во всю ширину. Отдельная строка
+     была нужна, чтобы панель не прыгала при переключении обложек, но за это теперь
+     отвечает min-width у самой кнопки-переключателя. */
+  flex: 0 1 auto;
+  min-width: 200px;
+  white-space: nowrap;
+  /* Второе по важности действие: игры добавляют редко, а играют каждый раз.
+     Заполненной на странице остаётся одна кнопка — «Играть» в блоке «Продолжить». */
+  padding: 16px 24px;
+  background: rgba(201,168,76,0.08);
+  border: 1px solid var(--gold);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  color: var(--gold-light);
+  font-weight: 700;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.upload-btn:disabled { opacity: 0.5; cursor: default; }
+
+/* Переключатель «скрыть обложки» — в одном стиле с панелью, но узкий */
+.cover-toggle {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--gold-muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+  /* Только иконка: подпись занимала 230px, менялась при каждом нажатии и заставляла
+     держать фиксированную ширину, чтобы панель не прыгала. Смысл понятен и без неё. */
+  min-width: 52px;
+  padding: 16px;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+/* «Фильтры» — только на телефоне (см. ниже). На широком экране обёртка списков невидима:
+   display: contents ставит их в общий ряд с поиском, как и раньше */
+.filters-toggle { display: none; }
+
+.toolbar-filters { display: contents; }
+
+.cover-toggle.active { background: rgba(201, 168, 76, 0.12); border-color: var(--gold); color: var(--gold-light); }
+
+.cover-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.cover-toggle svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+@media (hover: hover) {
+  /* Наведение — только там, где есть настоящий курсор.
+     На тапе iOS вешает :hover на кнопку и снимает его лишь при тапе в другом месте,
+     из-за чего последняя нажатая кнопка продолжает светиться. */
+  .cover-toggle:hover { background: var(--surface-btn); color: var(--gold-light); }
+  .upload-btn:not(:disabled):hover {
+    background: var(--gold);
+    color: var(--bg-deep);
+  }
+}
+
+.upload-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
+
+.progress-bar {
+  height: 6px;
+  background: var(--gold);
+  width: 0%;
+  transition: width 0.3s ease;
+}
+
+/* Оверлей перетаскивания: архив можно бросить в любое место страницы.
+   pointer-events: none — оверлей только показывает, события достаются странице
+   как и раньше, иначе счётчик входов-выходов сбивался бы на его собственных детях. */
+.drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  pointer-events: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(8, 6, 8, 0.82);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  animation: drop-in 0.15s ease-out;
+}
+
+.drop-overlay-frame {
+  width: min(560px, 100%);
+  padding: 56px 32px;
+  text-align: center;
+  border: 2px dashed var(--gold);
+  border-radius: var(--radius-lg);
+  background: rgba(201, 168, 76, 0.06);
+  box-shadow: 0 0 60px rgba(201, 168, 76, 0.15) inset;
+}
+
+.drop-overlay-icon {
+  width: 72px;
+  height: 72px;
+  color: var(--gold-light);
+  margin-bottom: 18px;
+  animation: drop-bob 1.2s ease-in-out infinite;
+}
+/* Линия тоньше, чем у значков 18px: при росте до 72px толщина растёт вместе с картинкой */
+.drop-overlay-icon svg { width: 72px; height: 72px; stroke-width: 1.1; }
+
+.drop-overlay-title {
+  font-family: var(--font-ui);
+  font-size: var(--fs-xl);
+  color: var(--gold-light);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+.drop-overlay-hint { margin-top: 10px; font-size: var(--fs-md); color: var(--text-dim); }
+
+/* Видимый фокус для клавиатуры: цвет темы, поведение мыши не меняется */
+.upload-btn:focus-visible, .sort-box:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+/* Панель библиотеки: поле, списки, «глаз», «Добавить игру», «Фильтры» — одной высоты (было 52 и 53) */
+.controls-zone .search-box input,
+.controls-zone .picker-btn,
+.controls-zone .cover-toggle,
+.controls-zone .upload-btn,
+.controls-zone .filters-toggle {
+  height: 52px;
+  min-height: 52px;
+  box-sizing: border-box;
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.controls-zone::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - calc(50 * var(--vw)));
+  right: calc(50% - calc(50 * var(--vw)));
+  z-index: -1;
+  background: var(--bg-deep);
+  transition: box-shadow 0.2s, background 0.2s;
+}
+
+/* Прилипшая панель опущена на 14px ниже полей: без рамок у полей нижние края чипов статусов торчали из-под неё */
+.controls-zone[data-stuck="1"]::before { background: var(--bg-deep); bottom: -14px; box-shadow: 0 10px 18px rgba(0, 0, 0, 0.55); }
+
+.search-clear svg { width: 16px; height: 16px; }
+
+@media (min-width: 701px) and (max-width: 1200px) {
+  /* Ноутбук: «Добавить игру» — значком, как «глаз», и весь ряд влезает в одну строку */
+  .controls-zone .upload-btn { min-width: 52px; flex: 0 0 52px; padding: 0; }
+  .upload-btn-text { display: none; }
+}
+
+@media (max-width: 1100px) {
+  /* Планшет и узкое окно (до 1100px): панель — как на телефоне. В ряд списки не помещались, и панель
+     разваливалась на две строки, где сортировка растягивалась на 660px. Поиск и «Фильтры» — одна строка,
+     списки и «глаз» раскрываются под ней; «Добавить игру» — в меню «⋯» */
+  /* С телефона и планшета игры добавляют редко: кнопка — в меню «⋯» */
+  .upload-btn { display: none; }
+  /* Поиск и «Фильтры» — одна строка; списки и «глаз» раскрываются под ней */
+  .search-box { min-width: 0; flex: 1 1 0; }
+  .filters-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+    padding: 0 14px;
+    min-height: 52px;
+    background: var(--surface-btn);
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    color: var(--text-dim);
+    font-family: var(--font-ui);
+    font-size: var(--fs-xs);
+    letter-spacing: 0;
+    cursor: pointer;
+  }
+  .filters-toggle svg { width: 18px; height: 18px; flex-shrink: 0; }
+  .filters-toggle.open, .filters-toggle.active { border-color: var(--gold); color: var(--gold-light); }
+  .filters-toggle.open { background: rgba(201, 168, 76, 0.12); }
+  .filters-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+  .filters-count {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: var(--radius-pill);
+    background: var(--gold);
+    color: var(--bg-deep);
+    font-size: var(--fs-xs);
+    line-height: 18px;
+    text-align: center;
+  }
+  .toolbar-filters { display: none; }
+  .controls-zone.filters-open .toolbar-filters { display: flex; flex-wrap: wrap; gap: 10px; flex: 1 1 100%; }
+  /* Глаз стал иконкой и больше не требует своей строки: делит ряд с кнопкой добавления */
+  .cover-toggle { min-width: 52px; flex: 0 0 52px; }
+  .controls-zone.filters-open .picker { flex: 1 1 0; min-width: 0; }
+}
+
+@media (max-width: 700px) {
+  .drop-overlay-frame { padding: 40px 20px; }
+  .drop-overlay-title { font-size: var(--fs-lg); }
+  /* Два списка помещаются в одну строку и экономят ряд на самом узком экране. С .filters-open — сильнее правила
+     планшета выше: иначе все три списка и «глаз» жались в один ряд, и вместо названий было «Все… Все… Н…» */
+  .sort-box, .picker, .controls-zone.filters-open .picker { min-width: calc(50% - 5px); flex: 1 1 calc(50% - 5px); }
+  /* Сортировка делит ряд с «глазом» и забирает всё, что осталось */
+  .picker.sort-order, .controls-zone.filters-open .picker.sort-order { min-width: 0; flex: 1 1 0; }
+  .controls-zone { gap: 10px; }
+}
+
+/* Главная: в панели только поиск, справа «глаз» и «Добавить игру» — жанры, языки и сортировка
+   в библиотеке. Поле не растягивается на весь экран */
+@media (min-width: 1101px) {
+  .controls-zone.compact .search-box { flex: 0 1 560px; }
+  .controls-zone.compact .cover-toggle { margin-left: auto; }
+}
+
+
+@keyframes drop-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Стрелка покачивается вверх-вниз: сразу видно, что страница ждёт файл */
+@keyframes drop-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+
+/* На странице «Новинки» строки поиска нет (у «Новинок» свой поиск); сама панель — с загрузкой — на месте */
+.controls-zone.bar-hidden { display: none; }

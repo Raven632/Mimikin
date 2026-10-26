@@ -1,0 +1,10 @@
+[Unit]
+Description=RPG Library: ежедневный бэкап в 04:00
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+# Если в 04:00 сервер был выключен — сделать бэкап сразу после включения
+Persistent=true
+
+[Install]
+WantedBy=timers.target

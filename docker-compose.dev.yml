@@ -1,0 +1,53 @@
+# docker-compose.dev.yml (Локальная разработка)
+services:
+  rpg-library:
+    # Сервер перезапускается сам, когда меняется его код: --watch следит за всеми файлами,
+    # которые сервер подключил (src, server.js), — игры, сейвы и тесты сюда не входят
+    command: node --watch server.js
+    volumes:
+      # Прокидываем всю папку src разом (там лежат db, routes, services)
+      - ./api/src:/app/api/src
+      # Главный файл сервера
+      - ./api/server.js:/app/api/server.js
+      # Без этого npm test в контейнере гоняет копию тестов из образа, а не твою правку
+      - ./api/server.test.js:/app/api/server.test.js
+      - ./api/http.test.js:/app/api/http.test.js
+      - ./api/package.json:/app/api/package.json
+      # Ювелирно прокидываем только один скрипт из папки public
+      - ./api/public/rpg-fixes.js:/app/api/public/rpg-fixes.js
+      - ./api/public/cheats.js:/app/api/public/cheats.js
+    environment:
+      - NODE_ENV=development
+      
+  frontend:
+      image: node:20
+      restart: unless-stopped
+      working_dir: /app/frontend
+      # Устанавливаем модули (если надо) и запускаем Vite с доступом по локалке
+      command: sh -c "npm install && npm run dev -- --host 0.0.0.0"
+      volumes:
+        # Прокидываем папку с исходниками React внутрь контейнера
+        - ./frontend:/app/frontend
+      ports:
+        - "5173:5173" # Открываем порт Vite
+      environment:
+        - NODE_ENV=development
+        - VITE_BACKEND_PORT=${HTTP_PORT:-8080}
+      depends_on:
+        - rpg-library
+        
+  # Проверка совместимости игр (Playwright). С остальными сервисами не стартует —
+  # только вручную: docker compose run --rm --build compat
+  compat:
+    build: ./tests/compat
+    profiles: ["test"]
+    init: true
+    # Chromium держит данные страниц в /dev/shm, а у Docker там по умолчанию всего 64 МБ
+    shm_size: "1gb"
+    environment:
+      - RPG_USER=${COMPAT_USER}
+      - RPG_PASS=${COMPAT_PASS}
+    volumes:
+      - ./tests/compat/report:/work/report
+    depends_on:
+      - rpg-library

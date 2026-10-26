@@ -1,0 +1,17 @@
+/* Стили Mimikin по частям. Порядок важен: при равном весе селекторов позднее правило главнее */
+@import './base.css';
+@import './controls.css';
+@import './header.css';
+@import './toolbar.css';
+@import './transfer.css';
+@import './library.css';
+@import './windows.css';
+@import './game.css';
+@import './stats.css';
+@import './catalog.css';
+@import './gallery.css';
+@import './shots.css';
+@import './pictures.css';
+@import './saves.css';
+@import './auth.css';
+@import './frame.css';

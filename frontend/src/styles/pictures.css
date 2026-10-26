@@ -1,0 +1,142 @@
+/* Текст на картинках: блок в окне перевода (PicturesPanel) и экран «Картинки» (PicturesReview) */
+
+.pic-panel { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid rgba(201,168,76,0.12); }
+
+.pic-title { color: var(--text); }
+
+.pic-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(214,168,72,0.6);
+  color: #d6a848;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+}
+
+.pictures {
+  position: fixed;
+  inset: 0;
+  z-index: 2500;
+  overflow-y: auto;
+  background: var(--bg-deep);
+  padding: calc(16px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
+}
+
+.pictures-body { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 16px; align-items: start; }
+
+.pictures-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: calc(calc(100 * var(--vh)) - 160px);
+  overflow-y: auto;
+}
+
+.pictures-item {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-rows: auto auto;
+  column-gap: 10px;
+  width: 100%;
+  padding: 6px;
+  text-align: left;
+  border: 1px solid rgba(201,168,76,0.15);
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.02);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.pictures-item.active { border-color: var(--gold); background: rgba(201,168,76,0.08); }
+
+.pictures-item img {
+  grid-row: 1 / 3;
+  width: 72px;
+  height: 48px;
+  object-fit: contain;
+  background: repeating-conic-gradient(#1a1a1a 0% 25%, #222 0% 50%) 0 0 / 12px 12px;
+  border-radius: 3px;
+}
+
+.pictures-item-name { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pictures-item-count { font-size: var(--fs-xs); color: var(--text-dim); }
+
+.pictures-main { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.pictures-tools { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Прозрачные места картинки — шахматкой, как в редакторах */
+.pictures-preview {
+  position: relative;
+  align-self: flex-start;
+  max-width: 100%;
+  line-height: 0;
+  background: repeating-conic-gradient(#1a1a1a 0% 25%, #222 0% 50%) 0 0 / 16px 16px;
+  border: 1px solid rgba(201,168,76,0.15);
+  touch-action: pan-y;
+}
+
+.pictures-preview canvas { max-width: 100%; max-height: calc(70 * var(--vh)); width: auto; height: auto; display: block; }
+
+.pictures-preview canvas.loading { opacity: 0.4; }
+
+.pictures-preview.adding { cursor: crosshair; touch-action: none; }
+
+.pictures-box { position: absolute; border: 1px dashed rgba(255,255,255,0.45); pointer-events: none; }
+
+.pictures-box.on { border: 1px solid var(--gold); }
+
+.pictures-box.review { border: 1px solid #d6a848; box-shadow: 0 0 0 1px rgba(214,168,72,0.35); }
+
+.pictures-box.drawing { border: 2px solid var(--gold); background: rgba(201,168,76,0.12); }
+
+.pictures-labels { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+
+.pictures-label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr) auto;
+  grid-template-areas: "on src tl tags";
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.02);
+}
+
+.pictures-label.off .pictures-input { color: var(--text-dim); }
+
+.pictures-label-on { grid-area: on; }
+
+.pictures-src { grid-area: src; }
+
+.pictures-tl { grid-area: tl; }
+
+.pictures-input {
+  min-width: 0;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(201,168,76,0.18);
+  background: rgba(0,0,0,0.25);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+}
+
+.pictures-input:focus { outline: none; border-color: var(--gold); }
+
+.pictures-label-tags { grid-area: tags; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+
+@media (max-width: 760px) {
+  .pictures-body { grid-template-columns: 1fr; }
+  .pictures-list { flex-direction: row; max-height: none; overflow-x: auto; overflow-y: hidden; }
+  .pictures-list li { flex: 0 0 200px; }
+  .pictures-label { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "on src" ". tl" ". tags"; }
+  .pictures-input { width: 100%; }
+  .pictures-label-tags { justify-content: flex-start; }
+}

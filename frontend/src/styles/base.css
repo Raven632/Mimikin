@@ -1,0 +1,143 @@
+/* Основа: переменные (цвета, размеры, шрифт), сброс, фон страницы, общие мелочи */
+
+/* Шрифты свои, с сервера (frontend/public/ui-fonts, лицензии OFL рядом): ни одного запроса к Google.
+   Только латиница и кириллица; 800 нужен лишь названию MIMIKIN (латиница). swap — текст виден сразу
+   запасным шрифтом. Главные два файла грузятся заранее (index.html) */
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 400; font-display: swap; src: url('/ui-fonts/fira-sans-cyrillic-400-normal.woff2') format('woff2'); unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 400; font-display: swap; src: url('/ui-fonts/fira-sans-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 500; font-display: swap; src: url('/ui-fonts/fira-sans-cyrillic-500-normal.woff2') format('woff2'); unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 500; font-display: swap; src: url('/ui-fonts/fira-sans-latin-500-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 600; font-display: swap; src: url('/ui-fonts/fira-sans-cyrillic-600-normal.woff2') format('woff2'); unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 600; font-display: swap; src: url('/ui-fonts/fira-sans-latin-600-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 700; font-display: swap; src: url('/ui-fonts/fira-sans-cyrillic-700-normal.woff2') format('woff2'); unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 700; font-display: swap; src: url('/ui-fonts/fira-sans-latin-700-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; font-style: normal; font-weight: 800; font-display: swap; src: url('/ui-fonts/fira-sans-latin-800-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Tiny5'; font-style: normal; font-weight: 400; font-display: swap; src: url('/ui-fonts/tiny5-cyrillic-400-normal.woff2') format('woff2'); unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Tiny5'; font-style: normal; font-weight: 400; font-display: swap; src: url('/ui-fonts/tiny5-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00AA,U+00AC-00BA,U+00BC-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-2017,U+2020-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+
+:root {
+  /* Единая система (2026-10): три скругления и шесть размеров текста на весь интерфейс.
+     Раньше было 12 скруглений и 37 размеров — соседние элементы выглядели «чуть разными» */
+  --radius-sm: 6px; /* кнопки, поля, плитки */
+  --radius-lg: 12px; /* окна и панели */
+  --radius-pill: 999px; /* значки, чипы, плашки */
+  --fs-2xs: 0.75rem; /* мелкие подписи: версия, метки — не мельче 12px */
+  --fs-xs: 0.8125rem; /* подписи кнопок, чипы */
+  --fs-sm: 0.875rem; /* подсказки, вторичный текст */
+  --fs-md: 1rem; /* основной текст */
+  --fs-lg: 1.2rem; /* подзаголовки, названия */
+  --fs-xl: 1.5rem; /* заголовки окон */
+  /* Текст и названия игр — Fira Sans (был Inter, самый частый шрифт сгенерированных наборов). Заголовки
+     интерфейса — пиксельный Tiny5: у него есть кириллица, он продолжает знак-мимик и тянется к пиксельным играм.
+     Tiny5 годится только в 24 и 32px (пиксель шрифта ложится в целые точки), мельче он рябит — там остаётся
+     Fira Sans 600. Японского и корейского в обоих нет: их рисуют запасные шрифты в конце списка */
+  --font-ui: 'Fira Sans', system-ui, -apple-system, 'Segoe UI', Roboto, 'Hiragino Sans', 'Noto Sans JP', 'Noto Sans KR', sans-serif;
+  --font-head: 'Tiny5', var(--font-ui);
+  --gold: #c9a84c;
+  --gold-light: #f0d080;
+  --gold-dim: #7a6030;
+  /* gold-dim хорош для линий и рамок, но как цвет мелкого текста даёт 3.2:1 к фону
+     карточки — ниже порога 4.5:1 (WCAG AA). Для текста — этот, 5.6:1. */
+  --gold-muted: #aa8844;
+  /* Движение: пиксельные кадры (мимик, вспышки) меняются раз в 80 мс или кратно; всё, что приезжает и садится
+     на место, идёт по --ease-out. Ease-in там, где что-то встаёт на видимое место, не берём: оно влетает на полной скорости */
+  --px-frame: 80ms;
+  --ease-out: cubic-bezier(.2, 0, 0, 1);
+  --flash: #fff6dc;
+  --bg-deep: #080608;
+  --bg-mid: #100e12;
+  --bg-card: #13111a;
+  --text: #e8dfc8;
+  /* Три ступени поверхности вместо одной золотой рамки на всём (2026-10): страница — --bg-deep, плита
+     (карточка «Продолжить», кнопки внутри неё) — на ступень светлее и без рамки, окно и всплывающий
+     список — --bg-card с золотой рамкой 0.3. Поле — одна нижняя черта; кнопка-значок без рамки до
+     наведения. Золото остаётся там, где что-то выбрано, открыто или это главное действие */
+  --surface-plate: #121016;
+  --surface-btn: #1c1a21; /* кнопка на плите или странице без рамки */
+  --surface-btn-hover: #25222b;
+  --line-window: rgba(201,168,76,0.3);
+  --line-field: rgba(232,223,200,0.22); /* нижняя черта поля */
+  --line-chip: rgba(232,223,200,0.16); /* обводка чипа, пока он не выбран */
+  /* Был #7a7060 — контраст с фоном карточки 3.9:1, мелкий текст читался с трудом. Стало 5.1:1 */
+  --text-dim: #8f8470;
+  /* Ширина колонки контента. Раньше панель инструментов и блок «Продолжить» были
+     1100px, а сетка игр 1400px: на широком экране их левые края расходились на
+     150px, и страница шла ступеньками. Теперь величина одна на всех. */
+  --content-width: 1600px;
+  /* Вырезы экрана. На айфоне в режиме веб-приложения (viewport-fit=cover и прозрачная строка
+     состояния) страница начинается прямо под часами и «островком»: без этих отступов шапка с
+     меню «⋯» уходила под них, и меню было не открыть. В браузере и на компьютере они нулевые */
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Высота кнопок: обычная и крупная (controls.css); на сенсорных экранах обычная — 44px, ниже */
+  --btn-h: 40px;
+  --btn-h-lg: 48px;
+  /* Тёмная схема браузера и своя тонкая золотая полоса прокрутки на всех прокручиваемых блоках сразу:
+     раньше её рисовали три места по отдельности, остальные ~30 показывали светлую полосу системы */
+  color-scheme: dark;
+  scrollbar-color: var(--gold-dim) transparent;
+  scrollbar-width: thin;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+/* Широкий экран — весь интерфейс крупнее, как Ctrl+ в браузере: вёрстка рассчитана на ~1920 точек, и на 2560 и 4K всё
+   было мелким, с пустыми полями. vw и vh под масштабом растут вместе с ним — поэтому в стилях вместо них --vw и --vh;
+   окно игры масштаб снимает (frame.css), координаты в коде делятся на него (pageZoom.js) */
+:root { --zoom: 1; --vw: calc(1vw / var(--zoom)); --vh: calc(1vh / var(--zoom)); }
+@media (min-width: 2200px) { :root { --zoom: 1.2; } }
+@media (min-width: 2500px) { :root { --zoom: 1.33; } }
+@media (min-width: 3000px) { :root { --zoom: 1.6; } }
+@media (min-width: 3600px) { :root { --zoom: 2; } }
+html { zoom: var(--zoom); }
+
+body {
+  background: var(--bg-deep);
+  color: var(--text);
+  font-family: var(--font-ui);
+  min-height: calc(100 * var(--vh));
+  overflow-x: hidden;
+}
+
+/* Выделение текста — золотом, а не синим системным */
+::selection { background: rgba(201,168,76,0.35); color: #fff; }
+
+kbd {
+  display: inline-block;
+  min-width: 28px;
+  padding: 3px 8px;
+  text-align: center;
+  box-sizing: border-box;
+  border: 1px solid rgba(201,168,76,0.4);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: rgba(255,255,255,0.04);
+  color: var(--gold-light);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: var(--fs-sm);
+}
+
+@media (pointer: coarse) {
+  :root { --btn-h: 44px; }
+}
+
+/* SVG-значки вместо символов (icons.jsx, Glyph): размер — от шрифта, в маленьких кнопках — свой */
+.glyph { display: inline-block; vertical-align: -0.125em; flex-shrink: 0; }
+
+/* Прокрутка к заголовку и к элементу в фокусе отступает на высоту прилипших шапки и панели
+   (Toolbar меряет --sticky-total): заголовок «Вся библиотека» и карточка, до которой дошли Tab'ом,
+   больше не прячутся под панелью (WCAG 2.2, 2.4.11) */
+html { scroll-padding-top: var(--sticky-total, 0px); }
+
+@media (max-width: 700px) {
+  /* clip, а не hidden: hidden у html и body разом делает body отдельной прокруткой, и липкая
+     шапка уезжала вместе со страницей. clip тоже обрезает лишнее по ширине, но прокруткой не
+     становится (iOS 16+; старым браузерам — hidden строкой выше) */
+  html, body { max-width: calc(100 * var(--vw)); overflow-x: hidden; overflow-x: clip; }
+}
+
+/* Части строки фактов (MetaLine): разделяет их только воздух. Отступ — справа у каждой, кроме последней;
+   вместе с пробелом между частями выходит около 16px */
+.meta-part:not(:last-child) { margin-right: 12px; }
+/* Слово и его число («Уровень: 12») не рвутся на двух строках */
+.meta-nb { white-space: nowrap; }

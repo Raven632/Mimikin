@@ -1,0 +1,10 @@
+[Unit]
+Description=RPG Library: бэкап сейвов, базы и настроек прода
+
+[Service]
+Type=oneshot
+ExecStart=/opt/mimikin/deploy/backup.sh
+TimeoutStartSec=15min
+# Бэкап — фоновая работа: пониженный приоритет процессора и диска, чтобы не мешать игрокам
+Nice=10
+IOSchedulingClass=idle

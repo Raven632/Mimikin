@@ -1,0 +1,146 @@
+/* Вкладка «Скриншоты» в окне игры (ShotsPanel): перемотка сверху, кадры по дням, просмотр кадра целиком */
+
+.shots-wait { color: var(--text-dim); font-size: var(--fs-sm); }
+
+/* Перемотка: точки, которые игра ставит сама — лента, новые слева */
+.shots-rewind {
+  display: flex; align-items: stretch; gap: 14px; padding: 12px; margin-bottom: 18px;
+  border: 1px solid rgba(201, 168, 76, 0.28); border-radius: var(--radius-sm);
+  box-shadow: inset 2px 0 var(--gold);
+}
+.shots-rewind-head { display: flex; flex-direction: column; justify-content: center; gap: 4px; flex: 0 0 230px; }
+.shots-rewind-head b { color: var(--gold-light); font-size: var(--fs-sm); }
+.shots-rewind-head span { color: var(--text-dim); font-size: var(--fs-xs); line-height: 1.4; }
+.shots-rewind-groups { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.shots-rewind-groups .chip { padding: 3px 10px; font-size: var(--fs-xs); }
+.shots-rewind-row { display: flex; gap: 8px; overflow-x: auto; flex: 1; min-width: 0; padding-bottom: 2px; scrollbar-width: thin; }
+.shots-rw { flex: 0 0 116px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; text-align: center; font: inherit; }
+.shots-rw-pic { position: relative; display: block; border-radius: 6px; overflow: hidden; outline: 1px solid rgba(255, 255, 255, 0.08); }
+.shots-rw-pic img, .shots-rw-pic .shots-ph { display: block; width: 116px; aspect-ratio: 4 / 3; object-fit: cover; }
+.shots-rw small { display: block; margin-top: 4px; color: var(--text-dim); font-size: 11px; }
+.shots-rw:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; border-radius: 6px; }
+.shots-why {
+  position: absolute; left: 4px; bottom: 4px; display: inline-flex; align-items: center; gap: 4px; padding: 2px 7px 2px 5px;
+  border-radius: var(--radius-pill); background: rgba(10, 9, 7, 0.8); color: var(--gold-light); font-size: 10px; font-weight: 600;
+}
+.shots-why svg { width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+.shots-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-bottom: 14px; }
+.shots-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.shots-keys { margin-left: auto; color: var(--text-dim); font-size: var(--fs-xs); }
+
+.shots-empty { display: flex; align-items: center; gap: 14px; padding: 18px; border: 1px dashed rgba(201, 168, 76, 0.3); border-radius: var(--radius-sm); color: var(--text-dim); }
+.shots-empty svg { width: 28px; height: 28px; flex-shrink: 0; color: var(--gold-muted); }
+.shots-empty p { margin: 0; font-size: var(--fs-sm); line-height: 1.5; }
+
+/* Кадры по дням */
+.shots-day { margin-bottom: 20px; }
+.shots-day-head { display: flex; align-items: baseline; gap: 10px; margin: 4px 0 10px; }
+.shots-day-head h4 { margin: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.shots-day-head span { font-size: var(--fs-xs); color: var(--text-dim); }
+.shots-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
+.shots-card {
+  position: relative; display: block; padding: 0; border: 0; border-radius: var(--radius-sm); overflow: hidden; background: #000;
+  aspect-ratio: 4 / 3; cursor: pointer; outline: 1px solid rgba(255, 255, 255, 0.06); color: #fff; font: inherit; text-align: left;
+}
+.shots-card img, .shots-card .shots-ph { display: block; width: 100%; height: 100%; object-fit: cover; }
+.shots-ph { background: #1b1a17; }
+.shots-cap {
+  position: absolute; left: 0; right: 0; bottom: 0; padding: 26px 10px 8px; background: linear-gradient(transparent, rgba(0, 0, 0, 0.82));
+  font-size: 12px; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+}
+.shots-cap small { display: block; color: rgba(255, 255, 255, 0.55); font-size: 11px; margin-top: 2px; }
+.shots-play-badge {
+  position: absolute; right: 8px; top: 8px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px 3px 7px;
+  border-radius: var(--radius-pill); background: rgba(10, 9, 7, 0.78); border: 1px solid rgba(201, 168, 76, 0.6); color: var(--gold-light); font-size: 11px; font-weight: 600;
+}
+.shots-play-badge svg { width: 10px; height: 10px; }
+.shots-card:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+@media (hover: hover) {
+  .shots-card:hover { outline: 2px solid var(--gold); }
+  .shots-rw:hover .shots-rw-pic { outline-color: var(--gold); }
+}
+
+/* Клавиша H: превью моментов и пути, кадр целиком (портал в body — класс ему ставит сам ShotsPanel), как в галерее */
+.covers-hidden .shots-card img, .covers-hidden .shots-rw-pic img, .covers-hidden .path-thumb, .shots-view.covers-hidden img {
+  filter: blur(18px) brightness(0.55) saturate(0.7);
+}
+
+/* Кадр целиком: подпись и действия — полосой снизу */
+.shots-view img { max-height: calc(100% - 120px); }
+.shots-view-bar {
+  position: absolute; left: 50%; bottom: calc(14px + var(--safe-bottom)); transform: translateX(-50%); width: min(960px, calc(100% - 24px));
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 12px 14px; border-radius: var(--radius-sm);
+  background: rgba(10, 9, 7, 0.86); border: 1px solid rgba(201, 168, 76, 0.25);
+}
+.shots-view-cap { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.shots-view-cap b { color: var(--text); font-weight: 600; font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.shots-view-cap small { color: var(--text-dim); font-size: var(--fs-xs); }
+.shots-view-input { font: inherit; font-size: var(--fs-sm); color: var(--text); background: rgba(255, 255, 255, 0.06); border: 1px solid var(--gold-dim); border-radius: 6px; padding: 5px 8px; }
+.shots-view-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.shots-view-actions a { text-decoration: none; }
+.shots-view-actions svg { width: 14px; height: 14px; }
+
+@media (max-width: 640px) {
+  .shots-rewind { flex-direction: column; gap: 10px; }
+  .shots-rewind-head { flex-basis: auto; }
+  .shots-keys { margin-left: 0; }
+  .shots-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+  .shots-view img { max-height: calc(100% - 210px); }
+}
+
+/* Вкладка «Путь» (PathPanel): лента по дням — шаги с точкой на линии, сцены с кадром */
+.path-top { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-bottom: 16px; }
+.path-stats { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--text-dim); font-size: var(--fs-sm); }
+.path-stats b { color: var(--text); font-weight: 600; margin-right: 4px; }
+.path-chips { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; }
+.path-day { display: flex; align-items: baseline; gap: 10px; margin: 2px 0 8px; }
+.path-day h4 { margin: 0; font-size: var(--fs-sm); color: var(--text); font-weight: 600; }
+.path-day span { color: var(--text-dim); font-size: var(--fs-xs); }
+.path-line { list-style: none; margin: 0 0 18px 10px; padding: 0 0 0 22px; border-left: 1px solid rgba(201, 168, 76, 0.3); display: flex; flex-direction: column; gap: 10px; }
+.path-step { position: relative; display: flex; gap: 12px; align-items: center; min-height: 28px; }
+.path-step::before {
+  content: ''; position: absolute; left: -27px; top: 50%; width: 9px; height: 9px; border-radius: 50%;
+  background: var(--bg-deep); border: 1px solid var(--gold-muted); transform: translateY(-50%);
+}
+.path-step.scene::before { background: var(--gold); border-color: var(--gold); box-shadow: 0 0 8px rgba(201, 168, 76, 0.6); }
+.path-ic { width: 26px; height: 26px; flex-shrink: 0; border-radius: 7px; display: flex; align-items: center; justify-content: center; background: rgba(201, 168, 76, 0.1); color: var(--gold-light); }
+.path-ic svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.path-txt { min-width: 0; font-size: var(--fs-sm); color: var(--text); line-height: 1.35; overflow-wrap: anywhere; }
+.path-txt small { display: block; color: var(--text-dim); font-size: var(--fs-xs); }
+.path-txt em { font-style: normal; color: var(--gold-light); }
+.path-thumb { width: 150px; aspect-ratio: 4 / 3; object-fit: cover; flex-shrink: 0; border-radius: 7px; outline: 1px solid rgba(255, 255, 255, 0.08); background: #000; }
+.path-play {
+  margin-left: auto; flex-shrink: 0; display: inline-flex; align-items: center; gap: 6px; padding: 4px 11px; border-radius: var(--radius-pill);
+  border: 1px solid rgba(201, 168, 76, 0.55); background: none; color: var(--gold-light); font: inherit; font-size: 12px; font-weight: 600; white-space: nowrap; cursor: pointer;
+}
+.path-play svg { width: 10px; height: 10px; }
+.path-play:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (hover: hover) { .path-play:hover { background: rgba(201, 168, 76, 0.12); border-color: var(--gold); } }
+@media (max-width: 640px) {
+  .path-chips { margin-left: 0; }
+  .path-thumb { width: 96px; }
+  .path-step { flex-wrap: wrap; }
+}
+
+/* «Ещё не видели» справа от пути: сколько сцен комнаты воспоминаний открыто; закрытые — без картинок */
+.path-cols { display: grid; grid-template-columns: minmax(0, 1fr) 280px; gap: 22px; align-items: start; }
+.path-room {
+  position: sticky; top: 0; border: 1px solid rgba(201, 168, 76, 0.25); border-radius: var(--radius-sm); padding: 14px;
+  box-shadow: inset 2px 0 var(--gold);
+}
+.path-room h4 { margin: 0 0 4px; color: var(--gold-light); font-size: var(--fs-sm); }
+.path-room p { margin: 0 0 10px; color: var(--text-dim); font-size: var(--fs-xs); line-height: 1.45; }
+.path-room small { display: block; margin-top: 8px; color: var(--text-dim); font-size: 11px; }
+.path-room-bar { height: 6px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; margin-bottom: 12px; }
+.path-room-bar i { display: block; height: 100%; background: var(--gold); }
+.path-room-tiles { display: grid; grid-template-columns: repeat(6, 1fr); gap: 5px; }
+.path-room-tiles span {
+  aspect-ratio: 1; border-radius: 5px; display: flex; align-items: center; justify-content: center; font-size: 12px;
+  background: repeating-linear-gradient(135deg, #15140f 0 6px, #1b1a14 6px 12px); border: 1px solid rgba(255, 255, 255, 0.06); color: rgba(255, 255, 255, 0.25);
+}
+.path-room-tiles span.open { background: rgba(201, 168, 76, 0.18); border-color: rgba(201, 168, 76, 0.5); color: var(--gold-light); }
+@media (max-width: 860px) {
+  .path-cols { grid-template-columns: 1fr; }
+  .path-room { position: static; order: -1; }
+}

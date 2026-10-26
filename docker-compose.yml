@@ -1,0 +1,94 @@
+services:
+  # ====================================
+  # 2. Кэш и Очереди (Redis)
+  # ====================================
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    logging: &logging
+      # Журнал контейнера не растёт без конца: три файла по 10 МБ
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Порт наружу не публикуем: Redis без пароля, бэкенд ходит к нему
+    # по внутренней сети Docker (redis://redis:6379)
+
+  # ====================================
+  # 3. Твой Бэкенд
+  # ====================================
+  rpg-library:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${HTTP_PORT:-80}:3000"
+      # Игры — на своём адресе, отдельно от библиотеки (api/src/routes/play.js)
+      - "${GAME_PORT:-8081}:3001"
+    volumes:
+      # «:z» — для Fedora, RHEL и других систем с SELinux: без метки контейнеру не дают читать папку
+      # хоста (issue #16). Где SELinux нет, Docker и Podman её пропускают
+      - ${GAMES_HOST_DIR:-./games}:/games:z
+    # Подключаем наш файл с секретами. Он необязателен: без него сервер
+    # стартует на значениях по умолчанию, поэтому «скачал и запустил» работает.
+    env_file:
+      - path: .env
+        required: false
+    # Эти переменные перекроют те, что в .env (если есть совпадения)
+    environment:
+      - GAMES_DIR=/games
+      - NODE_ENV=production
+      # Redis — свой, из этого файла. Без него (docker run) образ держит кэш в памяти
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379}
+      # Служба распознавания текста на картинках — своя, из этого файла (ниже). Пусто — «Перевести картинки» скрыто
+      - OCR_URL=${OCR_URL-http://ocr:8000}
+    restart: unless-stopped
+    logging: *logging
+    # «Жив ли сервер» — видно в docker ps (healthy / unhealthy): отвечает ли страница входа
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/setup/status').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 1m
+      timeout: 10s
+      start_period: 2m
+      retries: 3
+    # Говорим Докеру: "Не запускай бэкенд, пока не поднимутся базы!"
+    depends_on:
+      - redis
+
+  # ====================================
+  # 4. Текст на картинках игр (ocr/)
+  # ====================================
+  # «Перевести картинки»: находит и читает подписи, нарисованные на картинках (PaddleOCR + manga-ocr, ONNX, без
+  # видеокарты). Работает, только когда его попросили (кнопка в окне игры), картинку присылает сервер — папок игр
+  # служба не видит. Порт наружу не публикуем
+  ocr:
+    build: ./ocr
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      # Сколько ядер процессора берёт одна картинка: остальное — играм и библиотеке
+      - OCR_THREADS=${OCR_THREADS:-2}
+    cpus: ${OCR_CPUS:-2}
+    mem_limit: ${OCR_MEMORY:-2g}
+
+  # ====================================
+  # 5. Необязательные службы рядом — включаются строкой в .env: COMPOSE_PROFILES=libretranslate
+  # ====================================
+  # Библиотека находит их сама по имени (api/src/utils/nearby.js): адрес в «Настройках» вписывать не нужно.
+  # Образ — автора, Docker берёт его у него (LibreTranslate — AGPL-3.0)
+
+  # Свой переводчик игр — последний в очереди перевода (api/src/services/translate.js). Модели языков скачивает при
+  # первом запуске (несколько ГБ) и держит в своём томе; языки — только нужные игре и интерфейсу
+  libretranslate:
+    image: libretranslate/libretranslate:latest
+    profiles: ["libretranslate"]
+    restart: unless-stopped
+    logging: *logging
+    environment:
+      - LT_LOAD_ONLY=${LT_LOAD_ONLY:-en,ja,zh,ru,de}
+    volumes:
+      - libretranslate-models:/home/libretranslate/.local
+    mem_limit: ${LIBRETRANSLATE_MEMORY:-4g}
+
+volumes:
+  libretranslate-models:

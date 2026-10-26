@@ -1,0 +1,187 @@
+/* Вход и первый запуск (LoginModal) */
+
+/* Страница целиком поверх всего: каменный пол, как на картах RPG Maker (плиты 48 px со сдвигом рядов), к краям —
+   темнота, карточка по центру. Цветные пятна свечения были здесь раньше: приём узнаваемый и к играм не относится */
+.auth-page {
+  position: fixed;
+  inset: 0;
+  z-index: 9000;
+  overflow-y: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
+  background:
+    radial-gradient(ellipse 70% 60% at 50% 45%, transparent 35%, rgba(0,0,0,0.9) 85%),
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' shape-rendering='crispEdges'%3E%3Cpath d='M0 1H96M0 49H96M1 0V48M49 0V48M25 48V96M73 48V96' stroke='%23c9a84c' stroke-opacity='0.07' stroke-width='2' fill='none'/%3E%3C/svg%3E"),
+    var(--bg-deep);
+  animation: overlay-in 0.15s ease-out;
+}
+
+.auth-card {
+  width: min(400px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 34px 30px 26px;
+  border-radius: var(--radius-lg);
+  background: rgba(19, 17, 26, 0.92);
+  border: 1px solid var(--line-window);
+  box-shadow: 0 30px 80px rgba(0,0,0,0.75);
+}
+
+.auth-brand { display: flex; flex-direction: column; align-items: center; gap: 14px; color: var(--gold); }
+
+.auth-brand-name {
+  font-family: var(--font-ui);
+  font-weight: 800;
+  font-size: 1.5rem;
+  line-height: 1;
+  letter-spacing: 0.24em;
+  text-transform: uppercase;
+  margin-right: -0.24em;
+}
+
+/* Подпись — обычной фразой: что это за библиотека. Капсом с разрядкой длинная фраза читалась как крик */
+.auth-tagline {
+  margin: -8px 0 6px;
+  text-align: center;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  color: var(--gold-muted);
+  letter-spacing: 0.01em;
+}
+
+.auth-title {
+  margin: 4px 0 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  color: var(--text);
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  text-transform: none;
+}
+
+.auth-lead { margin: 0; font-size: var(--fs-md); line-height: 1.5; color: var(--text-dim); text-align: center; }
+
+.auth-field { display: flex; flex-direction: column; gap: 6px; }
+
+.auth-label { font-size: var(--fs-sm); color: var(--gold-muted); letter-spacing: 0; }
+
+.auth-field input {
+  width: 100%;
+  height: 48px;
+  padding: 0 14px;
+  box-sizing: border-box;
+  background: rgba(8,6,8,0.6);
+  color: var(--text);
+  border: 1px solid rgba(201,168,76,0.3);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.auth-field input:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(201,168,76,0.15); }
+
+/* Автозаполнение Chrome красит поле голубым, а Edge рисует свой «глаз» рядом с нашим: перекрываем оба */
+.auth-field input:-webkit-autofill {
+  -webkit-text-fill-color: var(--text);
+  caret-color: var(--text);
+  box-shadow: 0 0 0 100px #0f0d15 inset;
+  transition: background-color 9999s;
+}
+.auth-field input::-ms-reveal { display: none; }
+
+.auth-field input[aria-invalid="true"] { border-color: rgba(214,120,96,0.7); }
+
+.auth-pass { position: relative; display: block; }
+
+.auth-pass input { padding-right: 50px; }
+
+.auth-eye {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 40px;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  border-radius: 50%;
+  color: var(--gold-muted);
+  cursor: pointer;
+}
+
+.auth-eye svg { width: 20px; height: 20px; }
+
+@media (hover: hover) {
+  .auth-eye:hover { color: var(--gold-light); background: rgba(201,168,76,0.08); }
+}
+
+.auth-eye:focus-visible, .auth-lang:focus-visible, .auth-submit:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+.auth-hint { font-size: var(--fs-sm); color: var(--text-dim); }
+
+.auth-hint.warn { color: #e0b070; }
+
+.auth-error { min-height: 1.3em; font-size: var(--fs-md); color: #e8a0a0; text-align: center; }
+
+.auth-error:empty { min-height: 0; }
+
+.auth-submit { height: 50px; }
+
+@media (hover: hover) {
+  .auth-submit:not(:disabled):hover { background: var(--gold-light); }
+}
+
+.auth-submit:disabled { opacity: 0.75; cursor: default; }
+
+.auth-spinner {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid rgba(8,6,8,0.25);
+  border-top-color: var(--bg-deep);
+  animation: check-spin 0.8s linear infinite;
+}
+
+.auth-note { margin: 0; font-size: var(--fs-sm); color: var(--text-dim); text-align: center; }
+
+.auth-langs { display: flex; justify-content: center; gap: 8px; margin-top: 2px; }
+
+.auth-lang {
+  min-width: 44px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  background: none;
+  border: 1px solid rgba(201,168,76,0.2);
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+}
+
+.auth-lang.active { border-color: var(--gold); color: var(--gold-light); background: rgba(201,168,76,0.1); }
+
+.set-form .auth-error { text-align: left; }
+
+@media (max-width: 700px) {
+  .auth-card { padding: 28px 20px 22px; }
+  /* 16px и больше: iPhone не увеличивает страницу при вводе */
+  .auth-field input { font-size: 16px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .auth-page { animation: none; }
+}

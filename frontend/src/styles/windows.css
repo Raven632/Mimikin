@@ -1,0 +1,728 @@
+/* Окна: подложка, крестик, подтверждение, «Статистика и ревизия», «Во что поиграть?», «Настройки», «Клавиши» */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+  padding: calc(20px + var(--safe-top)) 20px calc(20px + var(--safe-bottom));
+}
+
+.modal-overlay.active { opacity: 1; pointer-events: all; }
+
+/* Окно игры: подложку и рамку ведёт windowFly.js (прозрачность и transform) — без размытия и своего transition.
+   Размытие на каждом кадре полёта перерисовывало бы всю страницу под окном */
+.modal-overlay.game-overlay { backdrop-filter: none; -webkit-backdrop-filter: none; transition: none; }
+
+/* Правый верхний угол окна: крестик */
+.modal-actions-top {
+  position: absolute;
+  top: 15px;
+  right: 15px;
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  z-index: 10;
+}
+
+/* 44×44 — минимальная цель для пальца; на вид ничего не меняется, попадать проще */
+/* Крестик — кнопка (до него доходит Tab), а выглядит по-прежнему значком */
+.modal-close {
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 2.2rem;
+  line-height: 0.8;
+  cursor: pointer;
+  color: var(--text-dim);
+  transition: color 0.3s;
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: inherit;
+  border-radius: 50%;
+}
+
+.modal-close:hover { color: var(--gold-light); }
+
+.modal-close:focus-visible, .gallery-close:focus-visible, .lightbox-close:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 2px;
+}
+
+/* Окна получают фокус целиком, когда в них нечего нажать первым: рамка вокруг всего окна не нужна */
+.modal-content:focus,
+.stats-content:focus,
+.gallery:focus,
+.gallery-view:focus,
+.lightbox:focus,
+.edit-form:focus,
+.confirm-box:focus {
+  outline: none;
+}
+
+/* Окно подтверждения (ConfirmDialog): поверх всего — и картинки на весь экран, и игры в рамке,
+   ниже только уведомлений */
+.modal-overlay.confirm-overlay { z-index: 4000; }
+
+.confirm-box {
+  width: min(440px, 100%);
+  max-height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 26px 24px 22px;
+  text-align: center;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 25px 60px rgba(0,0,0,0.9);
+}
+
+.confirm-cover { width: 100%; max-height: 190px; object-fit: cover; border-radius: var(--radius-sm); }
+
+.confirm-title { margin: 0; font-family: var(--font-ui); font-size: var(--fs-lg); color: var(--gold-light); }
+
+.confirm-name { color: var(--text); font-size: var(--fs-md); overflow-wrap: anywhere; }
+
+.confirm-text { margin: 0; color: var(--text-dim); font-size: var(--fs-md); line-height: 1.5; white-space: pre-line; }
+
+.confirm-actions { display: flex; gap: 10px; margin-top: 6px; }
+
+.confirm-actions button { flex: 1; }
+
+.confirm-actions button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.stats-content {
+  position: relative;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-lg);
+  width: min(760px, calc(92 * var(--vw)));
+  max-height: calc(88 * var(--vh));
+  overflow-y: auto;
+  padding: 36px 40px 40px;
+  box-shadow: 0 25px 60px rgba(0,0,0,0.9);
+}
+
+.stats-title { font-family: var(--font-ui); color: var(--gold-light); font-size: var(--fs-xl); margin-bottom: 24px; }
+
+/* Вкладки окна «Статистика и ревизия» — вместо заголовка */
+.library-tabs { display: flex; gap: 22px; margin: 0 48px 22px 0; flex-wrap: wrap; }
+
+.library-tab {
+  padding: 2px 0 6px;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-lg);
+  color: var(--text-dim);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.library-tab.active { color: var(--gold-light); border-bottom-color: var(--gold); }
+
+@media (hover: hover) {
+  .library-tab:not(.active):hover { color: var(--gold); }
+}
+
+.library-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.telegram-content { display: flex; flex-direction: column; gap: 14px; max-width: 640px; }
+
+.telegram-content h2 { margin: 0; }
+
+.tg-note { margin: 0; font-size: var(--fs-md); color: var(--text-dim); }
+
+.tg-error { color: #e08080; }
+
+.tg-steps {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.tg-block { display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+
+.tg-link { text-decoration: none; text-align: center; }
+
+.tg-linked { margin: 0; color: var(--gold-light); }
+
+.tg-kinds { display: flex; flex-direction: column; gap: 10px; }
+
+.tg-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+
+/* «Во что поиграть?» (PlayPicker.jsx) */
+.picker-content { display: flex; flex-direction: column; gap: 14px; max-width: 640px; }
+
+.picker-content h2 { margin: 0; }
+
+.picker-lengths { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.picker-game { display: flex; gap: 18px; align-items: flex-start; }
+
+.picker-cover {
+  width: 150px;
+  aspect-ratio: 3 / 4;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(201,168,76,0.25);
+  flex-shrink: 0;
+}
+
+.picker-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+
+.picker-info h3 { margin: 0; color: var(--gold-light); }
+
+/* «Скрыть обложки» касается и этого окна */
+.covers-hidden .picker-cover { filter: blur(12px) brightness(0.55) saturate(0.7); }
+
+.modal-overlay.pop { animation: overlay-in 0.15s ease-out; }
+
+.modal-overlay.pop > * { animation: window-in 0.15s ease-out; }
+
+.modal-overlay.pop.closing { opacity: 0; transition: opacity 0.2s ease; pointer-events: none; }
+
+/* Высота постоянная: при смене вкладки окно не прыгает */
+.stats-content.settings-content { width: min(880px, calc(94 * var(--vw))); height: min(660px, calc(88 * var(--vh))); }
+
+.settings-title { margin-bottom: 20px; }
+
+.settings-body { display: grid; grid-template-columns: 190px 1fr; gap: 28px; align-items: start; }
+
+.settings-tabs { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
+
+.settings-tab {
+  text-align: left;
+  padding: 10px 14px;
+  background: none;
+  cursor: pointer;
+  border: none;
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--text-dim);
+  transition: background 0.2s, color 0.2s;
+}
+
+.settings-tab.active { color: var(--gold-light); border-left-color: var(--gold); background: rgba(201,168,76,0.08); }
+
+/* Название раздела и под ним тихой строкой его состояние: что подключено, а что нет, видно, не открывая раздел */
+.settings-tab-name { display: flex; align-items: center; gap: 7px; }
+.settings-tab-state { display: block; margin-top: 2px; font-size: var(--fs-2xs); line-height: 1.35; color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-tab.active .settings-tab-state { color: var(--gold-muted); }
+.settings-tab-state.bad, .settings-tab.active .settings-tab-state.bad { color: #d67860; }
+.settings-tab-state.new, .settings-tab.active .settings-tab-state.new { color: var(--gold-light); }
+.settings-tab-new { flex-shrink: 0; color: var(--gold); }
+.settings-sticky { display: none; }
+.jd-touch { display: none; }
+
+@media (hover: hover) {
+  .settings-tab:not(.active):hover { color: var(--gold); background: rgba(201,168,76,0.05); }
+}
+
+.settings-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+.settings-panel { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
+
+.set-section { display: flex; flex-direction: column; gap: 12px; }
+/* display:flex перебивал hidden у <section> — в окне «Перевод» один абзац повторялся под каждой вкладкой */
+.set-section[hidden] { display: none; }
+
+.set-section + .set-section { padding-top: 22px; border-top: 1px solid rgba(201,168,76,0.12); }
+
+.set-title {
+  margin: 0;
+  font-family: var(--font-head);
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: var(--gold-light);
+  font-weight: 400;
+}
+
+.set-hint { margin: 0; font-size: var(--fs-md); color: var(--text-dim); line-height: 1.5; }
+
+/* Внутри «Настроек»: заголовок группы — светлым золотом и обычным регистром, группы делит пустое место, а не линия;
+   пояснения мельче подписей, чтобы подпись читалась первой */
+.settings-main .settings-panel { gap: 30px; }
+.settings-main .settings-panel .set-section + .set-section { padding-top: 0; border-top: 0; }
+.settings-main .settings-panel .set-title { letter-spacing: 0; text-transform: none; color: var(--gold-light); } /* размер — общие 24px: Tiny5 мельче рябит */
+.settings-main .settings-panel .set-hint { font-size: var(--fs-sm); line-height: 1.45; }
+.set-terms { display: flex; flex-direction: column; gap: 10px; }
+.set-terms > summary { cursor: pointer; color: var(--text); font-weight: 600; }
+.set-terms[open] > summary { margin-bottom: 4px; }
+.set-terms .tl-langs { display: flex; gap: 6px; flex-wrap: wrap; }
+.set-terms-list { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; }
+.set-terms-list li { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto; gap: 10px; align-items: baseline; padding: 5px 2px; border-bottom: 1px solid rgba(201,168,76,0.08); font-size: var(--fs-sm); }
+.set-terms-ja { color: var(--text-dim); }
+.set-terms-tr { color: var(--text); overflow-wrap: anywhere; }
+.set-terms-from { color: var(--text-dim); font-size: var(--fs-xs); white-space: nowrap; }
+
+.set-status { margin: 0; color: var(--text); }
+
+.set-status.ok { color: var(--gold-light); }
+
+.set-list {
+  margin: 0;
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.set-form { display: flex; flex-direction: column; gap: 14px; max-width: 420px; }
+
+.set-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+.save-btn.set-submit {
+  flex: none;
+  align-self: flex-start;
+  padding: 12px 22px;
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+}
+
+.set-section > .meta-status-btn { align-self: flex-start; }
+
+.set-link-btn { text-decoration: none; text-align: center; }
+
+.set-ext { color: var(--gold); font-size: var(--fs-md); text-decoration: none; align-self: flex-start; }
+
+@media (hover: hover) {
+  .set-ext:hover { color: var(--gold-light); text-decoration: underline; }
+}
+
+.set-choice { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.set-choice-btn {
+  padding: 9px 16px;
+  cursor: pointer;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--line-chip);
+  border-radius: var(--radius-pill);
+  font-family: var(--font-ui);
+  font-size: var(--fs-md);
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s;
+}
+
+.set-choice-btn.active { border-color: var(--gold); color: var(--gold-light); background: rgba(201,168,76,0.12); }
+
+@media (hover: hover) {
+  .set-choice-btn:not(.active):hover { border-color: var(--gold); color: var(--gold); }
+}
+
+.set-choice-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.set-toggle { display: flex; align-items: center; justify-content: space-between; gap: 20px; cursor: pointer; }
+
+.set-toggle-text { display: flex; flex-direction: column; gap: 4px; }
+
+.set-label { color: var(--text); font-size: var(--fs-md); }
+
+/* Переключатель вместо галочки — как в настройках телефона; тот же — «Скрыть мои» в «Новинках» */
+.set-toggle input, .catalog-check input {
+  appearance: none;
+  flex-shrink: 0;
+  width: 44px;
+  height: 24px;
+  margin: 0;
+  cursor: pointer;
+  position: relative;
+  border-radius: var(--radius-pill);
+  background: rgba(255,255,255,0.12);
+  border: 1px solid rgba(201,168,76,0.3);
+  /* Дорожка меняет цвет на 80 мс позже нажатия, когда ручка уже в пути */
+  transition: background-color 0s linear 0.08s, border-color 0s linear 0.08s;
+}
+
+.set-toggle input::after, .catalog-check input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  /* Ручка идёт 4 шагами по 40 мс; jump-start — первый шаг виден уже в кадре нажатия, без паузы */
+  transition: transform 0.16s steps(4, jump-start), background-color 0s linear 0.08s;
+}
+
+.set-toggle input:checked, .catalog-check input:checked { background: var(--gold-dim); border-color: var(--gold); }
+
+.set-toggle input:checked::after, .catalog-check input:checked::after { transform: translateX(20px); background: var(--gold-light); }
+
+.set-toggle input:focus-visible, .catalog-check input:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .set-toggle input, .catalog-check input, .set-toggle input::after, .catalog-check input::after { transition: none; }
+}
+
+/* Квадратная галочка вместо системной (белый квадрат с синей заливкой): для списков строк, где 44px-переключатель слишком
+   крупный — «Перевод → Строки», подписи на картинках. Галочка — тот же штрих, что у IconCheck, маской */
+input.sq-check {
+  appearance: none;
+  -webkit-appearance: none;
+  flex-shrink: 0;
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  border: 1px solid rgba(201,168,76,0.55);
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+input.sq-check:checked { background: var(--gold); border-color: var(--gold); }
+input.sq-check:checked::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: #000;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") center / 14px no-repeat;
+}
+input.sq-check:disabled { opacity: 0.4; cursor: default; }
+input.sq-check:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.set-about-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: var(--gold-light);
+  font-family: var(--font-ui);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  font-size: var(--fs-xl);
+}
+
+.settings-panel .telegram-content { max-width: none; }
+
+/* Корзина и восстановление из копии (SettingsModal.jsx) */
+/* Ведомость: колонки игра / размер / срок / кнопки; шапка и строки делят одну сетку */
+.trash-list { list-style: none; margin: 0; padding: 0; }
+
+.trash-head, .trash-item {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 76px 96px 132px;
+  column-gap: 12px;
+  align-items: center;
+}
+
+.trash-head {
+  padding: 0 0 8px;
+  border-bottom: 1px solid rgba(201,168,76,0.3);
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.trash-head > :first-child { grid-column: 1 / 3; }
+.trash-col-size { text-align: right; }
+
+.trash-item { padding: 9px 0; border-bottom: 1px solid rgba(201,168,76,0.12); }
+@media (hover: hover) { .trash-item:hover { background: rgba(201,168,76,0.05); } }
+
+.trash-cover {
+  width: 48px;
+  height: 30px;
+  object-fit: cover;
+  border-radius: 4px;
+  background: rgba(255,255,255,0.04);
+}
+
+.trash-info { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+
+.trash-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.trash-meta { color: var(--text-dim); font-size: var(--fs-sm); }
+
+.trash-size { text-align: right; color: var(--text); font-size: var(--fs-md); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.trash-days { color: var(--text-dim); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.trash-gauge { display: block; width: 72px; height: 2px; margin-top: 5px; background: rgba(201,168,76,0.15); }
+.trash-gauge i { display: block; height: 100%; background: var(--gold-muted); }
+
+.trash-actions { display: flex; gap: 4px; justify-content: flex-end; }
+/* В ведомости кнопки — словами без рамки, чтобы не съедать ширину у названия */
+.trash-actions .meta-status-btn { border-color: transparent; background: none; padding-left: 8px; padding-right: 8px; }
+
+.set-file { display: none; }
+
+.set-result {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 2px solid var(--gold);
+  background: rgba(201,168,76,0.06);
+  color: var(--text);
+  line-height: 1.5;
+}
+
+.set-result details { margin-top: 6px; color: var(--text-dim); font-size: var(--fs-sm); }
+
+/* Окно «Клавиши» (ShortcutsHelp.jsx) */
+.stats-content.keys-content { width: min(520px, calc(92 * var(--vw))); }
+
+.keys-list { margin: 0; display: flex; flex-direction: column; }
+
+.keys-row {
+  display: grid;
+  grid-template-columns: 150px 1fr;
+  gap: 16px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(201,168,76,0.1);
+}
+
+.keys-row:last-child { border-bottom: none; }
+
+.keys-row dt { display: flex; gap: 6px; flex-wrap: wrap; }
+
+.keys-row dd { margin: 0; color: var(--text); line-height: 1.4; }
+
+@media (hover: none) {
+  /* На телефоне и планшете без клавиатуры кнопка «Клавиши» не нужна */
+  .keys-only-desktop { display: none; }
+}
+
+.confirm-actions .confirm-ok.danger { background: #b4544a; border-color: #b4544a; color: #fff; }
+
+@media (hover: hover) {
+  .confirm-actions .confirm-ok.danger:hover { background: #c96257; border-color: #c96257; }
+}
+
+/* Заголовки окон — пиксельный Tiny5 (32px у главного окна «Настройки», 24px у остальных), без капса.
+   Вопрос в окне подтверждения — обычный текст Fira Sans, там Tiny5 был бы мельче 24px */
+.stats-title { font-family: var(--font-head); font-size: 24px; line-height: 1.15; font-weight: 400; letter-spacing: 0; text-transform: none; }
+.stats-title.settings-title { font-size: 32px; }
+.confirm-title { font-weight: 700; letter-spacing: -0.01em; text-transform: none; }
+/* Название игры в заголовке окна — содержание, не интерфейс: Fira Sans, длинные и японские названия читаются */
+.stats-title.catalog-detail-title, .tl-window-game { font-family: var(--font-ui); font-weight: 700; }
+
+.modal-close svg { width: 24px; height: 24px; }
+
+@media (max-width: 700px) {
+  .modal-overlay {
+    padding: calc(10px + var(--safe-top)) 10px calc(10px + var(--safe-bottom));
+    align-items: center;
+    justify-content: center;
+  }
+  .stats-content { padding: 28px 18px 24px; width: calc(94 * var(--vw)); max-height: 100%; }
+  .settings-body { grid-template-columns: 1fr; gap: 18px; }
+  /* Лента вкладок, листается пальцем: окно перевода в игре. У «Настроек» своё оглавление (ниже) */
+  .settings-tabs {
+    flex-direction: row;
+    overflow-x: auto;
+    position: static;
+    gap: 4px;
+    margin: 0 -4px;
+    padding: 0 4px 2px;
+    scrollbar-width: none;
+    border-bottom: 1px solid rgba(201,168,76,0.15);
+  }
+  .settings-tabs::-webkit-scrollbar { display: none; }
+  .settings-tab {
+    flex-shrink: 0;
+    border-left: none;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    padding: 10px 12px;
+  }
+  .settings-tab.active { border-bottom-color: var(--gold); background: none; }
+  /* «Настройки» на телефоне — во весь экран, без окна в окне. Вверху оглавление в две колонки, раздел — под ним */
+  .settings-overlay { padding: 0; align-items: stretch; }
+  .stats-content.settings-content { height: auto; }
+  .stats-content.settings-main {
+    width: 100%; height: 100%; max-height: none; border: 0; border-radius: 0; box-shadow: none; background: var(--bg-deep);
+    padding: var(--safe-top) 16px calc(28px + var(--safe-bottom)); overscroll-behavior: contain;
+  }
+  .settings-main .modal-actions-top { top: calc(8px + var(--safe-top)); right: 6px; }
+  .settings-main .settings-title { display: flex; align-items: center; height: 60px; margin: 0; }
+  .settings-main .settings-body { display: block; }
+  .settings-main .settings-tabs {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 14px; position: static; overflow: visible;
+    margin: 0 -16px; padding: 2px 16px 16px; border-bottom: 1px solid rgba(201,168,76,0.45);
+  }
+  .settings-main .settings-tab { min-width: 0; padding: 5px 0 5px 12px; border-left: 2px solid transparent; border-bottom: 0; border-radius: 0; background: none; font-size: var(--fs-md); }
+  .settings-main .settings-tab.active { border-left-color: var(--gold); border-bottom-color: transparent; background: none; }
+  .settings-tab-name { font-weight: 600; line-height: 20px; color: var(--text); }
+  .settings-tab.active .settings-tab-name { color: var(--gold-light); }
+  .settings-tab-state { font-size: var(--fs-xs); line-height: 17px; }
+  .settings-main .settings-panel { padding-top: 14px; gap: 30px; }
+  /* Переключатель в одну линию с подписью, пояснение под ними во всю ширину: две строки вместо четырёх узких */
+  /* Чипы библиотеки на телефоне — одна лента с прокруткой; в «Настройках» они переносятся, чтобы ничего не уходило за край */
+  .settings-main .filter-chips { flex: none; flex-wrap: wrap; overflow: visible; }
+  .settings-main .settings-panel .set-toggle { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; row-gap: 5px; }
+  .settings-main .settings-panel .set-toggle-text { display: contents; }
+  .settings-main .settings-panel .set-toggle-text .set-label { grid-column: 1; grid-row: 1; }
+  .settings-main .settings-panel .set-toggle-text .set-hint { grid-column: 1 / -1; grid-row: 2; }
+  .settings-main .settings-panel .set-toggle > input { grid-column: 2; grid-row: 1; }
+
+  /* Свёрнутое оглавление: название раздела, его состояние и «Разделы» */
+  .settings-sticky { display: block; position: sticky; top: 0; height: 0; z-index: 20; }
+  .settings-bar {
+    position: absolute; left: -16px; right: -16px; top: 0; display: flex; align-items: center; gap: 12px; height: 68px;
+    padding: var(--safe-top) 6px 0 16px; box-sizing: content-box; background: var(--bg-deep); border-bottom: 1px solid rgba(201,168,76,0.45);
+  }
+  .settings-bar-text { min-width: 0; margin-right: auto; }
+  .settings-bar-text b { display: block; font-size: 1.25rem; font-weight: 700; letter-spacing: -0.01em; color: var(--gold-light); }
+  .settings-bar-text small { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); }
+  .settings-bar-text small.bad { color: #d67860; }
+  .settings-bar-text small.new { color: var(--gold-light); }
+  .settings-bar-btn { flex-shrink: 0; display: inline-flex; align-items: center; gap: 8px; }
+  .settings-bar-btn svg { width: 16px; height: 16px; }
+  .set-form { max-width: none; }
+  /* Телефон: две колонки — игра и размер; срок и кнопки отдельной строкой под названием */
+  .trash-head { display: none; }
+  .trash-item { grid-template-columns: 48px minmax(0, 1fr) auto; row-gap: 6px; }
+  .trash-days { grid-column: 2 / 4; grid-row: 2; display: flex; align-items: center; gap: 10px; }
+  .trash-gauge { margin-top: 0; width: 60px; }
+  .trash-actions { grid-column: 1 / 4; grid-row: 3; }
+}
+
+@media (max-width: 560px) {
+  .picker-cover { width: 96px; }
+  .picker-info h3 { font-size: var(--fs-md); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay.pop, .modal-overlay.pop > * { animation: none; }
+}
+
+/* Окна появляются и исчезают коротко и мягко — как окно игры (у него своя анимация через .active).
+   .pop — окна, которые рисуются сразу открытыми; .closing — исчезают (useClosing.js) */
+@keyframes overlay-in { from { opacity: 0; } }
+
+@keyframes window-in { from { opacity: 0; } }
+
+/* Службы в «Настройках» (Источники, Перевод, Загрузки): список строк через тонкую линию, как в Steam, а не
+   стопка карточек. Слева название и что служба даёт, справа состояние словом; открытая — золотая черта слева */
+.svc-toolbar { display: flex; justify-content: flex-start; }
+.svc-refresh { display: inline-flex; align-items: center; gap: 8px; }
+.svc-refresh svg { width: 16px; height: 16px; }
+.svc-items { display: flex; flex-direction: column; border-top: 1px solid rgba(201,168,76,0.12); }
+.svc-item { border-bottom: 1px solid rgba(201,168,76,0.12); }
+.svc-item.open { box-shadow: inset 2px 0 var(--gold); }
+.svc-item-head {
+  display: grid; grid-template-columns: minmax(0, 1fr); align-items: center; width: 100%;
+  padding: 14px 4px 14px 14px; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.svc-item-head:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+.svc-item-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.svc-item-top { display: flex; align-items: baseline; gap: 12px; }
+.svc-item-top .svc-item-state { margin-left: auto; align-self: center; display: inline-flex; align-items: center; gap: 8px; }
+/* Самоцвет: силуэт огранённого камня из сундука-мимика. Залитый и без рамки — пустой квадрат читался бы галочкой */
+.svc-gem { display: inline-block; width: 12px; height: 10px; flex-shrink: 0; background: var(--gold-light); clip-path: polygon(3px 0, 9px 0, 12px 3.5px, 6px 10px, 0 3.5px); }
+.svc-gem.off { background: rgba(201,168,76,0.3); }
+.svc-gem.bad { background: #d67860; }
+.svc-item-name { font-size: var(--fs-md); font-weight: 600; color: var(--text); transition: color 0.15s; }
+.svc-item-desc { font-size: var(--fs-sm); color: var(--text-dim); }
+.svc-item-quota { font-size: var(--fs-2xs); color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.svc-item-state { font-size: var(--fs-sm); white-space: nowrap; color: var(--text-dim); }
+.svc-item-state.ok { color: var(--gold-light); }
+.svc-item-state.bad { color: #d67860; }
+/* Строка без раскрытия (Telegram-бот в «Загрузках»): та же верстка, но не кнопка */
+.svc-item-head.static { cursor: default; }
+.svc-item.open .svc-item-name { color: var(--gold-light); }
+@media (hover: hover) {
+  .svc-item-head:hover .svc-item-name { color: var(--gold); }
+}
+.svc-item-body { display: flex; flex-direction: column; gap: 12px; padding: 0 4px 20px 14px; }
+@media (max-width: 700px) {
+  .svc-item-head { padding: 12px 0; }
+  .svc-items, .svc-item { border: 0; }
+  .svc-item.open { margin-left: -16px; padding-left: 14px; }
+  .svc-item-quota { font-size: var(--fs-xs); }
+}
+/* Закладка «В Mimikin» перетаскивается мышью на панель закладок — на сенсорном экране её нет */
+@media (hover: none) and (pointer: coarse) {
+  .jd-pointer { display: none; }
+  .jd-touch { display: block; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .svc-item-body, .set-sum-chev { transition: none; }
+}
+
+/* Новая версия: что нового списком, кнопка или команда. Без карточки и черты: заголовок светлым золотом, как у групп */
+.set-update { display: flex; flex-direction: column; gap: 10px; }
+.set-update-title { margin: 0; font-size: var(--fs-md); font-weight: 600; color: var(--gold-light); }
+.set-update-notes { margin: 0; padding-left: 18px; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.5; }
+.set-update-line { align-items: center; }
+.set-update-line .set-status { margin: 0; }
+.set-command { display: flex; gap: 8px; align-items: center; }
+.set-command code {
+  flex: 1; min-width: 0; overflow-x: auto; white-space: nowrap; padding: 8px 10px; border-radius: var(--radius-sm);
+  border: 1px solid rgba(201,168,76,0.2); background: var(--bg-deep); color: var(--text); font-size: var(--fs-xs);
+}
+
+/* Игра на знакомом языке: строка вместо полосы перевода (GameModal) */
+.known-lang-note { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0; font-size: var(--fs-sm); }
+
+.set-hint.set-error { color: #d08a7a; }
+
+/* «Что задаётся только на сервере»: имя параметра, значение, зачем — списком под раскрывашкой */
+.set-server-list { display: flex; flex-direction: column; gap: 12px; margin: 10px 0 0; }
+.set-server-list dt { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; color: var(--text); font-size: var(--fs-sm); }
+.set-server-list dt code { color: var(--gold); font-size: var(--fs-xs); }
+.set-server-list dd { margin: 3px 0 0; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.45; }
+.set-option .set-status { margin: 0; }
+
+/* Окно «Настроек» на компьютере без мягкой тени: граница и так отделяет его от затемнённой страницы */
+.stats-content.settings-content { box-shadow: none; }
+
+/* Состояние «подключено» в тексте — тем же самоцветом, что в строках служб, а не галочкой-символом */
+.settings-panel .set-status.ok::before, .settings-panel .tg-linked::before {
+  content: ''; display: inline-block; width: 12px; height: 10px; margin-right: 8px; background: var(--gold-light);
+  clip-path: polygon(3px 0, 9px 0, 12px 3.5px, 6px 10px, 0 3.5px);
+}
+
+/* Раскрывающиеся блоки: своя стрелка вместо стандартного треугольника браузера */
+.settings-panel details > summary, .lookup-log > summary { list-style: none; display: flex; align-items: center; gap: 8px; }
+.settings-panel details > summary::-webkit-details-marker, .lookup-log > summary::-webkit-details-marker { display: none; }
+
+/* Поля: без стрелок у числа и без синего крестика у поиска (в Chrome) — у нас свои рамки и кнопки */
+input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+input[type="number"]::-webkit-inner-spin-button, input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+input[type="search"]::-webkit-search-cancel-button { -webkit-appearance: none; display: none; }
+.set-sum-chev { display: flex; flex-shrink: 0; color: var(--gold); transition: transform 0.18s; }
+.set-sum-chev svg { width: 16px; height: 16px; }
+details[open] > summary .set-sum-chev { transform: rotate(90deg); }
+
+/* «Добавить тег»: список тегов раскрывается как обычно, но кнопка — чипом, а не полем со стрелкой браузера */
+.picker.fav-add { flex: none; min-width: 0; width: auto; }
+.picker.fav-add .picker-btn {
+  width: auto; height: 36px; padding: 0 16px; border-radius: var(--radius-pill); background-image: none;
+  border: 1px dashed rgba(201,168,76,0.45); background-color: transparent; color: var(--gold-light); font-size: var(--fs-xs);
+}
+
+/* Два переключателя подряд в одной группе («Обложки»): между ними просвет */
+.settings-panel .set-section > .set-toggle + .set-toggle { margin-top: 8px; }
+
+@media (max-width: 700px) {
+  /* Короткий раздел всё равно листается на высоту оглавления: иначе свёрнутая строка «Разделы» не появилась бы */
+  .settings-main .settings-panel { min-height: calc(100 * var(--vh) - 40px); align-content: start; }
+}

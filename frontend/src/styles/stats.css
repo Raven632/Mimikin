@@ -1,0 +1,422 @@
+/* Статистика и ревизия: цифры, полосы, полная проверка (StatsPanel, AuditPanel, LibraryCheck, CheckStrip) */
+
+/* Полная проверка — сверху ревизии (LibraryCheck): шаги столбиком, значки связаны линией */
+.check {
+  margin-bottom: 26px;
+  padding: 16px 18px 18px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-plate);
+}
+
+.check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.check-title {
+  font-family: var(--font-ui);
+  font-size: 1.0625rem;
+  letter-spacing: 0;
+  color: var(--gold-light);
+  font-weight: 600;
+}
+
+.check-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.check .check-start { margin: 0; font-weight: 700; }
+
+.check .check-cancel { margin: 0; }
+
+.check-hint { margin-bottom: 8px; }
+
+.check-when { font-size: var(--fs-sm); color: var(--text-dim); margin-bottom: 4px; }
+
+.check-when.warn { color: #e0b070; }
+
+.check-steps { list-style: none; margin: 14px 0 0; padding: 0; }
+
+.check-step { position: relative; display: flex; gap: 12px; padding-bottom: 14px; }
+
+.check-step:last-child { padding-bottom: 0; }
+
+.check-step:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 10px;
+  top: 25px;
+  bottom: 3px;
+  width: 1px;
+  background: rgba(201,168,76,0.18);
+}
+
+.check-step.done:not(:last-child)::before, .check-step.partial:not(:last-child)::before { background: var(--gold-dim); }
+
+.check-mark {
+  flex-shrink: 0;
+  width: 21px;
+  height: 21px;
+  border-radius: 50%;
+  border: 1px solid rgba(201,168,76,0.35);
+  color: var(--bg-deep);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.check-mark.done { background: var(--gold); border-color: var(--gold); }
+
+.check-mark.partial { background: #d9a441; border-color: #d9a441; }
+
+.check-mark.error, .check-mark.stopped { background: #c0705a; border-color: #c0705a; }
+
+.check-mark.cancelled { border-color: rgba(201,168,76,0.35); color: var(--text-dim); }
+
+.check-step.cancelled .check-step-name { color: var(--text-dim); }
+
+.check-mark.running {
+  border: 2px solid rgba(201,168,76,0.2);
+  border-top-color: var(--gold-light);
+  animation: check-spin 0.9s linear infinite;
+}
+
+.check-step-body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; padding-top: 1px; }
+
+.check-step-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+}
+
+.check-step-name { font-size: var(--fs-md); color: var(--text); }
+
+.check-step.pending .check-step-name { color: var(--text-dim); }
+
+.check-step-state { flex-shrink: 0; font-size: var(--fs-xs); color: var(--text-dim); }
+
+.check-step.running .check-step-state { color: var(--gold-light); font-family: var(--font-ui); letter-spacing: 0.04em; }
+
+.check-step-note { font-size: var(--fs-sm); line-height: 1.45; color: var(--text-dim); overflow-wrap: anywhere; }
+
+.check-step-note.now { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.check-step-note.warn { color: #e0b070; }
+
+.check-step-note.bad { color: #e08a8a; }
+
+/* Полоса хода: у шага со счётом — заполненная доля, без счёта — бегущая полоска */
+.check-bar {
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: rgba(201,168,76,0.1);
+  overflow: hidden;
+}
+
+.check-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: var(--radius-sm);
+  background: var(--gold);
+  transition: width 0.6s ease;
+}
+
+.check-bar.indeterminate > span { width: 30%; animation: check-slide 1.4s ease-in-out infinite; }
+
+.check-found { margin-top: 18px; }
+
+.check-found .stats-section:first-child { margin-top: 0; }
+
+.check-nothing {
+  color: var(--gold-muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  text-align: center;
+  padding: 6px 0;
+}
+
+.check-more {
+  display: block;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-family: inherit;
+  text-decoration: underline dotted;
+}
+
+@media (hover: hover) {
+  .check-more:hover { color: var(--gold-light); }
+}
+
+a.audit-item { text-decoration: none; }
+
+/* Полоса под шапкой, пока идёт полная проверка (CheckStrip): нажатие открывает ревизию */
+.check-strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  margin: 8px auto 0;
+  padding: 4px 10px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  color: var(--gold-muted);
+}
+
+.check-strip-count { margin-left: 12px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+.check-strip .check-bar { width: min(320px, calc(70 * var(--vw))); height: 3px; }
+
+@media (hover: hover) {
+  .check-strip:hover { color: var(--gold-light); }
+}
+
+.check-strip:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+.stats-section {
+  font-family: var(--font-head);
+  font-size: 24px;
+  line-height: 1.1;
+  letter-spacing: 0;
+  color: var(--gold-light);
+  margin: 26px 0 12px;
+  border-bottom: 1px solid rgba(201,168,76,0.15);
+  padding-bottom: 6px;
+  font-weight: 400;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.stats-section-first { margin-top: 4px; }
+
+/* Итог раздела справа в заголовке: число обычным цветом, пояснение рядом тусклее */
+.stats-section-n { margin-left: auto; font-family: var(--font-ui); font-size: var(--fs-md); color: var(--text); font-variant-numeric: tabular-nums; text-align: right; }
+.stats-section-n small { font-size: var(--fs-sm); font-weight: 400; color: var(--text-dim); margin-left: 8px; }
+
+/* Статусы: пять долей отличаются заливкой, а не оттенком золота — оттенки сливались */
+.stats-split { display: flex; height: 14px; gap: 2px; margin: 4px 0 10px; border-radius: 7px; overflow: hidden; }
+.stats-split-part { display: block; flex-basis: 0; min-width: 4px; }
+.st-playing { background: var(--gold); }
+.st-done { background: var(--gold-light); }
+.st-dropped { background: #6f5a2a; }
+.st-wish { box-shadow: inset 0 0 0 1px var(--gold); }
+.st-new { background: repeating-linear-gradient(135deg, rgba(201,168,76,0.55) 0 2px, transparent 2px 5px); }
+.st-none { background: rgba(255,255,255,0.18); }
+/* Легенда словами со счётом; рядом тонкая отметка той же заливки, чтобы найти долю в полосе */
+.stats-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0; padding: 0; list-style: none; font-size: var(--fs-sm); color: var(--text-dim); }
+.stats-legend li { display: inline-flex; align-items: center; gap: 7px; }
+.stats-legend b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+.stats-legend-mark { display: block; width: 14px; height: 4px; flex-shrink: 0; }
+.stats-after { margin: 10px 0 0; font-size: var(--fs-sm); color: var(--text-dim); }
+.stats-stars { display: inline-flex; gap: 2px; color: var(--gold); }
+.stats-stars .off { color: rgba(201,168,76,0.22); }
+.stats-stars .glyph { width: 14px; height: 14px; }
+
+.stat-bar { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; font-size: var(--fs-sm); }
+
+.stat-bar-label { flex: 0 0 38%; min-width: 0; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.stat-bar-track {
+  flex: 1;
+  height: 10px;
+  background: rgba(201,168,76,0.08);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.stat-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--gold);
+  border-radius: var(--radius-sm);
+}
+
+.stat-bar-value {
+  flex: 0 0 auto;
+  min-width: 70px;
+  text-align: right;
+  color: var(--gold-light);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+}
+
+.stats-months { display: flex; align-items: flex-end; gap: 6px; height: 120px; }
+
+.stats-month {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  height: 100%;
+  gap: 4px;
+}
+
+.stats-month-bar {
+  width: 100%;
+  background: var(--gold);
+  border-radius: 3px 3px 0 0;
+  min-height: 2px;
+}
+
+.stats-month-num { font-size: var(--fs-2xs); color: var(--gold-light); }
+
+.stats-month-label { font-size: var(--fs-2xs); color: var(--text-dim); white-space: nowrap; }
+
+/* Ревизия библиотеки: списки находок в окне статистики */
+.audit-hint { font-size: var(--fs-sm); color: var(--text-dim); margin: 0 0 12px; line-height: 1.5; }
+
+.audit-count {
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  border: 1px solid var(--line-chip);
+  border-radius: var(--radius-pill);
+  padding: 1px 8px;
+  margin-left: 8px;
+}
+
+.audit-list { display: flex; flex-direction: column; margin-bottom: 18px; }
+
+/* Группа дубликатов: полоска слева показывает, что записи относятся друг к другу */
+.audit-group {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 12px;
+  border-left: 2px solid rgba(201,168,76,0.3);
+  padding-left: 10px;
+}
+
+/* Строка ведомости, как в таблице библиотеки Steam: без рамки-карточки, только линия снизу; число справа */
+.audit-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  padding: 9px 4px 9px 0;
+  border: 0;
+  border-bottom: 1px solid rgba(201,168,76,0.12);
+  border-radius: 0;
+  background: transparent;
+  transition: background 0.2s;
+}
+
+/* Название и под ним мелко факты; размер отдельным числом справа */
+.audit-item-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.audit-item-sub { font-size: var(--fs-xs); color: var(--text-dim); }
+.audit-item-num { flex-shrink: 0; font-size: var(--fs-md); color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+.audit-item-static { cursor: default; }
+
+.audit-group-why { font-size: var(--fs-xs); color: var(--gold-muted); letter-spacing: 0.04em; margin: 0 0 4px 2px; }
+
+.audit-coverage { color: var(--text); }
+
+@media (hover: hover) {
+  .audit-item:not(.audit-item-static):hover { background: rgba(201,168,76,0.06); }
+}
+
+.audit-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.audit-item-size { flex-shrink: 0; font-size: var(--fs-xs); color: var(--text-dim); }
+
+.audit-more { font-size: var(--fs-xs); color: var(--text-dim); margin: -12px 0 18px; }
+
+/* «Искать ещё раз» для целой группы — под её списком */
+.audit-retry { margin: -6px 0 22px; }
+
+.audit-retry-done { margin: -6px 0 22px; font-size: var(--fs-sm); color: var(--gold-muted); }
+
+.audit-retry:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+
+/* Ошибки в играх («Ревизия») */
+.audit-errors { display: flex; flex-direction: column; gap: 14px; }
+
+.audit-error-game { display: flex; flex-direction: column; gap: 6px; }
+
+.audit-error-head { display: flex; gap: 10px; align-items: center; }
+
+.audit-error-head .audit-item { flex: 1; min-width: 0; border-bottom: 0; }
+.audit-error-head .audit-retry { margin: 0; }
+
+.audit-error { border-bottom: 1px solid rgba(201,168,76,0.12); padding: 8px 0; }
+
+/* Устройство и текст слева, сколько раз — числом справа, как размер в других списках ведомости */
+.audit-error summary { cursor: pointer; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; list-style: none; }
+.audit-error-device, .audit-error-msg { grid-column: 1; }
+.audit-error-msg { overflow-wrap: anywhere; }
+.audit-error-count { grid-column: 2; grid-row: 1 / 3; align-self: start; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.audit-error-head .audit-item-name { font-size: var(--fs-md); font-weight: 600; }
+
+.audit-error summary::-webkit-details-marker { display: none; }
+
+.audit-error-device { font-size: var(--fs-sm); color: var(--gold-muted); }
+
+.audit-error-msg { font-size: var(--fs-sm); color: var(--text); overflow-wrap: anywhere; }
+
+.audit-error pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  font-size: var(--fs-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  background: rgba(0,0,0,0.3);
+  border-radius: var(--radius-sm);
+  max-height: 240px;
+  overflow: auto;
+}
+
+.check-mark svg { width: 12px; height: 12px; }
+
+@media (max-width: 700px) {
+  .stat-bar-label { flex-basis: 45%; }
+  .stats-months { height: 90px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .check-mark.running, .check-bar.indeterminate > span { animation: none; }
+  .check-bar > span { transition: none; }
+}
+
+@keyframes check-spin { to { transform: rotate(360deg); } }
+
+@keyframes check-slide { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+
+/* «Место»: полоса диска по частям и легенда к ней. Цвета — оттенки золота, свободное — тёмное */
+.space-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.space-head .audit-hint { margin: 0; }
+.space-bar { display: flex; height: 14px; margin: 12px 0 10px; border-radius: 7px; overflow: hidden; background: rgba(255,255,255,0.04); border: 1px solid rgba(201,168,76,0.25); }
+.space-bar-part { flex-basis: 0; min-width: 3px; }
+.space-bar-part.games, .space-dot.games { background: var(--gold); }
+.space-bar-part.old, .space-dot.old { background: #a8873a; }
+.space-bar-part.trash, .space-dot.trash { background: #d67860; }
+.space-bar-part.other, .space-dot.other { background: #6f5a2a; }
+.space-bar-part.uploads, .space-dot.uploads { background: #8a7a5a; }
+.space-bar-part.free, .space-dot.free { background: rgba(255,255,255,0.08); }
+.space-legend { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 0 0 14px; padding: 0; list-style: none; font-size: var(--fs-sm); color: var(--text-dim); }
+.space-legend li { display: inline-flex; align-items: center; gap: 6px; }
+.space-legend b { color: var(--text); font-weight: 600; }
+.space-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+.space-title { margin-top: 22px; }
+.space-total { margin-left: 8px; font-family: var(--font-ui); font-size: var(--fs-sm); color: var(--text-dim); font-weight: 400; }
+.space-bar-part.system, .space-dot.system { background: rgba(255,255,255,0.22); }

@@ -1,0 +1,213 @@
+/* Плашка загрузок (components/TransferBar.jsx): строка у нижнего края, на телефоне во всю ширину,
+   на компьютере — справа, не шире 440. Не парит над страницей, а прижата к краю; сверху над шапкой
+   и поиском ничего не висит. Раскрытая — панель того же края без скруглений. Токены — из base.css */
+.tb {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 2400;
+  padding-bottom: var(--safe-bottom);
+  background: var(--bg-mid);
+  animation: tb-in 0.15s ease-out;
+}
+
+@media (min-width: 701px) {
+  .tb { left: auto; right: 24px; width: min(440px, calc(100 * var(--vw) - 48px)); border: 1px solid var(--line-window); border-bottom: 0; }
+}
+
+@keyframes tb-in { from { opacity: 0; } to { opacity: 1; } }
+
+/* Пока плашка есть: страница кончается над ней, тосты стоят над плашкой */
+html.has-transfer body { padding-bottom: calc(69px + var(--safe-bottom)); }
+html.has-transfer .toast { bottom: calc(69px + 16px + var(--safe-bottom)); }
+
+/* Затемнение под панелью: касание вне её сворачивает */
+.tb-scrim { position: fixed; inset: 0; z-index: 2390; background: rgba(4, 3, 4, 0.55); }
+
+/* Путь: три отрезка — передача, распаковка, в библиотеке. Горит тот, что идёт сейчас */
+.tb-seg { display: grid; grid-template-columns: 52fr 26fr 22fr; gap: 3px; }
+.tb-seg > span { height: 3px; background: #2a2530; }
+.tb-seg i { display: block; height: 100%; background: var(--gold); transition: width 0.4s ease; }
+.tb-seg i.cur { border-right: 2px solid var(--gold-light); }
+.tb-seg i.run { border-right: 2px solid var(--gold-light); }
+.tb-seg.bad i { background: #b06a6a; border-right-color: #d08a7a; }
+.tb-seg.big { margin-top: 12px; }
+.tb-seg.big > span { height: 4px; }
+
+.tb-seg-labels { display: grid; grid-template-columns: 52fr 26fr 22fr; gap: 3px; margin-top: 7px; font-size: var(--fs-2xs); color: var(--text-dim); }
+.tb-seg-labels span { white-space: nowrap; }
+/* «В библиотеке» чуть шире своего отрезка: пусть выступит вправо, чем режется */
+.tb-seg-labels span:last-child { justify-self: end; }
+.tb-seg-labels .cur { font-weight: 600; color: var(--gold-light); }
+
+/* Свёрнуто: одна строка высотой 66 под кромкой в 3 — всего 69 */
+.tb-row {
+  display: flex; align-items: center; gap: 12px; width: 100%; height: 66px; padding: 0 4px 0 16px;
+  border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.tb-row:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+
+/* Слева — мимик: клетки заполняются снизу по ходу, глаза открываются на распаковке */
+.tb-thumb { width: 40px; height: 40px; flex-shrink: 0; display: grid; place-items: center; border: 1px solid var(--gold-dim); border-radius: var(--radius-sm); }
+/* Сторона приходит из TransferBar.jsx (целые клетки экрана, 32 css при DPR 1); 32 — запас до расчёта */
+.tb-mimic { width: 32px; height: 32px; display: block; overflow: visible; }
+.tb-mimic .f-half, .tb-mimic .f-shut { opacity: 0; }
+.tb-mimic .off { fill: rgba(201, 168, 76, 0.28); }
+.tb-mimic .on { fill: var(--gold); }
+.tb-mimic .eye { fill: var(--gold-light); }
+
+.tb-text { flex: 1; min-width: 0; display: block; }
+.tb-name { display: block; font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Этап золотом, размер приглушённо; между ними — только промежуток, без точек */
+.tb-sub { display: flex; gap: 10px; margin-top: 4px; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; overflow: hidden; }
+.tb-sub > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.tb-sub b { flex-shrink: 0; font-weight: 600; color: var(--gold); }
+.tb-sub em { font-style: normal; color: var(--gold-light); }
+.tb-sub .bad, .tb-nums.bad { color: #f09090; }
+
+.tb-pct { flex-shrink: 0; font-size: 22px; font-weight: 700; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; color: var(--gold-light); }
+.tb-pct small { margin-left: 1px; font-size: 13px; font-weight: 600; letter-spacing: 0; color: var(--gold-muted); }
+/* Передача кончилась, идёт распаковка: проценты уже не растут — приглушены */
+.tb-pct.dim { color: var(--gold-muted); }
+.tb-done { flex-shrink: 0; width: 24px; height: 24px; color: var(--gold-light); }
+.tb-done svg { width: 24px; height: 24px; }
+.tb-chev { width: 44px; height: 44px; flex-shrink: 0; display: grid; place-items: center; color: var(--gold); }
+.tb-chev svg { width: 22px; height: 22px; }
+
+/* Раскрыто: строка вырастает в панель того же края */
+.tb.open { background: var(--bg-card); border-top: 1px solid rgba(201, 168, 76, 0.5); }
+/* Под шапкой и поиском: панель не доходит до верха, видно, где ты */
+.tb-scroll { max-height: calc(100 * var(--vh) - 130px); overflow-y: auto; overscroll-behavior: contain; padding: 8px 16px 20px; }
+
+.tb-head { display: flex; align-items: center; gap: 10px; min-height: 44px; }
+.tb-title { font-size: var(--fs-xl); font-weight: 700; letter-spacing: -0.01em; color: var(--text); }
+.tb-count { font-size: var(--fs-lg); font-weight: 600; color: var(--gold); }
+.tb-ib { margin-left: auto; width: 44px; height: 44px; flex-shrink: 0; display: grid; place-items: center; border: 0; border-radius: var(--radius-sm); background: none; color: var(--gold); cursor: pointer; }
+.tb-ib svg { width: 20px; height: 20px; }
+.tb-ib:focus-visible, .tb-pill:focus-visible, .tb-x:focus-visible, .tb-text-btn:focus-visible, .tb-link:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* Идущая: имя и крупные проценты справа — самое яркое на панели */
+.tb-now { margin-top: 14px; }
+.tb-now-top { display: flex; align-items: flex-end; gap: 16px; }
+.tb-now-name { flex: 1; min-width: 0; font-size: var(--fs-md); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-now .tb-pct { font-size: 32px; line-height: 0.9; letter-spacing: -0.03em; }
+.tb-now .tb-pct small { margin-left: 2px; font-size: 16px; }
+.tb-now .tb-done { width: 32px; height: 32px; }
+.tb-now .tb-done svg { width: 32px; height: 32px; }
+.tb-nums { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+
+/* Три кнопки в 390 точек не умещаются: «Отменить» уходит на следующую строку, а не за край экрана */
+.tb-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 14px; }
+.tb-pill {
+  display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 16px; flex-shrink: 0;
+  border: 1px solid var(--gold-dim); border-radius: var(--radius-pill); background: none;
+  color: var(--gold-light); font: inherit; font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; cursor: pointer;
+}
+.tb-pill svg { width: 16px; height: 16px; }
+@media (hover: hover) { .tb-pill:hover { border-color: var(--gold); background: rgba(201, 168, 76, 0.08); } }
+.tb-text-btn {
+  margin-left: auto; height: 40px; padding: 0 4px; border: 0; white-space: nowrap; background: none; font: inherit; font-size: var(--fs-sm); color: var(--text-dim);
+  text-decoration: underline; text-decoration-color: rgba(143, 132, 112, 0.45); text-underline-offset: 4px; cursor: pointer;
+}
+.tb-text-btn:hover { color: var(--gold-light); }
+
+/* Группы разделяет тонкая золотая линия, а не карточки */
+.tb-group { margin-top: 18px; padding-top: 12px; border-top: 1px solid rgba(201, 168, 76, 0.2); }
+.tb-group > .tb-ask:first-child { margin-top: -4px; }
+.tb-sub-title { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; font-size: var(--fs-sm); font-weight: 600; color: var(--text-dim); }
+.tb-sub-title b { font-weight: 600; color: var(--gold); }
+.tb-hint { margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); }
+
+/* Ждёт ответа: о чём просит — светлым золотом прямо под именем */
+.tb-item { display: flex; align-items: center; gap: 12px; min-height: 52px; }
+.tb-item-ico { width: 20px; height: 20px; flex-shrink: 0; color: var(--gold); }
+.tb-item-ico svg { width: 20px; height: 20px; }
+.tb-item-text { flex: 1; min-width: 0; }
+.tb-item-name { font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-item-state { margin-top: 3px; font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.tb-item-state.warn { color: var(--gold-light); }
+.tb-item-state.bad { color: #f09090; }
+
+/* Убрать: тап-площадка 40, значок меньше; сдвинут к краю, чтобы значок встал в ряд с остальным */
+.tb-x { width: 40px; height: 40px; flex-shrink: 0; margin-right: -10px; display: grid; place-items: center; border: 0; background: none; color: var(--text-dim); cursor: pointer; }
+.tb-x svg { width: 16px; height: 16px; }
+.tb-x:hover { color: var(--gold-light); }
+
+/* Пароль архива — та же форма, что в Toolbar.jsx; здесь только вид */
+.upload-password { display: flex; gap: 8px; margin: 2px 0 8px 32px; }
+.tb-now .upload-password { margin: 14px 0 0; }
+.upload-password input {
+  flex: 1; min-width: 0; height: 44px; padding: 0 12px; border-radius: var(--radius-sm);
+  border: 1px solid rgba(201, 168, 76, 0.35); background: rgba(0, 0, 0, 0.35); color: var(--text); font: inherit;
+  font-size: 16px; /* мельче 16px — айфон приближает страницу при вводе */
+}
+.upload-password input::placeholder { color: var(--text-dim); }
+.upload-password input:focus { outline: none; border-color: var(--gold); }
+.tb-gold { height: 44px; padding: 0 16px; flex-shrink: 0; border: 0; border-radius: var(--radius-sm); background: var(--gold); color: var(--bg-deep); font: inherit; font-size: var(--fs-sm); font-weight: 700; cursor: pointer; }
+.tb-gold:disabled { opacity: 0.5; cursor: default; }
+
+.tb-queue ul { margin: 0; padding: 0; list-style: none; max-height: 200px; overflow-y: auto; }
+.tb-queue li { display: flex; align-items: center; gap: 12px; min-height: 40px; }
+.tb-q-name { flex: 1; min-width: 0; font-size: var(--fs-sm); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-q-size { flex-shrink: 0; font-size: var(--fs-xs); color: var(--text-dim); }
+.tb-more { margin-top: 4px; font-size: var(--fs-xs); color: var(--text-dim); }
+
+/* JDownloader: у каждой своя тонкая золотая линия; строка состояния переносится, а не режется */
+.tb-jd { padding: 8px 0 4px; }
+.tb-jd-top { display: flex; align-items: center; gap: 12px; }
+.tb-jd-name { flex: 1; min-width: 0; font-size: var(--fs-sm); font-weight: 600; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tb-jd-pct { font-size: var(--fs-md); font-weight: 700; color: var(--gold-light); }
+.tb-jd-pct small { margin-left: 1px; font-size: var(--fs-2xs); font-weight: 600; color: var(--gold-muted); }
+.tb-line { height: 2px; margin-top: 4px; background: #2a2530; }
+.tb-line i { display: block; height: 100%; background: var(--gold); border-right: 2px solid var(--gold-light); transition: width 0.6s ease; }
+.tb-jd-state { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.tb-jd-state b { margin-right: 8px; font-weight: 600; color: var(--gold); }
+.tb-jd-state.bad { color: #f09090; }
+.tb-jd-acts { display: flex; gap: 16px; margin-top: 4px; }
+.tb-link { padding: 6px 0; border: 0; background: none; font: inherit; font-size: var(--fs-xs); color: var(--gold); text-decoration: underline; cursor: pointer; }
+.tb-link:hover { color: var(--gold-light); }
+
+/* Распаковка: мимик жуёт, а не полоса дышит. Раз в 2,4 с укус — прикрыл, открыл, прикрыл (кадры по 160 мс
+   с 160-й по 640-ю), остальное время открыт. Кадры меняются ступенями (step-end), без таймеров в JS */
+.tb-mimic.chew .f-open { animation: tb-chew-open 2.4s step-end infinite; }
+.tb-mimic.chew .f-half { animation: tb-chew-half 2.4s step-end infinite; }
+@keyframes tb-chew-open { 0%, 13.333%, 26.667% { opacity: 1; } 6.667%, 20% { opacity: 0; } }
+@keyframes tb-chew-half { 0%, 13.333%, 26.667% { opacity: 0; } 6.667%, 20% { opacity: 1; } }
+/* «В библиотеке»: открыт 80 мс, прикрыл 80 мс, дальше захлопнут и так остаётся */
+.tb-mimic.done .f-open { animation: tb-done-open 0.16s step-end forwards; }
+.tb-mimic.done .f-half { animation: tb-done-half 0.16s step-end forwards; }
+.tb-mimic.done .f-shut { animation: tb-done-shut 0.16s step-end forwards; }
+@keyframes tb-done-open { 0% { opacity: 1; } 50%, 100% { opacity: 0; } }
+@keyframes tb-done-half { 0% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+@keyframes tb-done-shut { 0% { opacity: 0; } 100% { opacity: 1; } }
+
+/* Плашка уходит: гаснет за 200 мс (Toolbar.jsx снимает её после этого), потом двигается полка. Ease-in не
+   берём: уходящее не должно разгоняться к концу */
+.tb.leaving { animation: tb-out 0.2s ease-out forwards; pointer-events: none; }
+@keyframes tb-out { from { opacity: 1; } to { opacity: 0; } }
+
+@media (prefers-reduced-motion: reduce) {
+  .tb { animation: none; }
+  .tb.leaving { animation: none; opacity: 0; }
+  .tb-mimic.chew .f-open, .tb-mimic.chew .f-half { animation: none; }
+  .tb-mimic.chew .f-half { opacity: 0; }
+  /* Не жуёт, сразу захлопнут */
+  .tb-mimic.done .f-open, .tb-mimic.done .f-half, .tb-mimic.done .f-shut { animation: none; }
+  .tb-mimic.done .f-open, .tb-mimic.done .f-half { opacity: 0; }
+  .tb-mimic.done .f-shut { opacity: 1; }
+  .tb-seg i, .tb-line i { transition: none; }
+}
+
+/* Имя файла: многоточие стоит перед расширением, а само расширение не прячется (TransferBar.jsx, Name) */
+.tb-fn { display: flex; min-width: 0; overflow: visible; text-overflow: clip; }
+.tb-fn-stem { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 1px; }
+.tb-fn-ext { flex-shrink: 0; }
+
+/* «20 из 48 МБ» слева, остаток времени или скорость справа */
+.tb-nums { display: flex; justify-content: space-between; gap: 12px; }
+.tb-jd-state { display: flex; flex-wrap: wrap; gap: 0 8px; }
+.tb-jd-state b { margin-right: 0; }
+.tb-jd-state > span:first-of-type { min-width: 0; }
+.tb-jd-right { margin-left: auto; }
+/* Готовое у JDownloader — не зелёным: в чёрном с золотом зелёный не нужен, слово «в библиотеке» и так сказано */
+.tb-jd-state.ok { color: var(--text-dim); }
+
+/* Кольцо JDownloader в шапке на компьютере дублировало бы плашку: пока плашка есть, кольца нет */
+html.has-transfer .jd-menu { display: none; }

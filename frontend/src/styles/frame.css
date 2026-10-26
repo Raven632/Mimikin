@@ -1,0 +1,42 @@
+/* Игра в рамке на весь экран (GameFrame) */
+
+/* Рамка — в пределах выреза экрана: у игры в рамке свои env(safe-area-inset-*) нулевые,
+   и её кнопки ушли бы под «островок» и полоску «домой» */
+.game-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  /* Игра — в настоящий размер экрана: под масштабом широкого экрана (base.css) она была бы мутной */
+  zoom: calc(1 / var(--zoom));
+  background: #000;
+  padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+}
+
+.game-frame iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #000;
+  touch-action: manipulation;
+}
+
+/* Пока игра грузится: мимик по центру чёрного. Не ловит касания — рамка и игра под ним. Рамка сама в масштабе
+   1/--zoom (игра в настоящий размер), мимику возвращаем масштаб страницы, по которому crispSize.js считает клетку */
+.game-frame-wait { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; pointer-events: none; zoom: var(--zoom); }
+
+/* «Играть»: обложка растёт в экран игры и уходит в чёрное (LaunchIntro). Над рамкой игры; масштаб тот же, 1/--zoom:
+   точки слоя — точки экрана, клетки мозаики целые */
+.frame-intro { position: fixed; inset: 0; z-index: 3100; zoom: calc(1 / var(--zoom)); }
+.frame-intro-back { position: absolute; inset: 0; background: #000; }
+.frame-intro-cv { position: absolute; display: block; transform-origin: 0 0; will-change: transform; }
+
+/* Игра после перехода проявляется за 200 мс там, где легла обложка; без перехода рамка как была */
+.game-frame.intro iframe { opacity: 0; }
+/* Пока поверх идёт переход, фон рамки прозрачен: страница вокруг растущей обложки темнеет под слоем за 300 мс, а не
+   пропадает в чёрное в кадр, когда рамка смонтировалась. Когда слой ушёл, фон снова чёрный в той же отрисовке */
+.game-frame.intro.holding { background: transparent; }
+.game-frame.intro.revealed iframe { opacity: 1; transition: opacity 200ms linear; }
+@media (prefers-reduced-motion: reduce) {
+  .game-frame.intro.revealed iframe { transition: none; }
+}
