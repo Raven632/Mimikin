@@ -110,6 +110,17 @@ function keep(layer, tries = 0) {
 document.addEventListener('keydown', onKeyDown);
 window.addEventListener('popstate', onPopState);
 
+// Открыто окно — страница под ним стоит: окно докрутили до края, и прокрутка не уходит на страницу сзади. Правило одно на
+// все окна, поэтому здесь. Открытый слой всегда виден (Escape закрывает верхний), и страница не останется стоять зря
+// Была полоса прокрутки — её место остаётся: иначе карточки под окном сдвинулись бы, а окно игры летит из карточки и обратно
+function holdPage() {
+  const root = document.documentElement;
+  const open = layers.some((l) => l.modal);
+  if (open && !root.classList.contains('layer-open')) root.style.scrollbarGutter = window.innerWidth > root.clientWidth ? 'stable' : '';
+  if (!open) root.style.scrollbarGutter = '';
+  root.classList.toggle('layer-open', open);
+}
+
 // Слой: ref — его корень (по нему ходит Tab и туда ставится фокус), onClose — закрыть его. После жеста
 // «назад» onClose получает функцию keep: вызвать её, если окно всё же осталось открытым.
 //   active  — открыт ли (у режима правки, меню, картинки — пока включены);
@@ -133,6 +144,7 @@ export function useLayer(ref, onClose, { active = true, history = true, escape =
       close: (keepOpen) => closeRef.current?.(keepOpen),
     };
     layers.push(layer);
+    holdPage();
     if (history) {
       if (dropTo !== null || moving) waiting.push(layer);
       else pushEntry(layer);
@@ -148,6 +160,7 @@ export function useLayer(ref, onClose, { active = true, history = true, escape =
       if (frame) cancelAnimationFrame(frame);
       const i = layers.indexOf(layer);
       if (i >= 0) layers.splice(i, 1);
+      holdPage();
       const queued = waiting.indexOf(layer);
       if (queued >= 0) waiting.splice(queued, 1);
       else if (history && layer.level && !layer.popped) dropEntry(layer.level - 1);

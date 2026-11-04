@@ -3,7 +3,7 @@ const itchService = require('../services/itch.js');
 
 const router = express.Router();
 
-// Игры на RPG Maker с itch.io — для окна «Новинки»
+// Игры на RPG Maker с itch.io — для вкладки «Найти»
 router.get('/latest', async (req, res) => {
     try {
         res.json(await itchService.latest(req.query));

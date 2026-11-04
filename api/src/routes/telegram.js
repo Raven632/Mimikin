@@ -9,7 +9,7 @@ module.exports = function createTelegramRouter(telegram) {
             res.json(await work(req));
         } catch (e) {
             if (!e.status) console.error('[Telegram]', e.message);
-            res.status(e.status || 502).json({ error: e.message });
+            res.status(e.status || 502).json({ error: e.message, reason: e.reason, params: e.params });
         }
     };
 

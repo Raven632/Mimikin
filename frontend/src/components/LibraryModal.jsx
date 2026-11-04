@@ -5,11 +5,14 @@ import StatsPanel from './StatsPanel';
 import AuditPanel from './AuditPanel';
 import SpacePanel from './SpacePanel';
 import { IconClose } from './icons';
+import { isOwner } from '../me';
 
 // Статистика, ревизия и место — одно окно с вкладками. Все — о библиотеке целиком, и отдельными
 // пунктами меню стояли бы рядом с тем, что нужно каждый день
-const LibraryModal = ({ tab: initialTab = 'stats', games, t, lang, onClose, onOpenGame, check, onStartCheck, onCancelCheck }) => {
-  const [tab, setTab] = useState(initialTab);
+const LibraryModal = ({ tab: initialTab = 'stats', games, t, lang, onClose, onOpenGame, check, onStartCheck, onCancelCheck, onChanged }) => {
+  // Ревизия и место — о файлах библиотеки, их видит владелец. Остальным людям — только статистика: она считается по их играм
+  const owner = isOwner();
+  const [tab, setTab] = useState(owner ? initialTab : 'stats');
 
   // Escape и «назад» закрывают окно — как и остальные окна библиотеки (layers.js)
   const contentRef = useRef(null);
@@ -22,9 +25,9 @@ const LibraryModal = ({ tab: initialTab = 'stats', games, t, lang, onClose, onOp
 
   return (
     <div className={`modal-overlay active pop${closing ? ' closing' : ''}`} onClick={close}>
-      <div ref={contentRef} className="stats-content" role="dialog" aria-modal="true" aria-label={t.stats_audit} tabIndex={-1} onClick={e => e.stopPropagation()}>
+      <div ref={contentRef} className="stats-content" role="dialog" aria-modal="true" aria-label={t.stats} tabIndex={-1} onClick={e => e.stopPropagation()}>
         <div className="modal-actions-top"><button type="button" className="modal-close" aria-label={t.close} data-tip={t.close} onClick={close}><IconClose /></button></div>
-        <div className="library-tabs" role="tablist">
+        {owner && <div className="library-tabs" role="tablist">
           {[['stats', t.stats], ['audit', t.audit], ['space', t.space]].map(([key, label]) => (
             <button
               key={key}
@@ -37,10 +40,10 @@ const LibraryModal = ({ tab: initialTab = 'stats', games, t, lang, onClose, onOp
               {label}
             </button>
           ))}
-        </div>
-        {tab === 'stats' && <StatsPanel games={games} t={t} lang={lang} />}
-        {tab === 'audit' && <AuditPanel t={t} lang={lang} games={games} onOpenGame={openGame} check={check} onStartCheck={onStartCheck} onCancelCheck={onCancelCheck} />}
-        {tab === 'space' && <SpacePanel t={t} lang={lang} onOpenGame={openGame} />}
+        </div>}
+        {tab === 'stats' && <StatsPanel games={games} t={t} lang={lang} onOpenGame={openGame} />}
+        {owner && tab === 'audit' && <AuditPanel t={t} lang={lang} games={games} onOpenGame={openGame} check={check} onStartCheck={onStartCheck} onCancelCheck={onCancelCheck} onChanged={onChanged} />}
+        {owner && tab === 'space' && <SpacePanel t={t} lang={lang} onOpenGame={openGame} />}
       </div>
     </div>
   );

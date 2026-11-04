@@ -17,13 +17,19 @@ const COLLECT_MS = 90 * 1000;
 // Сбор встал на капче — ждём, пока её решат в MyJDownloader (с телефона — минута-другая), и собираем дальше сами
 const CAPTCHA_WAIT_MS = 10 * 60 * 1000;
 const POLL_MS = 3000;
-// Ход загрузки (окно игры, обложка в «Новинках», список в шапке) помним сутки после конца
+// Ход загрузки (окно игры, обложка на «Найти», список в шапке) помним сутки после конца
 const KEEP_MS = 24 * 60 * 60 * 1000;
 // Список закачек у JDownloader спрашиваем не чаще: страницу опрашивают раз в 4 с, окон может быть несколько
 const JD_CACHE_MS = 3000;
 // Столько архив может идти во «Входящие» после того, как JDownloader его скачал; дольше — «не приходит», с подсказкой
 const STUCK_MS = 15 * 60 * 1000;
+// Столько JDownloader может не показывать пакет «качающейся» загрузки (его удалили там) — дальше она места не бронирует
+const JD_GONE_MS = 6 * 60 * 60 * 1000;
 const sameFolder = (a, b) => String(a || '').replace(/[\\/]+$/, '') === String(b || '').replace(/[\\/]+$/, '');
+// Тот ли пакет: JDownloader правит его имя под файловую систему («Starfall Inn: Remaster» → «Starfall Inn; Remaster»),
+// поэтому сравниваем только буквы и цифры. Имя из одних знаков — как есть
+const nameKey = (s) => String(s || '').normalize('NFC').replace(/[^\p{L}\p{N}]/gu, '').toLowerCase();
+const samePackage = (a, b) => a === b || (!!nameKey(b) && nameKey(a) === nameKey(b));
 // Сборки не для ПК — не качаем. Сама игра на RPG Maker MV/MZ идёт в браузере из сборки Win/Linux. Слово — между
 // не-буквами и не-цифрами: «Game_mac.zip» — Mac, «Machine» — нет
 const NOT_PC = /(?<![a-z0-9])(?:mac|macos|osx|android)(?![a-z0-9])|\.(?:apk|dmg)$/i;
@@ -94,6 +100,14 @@ class MyJdService {
         this.writing = Promise.resolve();
         this.runs = new Map();   // идущие в фоне сборы: key → promise (тесты ждут их)
         this.captchaWaitMs = CAPTCHA_WAIT_MS;
+        // Место на диске до скачивания: проверка и бронь — по очереди («Обновить все» шлёт загрузки разом, и каждая
+        // видит бронь предыдущей). booked — собранные, ещё не записанные этапом download: key → размер архива;
+        // loaded — сколько скачано по последнему опросу (advance), seenAt — когда JDownloader последний раз показал пакет;
+        // оба только в памяти
+        this.spaceTurn = Promise.resolve();
+        this.booked = new Map();
+        this.loaded = new Map();
+        this.seenAt = new Map();
     }
 
     // file — где помнить загрузки (без него — только в памяти, для тестов); uploads и inbox — чтобы видеть, дошёл ли архив
@@ -181,18 +195,19 @@ class MyJdService {
     // библиотеки: скачанное встанет её обновлением, а не второй копией (inbox → uploads.importFile). via — откуда
     // начали: 'tg' — из Telegram, туда и скажем, если сбор встал (onStage). Адрес и версия — в записи: «Повторить»
     // passwords — пароли архива: распаковка попробует их сама
-    async send(url, title, key = '', { version = '', target = '', via = '', passwords = [] } = {}) {
+    // force — «Скачать всё равно»: оценка места не сошлась (collect, space), а человек решил качать
+    async send(url, title, key = '', { version = '', target = '', via = '', passwords = [], force = false } = {}) {
         const acc = login();
         if (!acc) throw fail('off', 'MyJDownloader не настроен');
         const packageName = title || 'Mimikin';
-        if (!key) return this.collect(acc, url, title, packageName, { version, passwords });
+        if (!key) return this.collect(acc, url, title, packageName, { version, passwords, force });
         const jobs = await this.loadJobs();
         // Уже собирает или качает (вторая вкладка, двойное нажатие, та же ссылка в Telegram ещё раз) — второй сбор
         // положил бы те же ссылки в JDownloader ещё раз, а ход загрузки пропал бы. От проверки до записи в runs — без
         // await: два запроса подряд не пройдут оба
         if (this.runs.has(key) || ['download', 'transfer', 'import'].includes(jobs.get(key)?.stage)) return { started: true, already: true };
         const started = Date.now();
-        const job = { key, title, packageName, folder: acc.folder, url, version, ...(via ? { via } : {}), ...(passwords.length ? { passwords: passwords.slice(0, 5) } : {}) };
+        const job = { key, title, packageName, folder: acc.folder, url, version, ...(via ? { via } : {}), ...(passwords.length ? { passwords: passwords.slice(0, 5) } : {}), ...(force ? { force: true } : {}) };
         // Запись убрали крестиком (или это уже другая загрузка) — сбор её не возвращает и не перетирает
         const track = async (patch) => {
             if ((await this.loadJobs()).get(key)?.started !== started) return;
@@ -211,17 +226,21 @@ class MyJdService {
         const run = first.then(() => this.collect(acc, url, title, packageName, {
             version,
             passwords,
+            key,
+            force,
             // Капча — этап «ждёт капчу»; решили — снова «сбор ссылок»
             onCaptcha: (site) => track(site ? { stage: 'captcha', captcha: site } : { stage: 'collect', captcha: '' }),
         })).then((r) => track(r.captcha ? { stage: 'error', error: 'captcha', captcha: r.captcha }
-            : r.sent ? { stage: 'download', names: r.names }
-                : { stage: 'error', error: r.volumes ? 'volumes' : r.found ? 'none' : 'empty' }),
+            : r.space ? { stage: 'error', error: 'space', ...r.space }
+                : r.sent ? { stage: 'download', names: r.names, ...(r.size ? { size: r.size } : {}) }
+                    : { stage: 'error', error: r.volumes ? 'volumes' : r.found ? 'none' : 'empty' }),
         (e) => {
             console.error('[MyJDownloader]', e.message);
-            return track({ stage: 'error', error: e.message });
+            return track({ stage: 'error', error: e.message, ...(e.reason ? { reason: e.reason } : {}) });
         });
         this.runs.set(key, run);
-        run.finally(() => { if (this.runs.get(key) === run) this.runs.delete(key); }).catch(() => {});
+        // Бронь места — пока этап download не записан с размером: дальше место считает запись (inFlight)
+        run.finally(() => { this.booked.delete(key); if (this.runs.get(key) === run) this.runs.delete(key); }).catch(() => {});
         await first;
         return { started: true };
     }
@@ -253,17 +272,62 @@ class MyJdService {
     // Вход в MyJDownloader задан
     configured() { return !!login(); }
 
-    // «Повторить» у вставшей загрузки: то же, что и в первый раз. Записи до этой версии адреса не помнят
-    async retry(key) {
+    // «Повторить» у вставшей загрузки: то же, что и в первый раз. Записи до этой версии адреса не помнят.
+    // force — «Скачать всё равно» у вставшей из-за места
+    async retry(key, { force = false } = {}) {
         const job = (await this.loadJobs()).get(key);
-        if (!job?.url) throw Object.assign(new Error('Эту загрузку не повторить — начните её заново'), { status: 404 });
-        if (job.stage !== 'error') throw Object.assign(new Error('Загрузка ещё идёт'), { status: 409 });
-        return this.send(job.url, job.title, key, { version: job.version || '', target: job.target || '', via: job.via || '', passwords: job.passwords || [] });
+        if (!job?.url) throw Object.assign(new Error('Эту загрузку не повторить — начните её заново'), { status: 404, reason: 'jd-no-retry' });
+        if (job.stage !== 'error') throw Object.assign(new Error('Загрузка ещё идёт'), { status: 409, reason: 'jd-running' });
+        return this.send(job.url, job.title, key, { version: job.version || '', target: job.target || '', via: job.via || '', passwords: job.passwords || [], force: force === true });
+    }
+
+    // Влезет ли на диск архив size вместе с распакованной игрой (uploads.room) — и бронь, если да. По очереди: иначе
+    // N загрузок «Обновить все» проверили бы место разом и каждая решила бы, что влезает. null — места хватает
+    // (или проверить нечем), иначе { need, free, hard }
+    reserve(key, size, force) {
+        const run = this.spaceTurn.then(async () => {
+            // Диск не ответил — не мешаем: точная проверка останется на распаковке
+            const r = this.uploads?.room ? await this.uploads.room({ size, force }).catch(() => null) : null;
+            if (r && !r.ok) return { need: r.need, free: r.free, hard: r.hard };
+            this.booked.set(key, size);
+            return null;
+        });
+        this.spaceTurn = run.catch(() => {});
+        return run;
+    }
+
+    // Что ещё ляжет на диск: собранные (бронь) и качающиеся — для брони места у загрузок (uploads.reserved). Архив, который
+    // уже у библиотеки (метка во временной папке), там и посчитан. Запись, которая встала навсегда, — нет: пакет удалили
+    // в JDownloader (JD_GONE_MS) или скачанное не приходит дольше STUCK_MS (ушло во «Входящие» другой установки) и его
+    // никто не переносит. Иначе её бронь держалась бы, пока запись не уберут руками
+    async inFlight() {
+        const out = [...this.booked.values()].map((size) => ({ names: [], size, have: 0 }));
+        const now = Date.now();
+        const moving = new Set([this.seedbox, this.relay].map((s) => s?.state.current?.name).filter(Boolean));
+        for (const j of (await this.loadJobs()).values()) {
+            if (!['download', 'transfer'].includes(j.stage) || !(j.size > 0) || this.booked.has(j.key)) continue;
+            const names = (j.names || []).map((n) => n.normalize('NFC'));
+            if (j.stage === 'download' && now - Math.max(this.seenAt.get(j.key) || 0, j.started || 0) > JD_GONE_MS) continue;
+            if (j.stage === 'transfer' && now - (j.transferAt || j.started || 0) > STUCK_MS && !names.some((n) => moving.has(n))) continue;
+            if (this.uploads && names.length && await this.uploads.inboxStatus(names, j.started || 0).catch(() => null)) continue;
+            out.push({ names, size: j.size, have: Math.min(j.size, this.loaded.get(j.key) || 0) });
+        }
+        return out;
+    }
+
+    // Нажали «Скачать всё равно» у загрузки с этим архивом — seedbox и «Две установки» забирают его, не сверяясь с оценкой
+    async forced(name) {
+        const n = String(name || '').normalize('NFC');
+        for (const j of (await this.loadJobs()).values()) {
+            if (j.force && j.stage !== 'done' && (j.names || []).some((x) => x.normalize('NFC') === n)) return true;
+        }
+        return false;
     }
 
     // Ссылку — в JDownloader, архив игры — на скачивание. { found, sent, names, partial, captcha?, volumes? }
     // onCaptcha — ждать капчу, пока её решают (до CAPTCHA_WAIT_MS); без него — сразу вернуть { captcha }
-    async collect(acc, url, title, packageName, { version = '', onCaptcha = null, passwords = [] } = {}) {
+    // key — чья бронь места (без него — сам сбор), force — «Скачать всё равно»
+    async collect(acc, url, title, packageName, { version = '', onCaptcha = null, passwords = [], key = '', force = false } = {}) {
         await this.call(acc, '/linkgrabberv2/addLinks', [{
             links: url, packageName, autostart: false, autoExtract: false, overwritePackagizerRules: true,
             ...(acc.folder ? { destinationFolder: acc.folder } : {}),
@@ -303,19 +367,46 @@ class MyJdService {
         // Не дождались — отправляем найденное, остальное JDownloader оставит в «Захвате ссылок» (partial)
         const partial = stable < 2;
         if (!links.length) return { found: 0, sent: 0, names: [], partial };
+        // Пустышки («Blocked by!…», «No valid account found!…» — ссылка, куда JDownloader не вошёл) убираем: файла за ними нет,
+        // а без этого они копились в «Захвате ссылок» с каждым повтором
+        const dummy = links.filter((l) => l.host === 'linkcrawlerretry' || /^(No valid account found|Blocked by)!/i.test(l.name || ''));
+        if (dummy.length) {
+            await this.call(acc, '/linkgrabberv2/removeLinks', [dummy.map((l) => l.uuid), []]);
+            links = links.filter((l) => !dummy.includes(l));
+            if (!links.length) return { found: 0, sent: 0, names: [], partial };
+        }
         const keep = pick(links, title, version);
         // Архива игры не нашлось (только .exe, только для Mac) — ничего не убираем: человек выберет в JDownloader сам
         const drop = keep.length ? links.filter((l) => !keep.includes(l)) : [];
         // Есть только архив по частям: «Входящие» его не примут (по тому не распаковать) — так и скажем
         const volumes = !keep.length && links.some((l) => l.availability !== 'OFFLINE' && VOLUME.test(l.name || ''));
-        if (drop.length) await this.call(acc, '/linkgrabberv2/removeLinks', [drop.map((l) => l.uuid), []]);
         const names = [...new Set(keep.map((l) => l.name))];
-        if (keep.length) {
-            await this.call(acc, '/linkgrabberv2/moveToDownloadlist', [keep.map((l) => l.uuid), []]);
-            await this.call(acc, '/downloadcontroller/start');
+        // Место — до скачивания: архив и распакованная игра. Размер — по зеркалам (pick уже оставил одинаковые); у какого-то
+        // файла его нет — не проверяем, остаётся точная проверка на распаковке. Не влезает — ничего не трогаем: ссылки
+        // остаются в «Захвате ссылок», «Повторить» соберёт их снова
+        const sizes = names.map((n) => Math.max(0, ...keep.filter((l) => l.name === n).map((l) => l.bytesTotal || 0)));
+        const size = sizes.every((x) => x > 0) ? sizes.reduce((a, b) => a + b, 0) : 0;
+        const bookKey = key || packageName;
+        if (keep.length && !size) console.log(`[MyJDownloader] ${title}: JDownloader не знает размер архива — место не проверяем до распаковки`);
+        if (keep.length && size) {
+            const space = await this.reserve(bookKey, size, force);
+            if (space) {
+                console.warn(`[MyJDownloader] ${title}: не хватает места — нужно около ${Math.round(space.need / 1048576)} МБ, свободно ${Math.round(space.free / 1048576)} МБ`);
+                return { found: links.length, sent: 0, names, partial, space };
+            }
+        }
+        try {
+            if (drop.length) await this.call(acc, '/linkgrabberv2/removeLinks', [drop.map((l) => l.uuid), []]);
+            if (keep.length) {
+                await this.call(acc, '/linkgrabberv2/moveToDownloadlist', [keep.map((l) => l.uuid), []]);
+                await this.call(acc, '/downloadcontroller/start');
+            }
+        } finally {
+            // Без записи хода (без key) бронь держать некому
+            if (!key) this.booked.delete(bookKey);
         }
         // sent — файлы, а не ссылки: четыре зеркала одного архива — один файл
-        return { found: links.length, sent: names.length, names, partial, ...(volumes ? { volumes: true } : {}) };
+        return { found: links.length, sent: names.length, names, partial, ...(size ? { size } : {}), ...(volumes ? { volumes: true } : {}) };
     }
 
     // Сайт, который ждёт капчу, или null. Старый JDownloader без /captcha — как без капчи
@@ -326,7 +417,7 @@ class MyJdService {
 
     async packageLinks(acc, packageName) {
         const packages = (await this.call(acc, '/linkgrabberv2/queryPackages', [{ saveTo: true }])) || [];
-        const ids = packages.filter((p) => p.name === packageName && (!acc.folder || sameFolder(p.saveTo, acc.folder))).map((p) => p.uuid);
+        const ids = packages.filter((p) => samePackage(p.name, packageName) && (!acc.folder || sameFolder(p.saveTo, acc.folder))).map((p) => p.uuid);
         if (!ids.length) return [];
         return (await this.call(acc, '/linkgrabberv2/queryLinks', [{ packageUUIDs: ids, name: true, host: true, bytesTotal: true, availability: true }])) || [];
     }
@@ -393,18 +484,29 @@ class MyJdService {
         const next = {};
         const names = (job.names || []).map((n) => n.normalize('NFC'));
         const moving = [this.seedbox, this.relay].map((s) => s?.state.current).find((c) => c && names.includes(c.name));
+        // Seedbox или «Две установки» не забирают архив: на диске нет места (их state.waiting)
+        const waits = [this.seedbox, this.relay].map((s) => names.map((n) => s?.state.waiting?.[n]).find(Boolean)).find(Boolean);
         const meta = names.length && this.uploads ? await this.uploads.inboxStatus(names, job.started || 0) : null;
         if (meta) {
             if (meta.state === 'done') Object.assign(next, { stage: 'done', game: meta.game });
             else if (meta.state === 'processing') Object.assign(next, { stage: 'import', step: meta.step });
-            else Object.assign(next, { stage: 'error', error: meta.state === 'password' ? 'password' : meta.error || 'import' });
+            else if (meta.state === 'space') Object.assign(next, { stage: 'error', error: 'space', unpack: true, need: meta.need, free: meta.free });
+            // Причина кодом — страница и Telegram пишут её на языке человека
+            else Object.assign(next, { stage: 'error', error: meta.state === 'password' ? 'password' : meta.error || 'import', reason: meta.reason || undefined, params: meta.params });
+            // Место освободили, архив распаковывается снова — пометка «не влезла» больше не нужна
+            if (job.unpack && meta.state !== 'space') Object.assign(next, { unpack: undefined, need: undefined, free: undefined, ...(meta.state === 'error' ? {} : { error: undefined }) });
         } else if (names.length && this.inbox && await this.arrived(names, job.started || 0)) {
             Object.assign(next, { stage: 'import', step: 'settle' });
         } else if (moving) {
             Object.assign(next, { stage: 'transfer', loaded: moving.got, total: moving.total });
+        } else if (waits && job.stage === 'transfer') {
+            Object.assign(next, { space: true, need: waits.need, free: waits.free });
         } else if (job.stage === 'download' && acc) {
-            const pkg = (await this.jdPackages(acc).catch(() => null))?.find((p) => p.name === job.packageName && (!job.folder || sameFolder(p.saveTo, job.folder)));
+            // Пакет с тем же именем может остаться от прошлой загрузки: иначе её «готово» сочли бы за новую, и этап перескочил бы
+            const same = (await this.jdPackages(acc).catch(() => null))?.filter((p) => samePackage(p.name, job.packageName) && (!job.folder || sameFolder(p.saveTo, job.folder))) || [];
+            const pkg = same.find((p) => !p.finished) || same[0];
             if (pkg) {
+                this.seenAt.set(job.key, Date.now());
                 const done = pkg.finished || (pkg.bytesTotal > 0 && pkg.bytesLoaded >= pkg.bytesTotal);
                 Object.assign(next, done ? { stage: 'transfer' } : { loaded: pkg.bytesLoaded || 0, total: pkg.bytesTotal || 0, speed: pkg.speed || 0, eta: pkg.eta > 0 ? pkg.eta : 0 });
             }
@@ -415,8 +517,9 @@ class MyJdService {
         const stage = next.stage || job.stage;
         if (stage === 'transfer' && (job.stage !== 'transfer' || !job.transferAt)) next.transferAt = Date.now();
         if (stage === 'transfer' && !next.total && Date.now() - (next.transferAt || job.transferAt) > STUCK_MS) next.stuck = true;
-        // Байты меняются каждый опрос — их не пишем на диск, только этапы
-        const { loaded, total, speed, eta, stuck, ...lasting } = next;
+        // Байты меняются каждый опрос — их не пишем на диск, только этапы. Скачанное — в память, для брони места (inFlight)
+        if (next.loaded) this.loaded.set(job.key, next.loaded);
+        const { loaded, total, speed, eta, stuck, space, ...lasting } = next;
         // Пока спрашивали, запись убрали или начали заново — не воскрешаем и не портим
         const jobs = await this.loadJobs();
         if (jobs.get(job.key)?.started === job.started && Object.entries(lasting).some(([k, v]) => job[k] !== v)) await this.saveJob({ key: job.key, ...lasting });
@@ -440,9 +543,11 @@ class MyJdService {
     async downloads() {
         const acc = login();
         const jobs = [...(await this.loadJobs()).values()];
-        const out = await Promise.all(jobs.map((j) => (['download', 'transfer', 'import'].includes(j.stage) ? this.advance(j, acc) : j)));
-        return out.sort((a, b) => (b.started || 0) - (a.started || 0)).map(({ key, title, stage, names, captcha, error, game, step, loaded, total, speed, eta, stuck, target, url }) => (
-            { key, title, stage, file: names?.[0] || '', captcha, error, game, step, loaded, total, speed, eta, stuck, target, retry: !!url }));
+        // Не влезла на распаковке — смотрим дальше: «Повторить» у архива (uploads.retry) сдвинет её снова
+        const out = await Promise.all(jobs.map((j) => (['download', 'transfer', 'import'].includes(j.stage) || j.unpack ? this.advance(j, acc) : j)));
+        // need, free, hard — не хватает места (error 'space'; space — ждёт его на переносе); unpack — не влезло уже на распаковке
+        return out.sort((a, b) => (b.started || 0) - (a.started || 0)).map(({ key, title, stage, names, captcha, error, reason, params, game, step, loaded, total, speed, eta, stuck, target, url, need, free, hard, space, unpack }) => (
+            { key, title, stage, file: names?.[0] || '', captcha, error, reason, params, game, step, loaded, total, speed, eta, stuck, target, retry: !!url && !unpack, need, free, hard, space, unpack }));
     }
 }
 

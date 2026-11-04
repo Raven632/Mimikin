@@ -4,26 +4,32 @@ import { clock } from '../videoControl';
 // Своя полоса перемотки вместо системных <video controls> и <input type=range>: у них серая панель Chromium и белый
 // ползунок. Дорожка 3 точки с прямыми концами, пройденное — золотом, бегунок — самоцвет, как отметки состояний
 // в Настройках (.svc-gem). Это slider без <input>: тянется мышью и пальцем (pointer events), с клавиатуры — ←/→ на
-// step секунд, Home/End, пробел отдаёт onToggle (пауза). onSeek получает секунды
-export const SeekLine = ({ value, max, onSeek, onToggle, label, step = 5, className = '' }) => {
+// step секунд, Home/End, пробел отдаёт onToggle (пауза). onSeek получает секунды. Необязательные: valueText — что читает
+// экранный диктор (иначе время), onCommit — полосу отпустили или перешли с клавиатуры (плеер сцены переходит на строку
+// только тогда, а пока тянут — лишь показывает её)
+export const SeekLine = ({ value, max, onSeek, onToggle, onCommit, label, valueText, step = 5, className = '' }) => {
   const box = useRef(null);
   const drag = useRef(false);
+  const last = useRef(0);
   const frac = max > 0 ? Math.min(1, Math.max(0, value / max)) : 0;
   const at = (e) => {
     const r = box.current.getBoundingClientRect();
-    return Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * max;
+    last.current = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * max;
+    return last.current;
   };
+  // Касание на iOS кончается и pointercancel — это тоже «отпустили»
+  const release = () => { if (!drag.current) return; drag.current = false; onCommit?.(last.current); };
   return (
     <span
       ref={box} className={`seek-line ${className}`} role="slider" tabIndex={0} aria-label={label}
-      aria-valuemin={0} aria-valuemax={Math.round(max)} aria-valuenow={Math.round(value)} aria-valuetext={`${clock(value)} / ${clock(max)}`}
+      aria-valuemin={0} aria-valuemax={Math.round(max)} aria-valuenow={Math.round(value)} aria-valuetext={valueText ?? `${clock(value)} / ${clock(max)}`}
       onPointerDown={(e) => { if (!(max > 0)) return; drag.current = true; e.currentTarget.setPointerCapture(e.pointerId); onSeek(at(e)); }}
       onPointerMove={(e) => { if (drag.current) onSeek(at(e)); }}
-      onPointerUp={() => { drag.current = false; }}
-      onPointerCancel={() => { drag.current = false; }}
+      onPointerUp={release}
+      onPointerCancel={release}
       onKeyDown={(e) => {
         const to = e.key === 'ArrowRight' ? value + step : e.key === 'ArrowLeft' ? value - step : e.key === 'Home' ? 0 : e.key === 'End' ? max : null;
-        if (to !== null) { e.preventDefault(); onSeek(Math.min(max, Math.max(0, to))); }
+        if (to !== null) { e.preventDefault(); const v = Math.min(max, Math.max(0, to)); onSeek(v); onCommit?.(v); }
         else if (e.key === ' ' && onToggle) { e.preventDefault(); onToggle(); }
       }}
     >

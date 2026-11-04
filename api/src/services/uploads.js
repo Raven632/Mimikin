@@ -11,7 +11,8 @@
 //   <id>.archive — собираемый архив; байты пишутся строго подряд, поэтому годится всё, что в нём
 //                  лежит, и «сколько получено» — это его размер;
 //   <id>.json    — состояние: uploading → processing → done | error, имя, размер, папка игры;
-//                  архив под паролем ждёт его в состоянии password и после пароля снова processing.
+//                  архив под паролем ждёт его в состоянии password и после пароля снова processing;
+//                  не хватило места на распаковку — ждёт в состоянии space, «Повторить» — снова processing.
 // id — от имени, размера и «отпечатка» файла (хэш его начала и конца): тот же файл — та же загрузка.
 // Распаковка идёт в фоне: последний кусок отвечает сразу, итог узнают запросом состояния — телефон
 // за это время мог и уснуть. Игры в распакованном нет — ищем её во вложенных архивах (rar с zip
@@ -30,9 +31,18 @@ const { SYSTEM_DIRS } = require('../config/index.js');
 const { isSafeSegment } = require('../utils/validate.js');
 const { VOLUME, setOf } = require('./inbox.js');
 const { otherEngine } = require('../utils/archive.js');
+const { newVersionMatches } = require('../utils/audit.js');
+const { shownTitle } = require('../utils/title.js');
 
 const MAX_SIZE = 200 * 1024 ** 3;              // больше 200 ГБ игр не бывает — это ошибка
 const SPACE_MARGIN = 1024 ** 3;                // гигабайт про запас: диск не забиваем досуха
+// Недогруженный архив, в который байты не шли так долго, бросили (суточная уборка его потом сотрёт) — места не бронирует:
+// иначе одна брошенная с телефона загрузка сутки не пускала бы ни одной другой. Продолжат — проверит место заново
+const IDLE_UPLOAD_MS = 60 * 60 * 1000;
+// Сколько займёт распакованная игра на каждый байт архива — до начала загрузки, пока списка файлов ещё нет.
+// Замер на играх библиотеки (46 игр): медиана 1,14, p90 1,44 — 1,5 покрывает около 95% игр.
+// Ошибиться можно в обе стороны: точная проверка — при распаковке (checkArchive), оценка лишь не даёт начать безнадёжное
+const UNPACK_FACTOR = 1.5;
 const ARCHIVE = /\.(zip|7z|rar)$/i;
 const NESTED_DEPTH = 3;                        // архив в архиве — не глубже трёх уровней
 const RESERVED = [...SYSTEM_DIRS, 'api', 'socket.io', 'public'];
@@ -40,8 +50,15 @@ const RESERVED = [...SYSTEM_DIRS, 'api', 'socket.io', 'public'];
 // Ошибка с HTTP-кодом и подсказкой клиенту: received — «присылай с этого места», busy — «файл
 // сейчас пишет другой запрос», state — «файл уже получен целиком»
 const fail = (status, message, extra = {}) => Object.assign(new Error(message), { status, ...extra });
+// Отказ, который увидит человек: текст — для журнала, код и его данные — для страницы и Telegram: те пишут на языке человека
+const refuse = (message, reason, params) => Object.assign(new Error(message), { reason, ...(params ? { params } : {}) });
+const gone = () => fail(404, 'Такой загрузки нет — начните заново', { reason: 'upload-gone' });
 const mb = (bytes) => (bytes / 1048576).toFixed(1);
 const gb = (bytes) => `${(bytes / 1024 ** 3).toFixed(1)} ГБ`;
+// Сколько ещё займёт архив, которого на диске пока have байт, вместе с распакованной игрой
+const estimate = (size, have = 0) => Math.max(0, size - have) + Math.ceil(UNPACK_FACTOR * size);
+// Отказ из-за места (до начала и на распаковке): страница предлагает «всё равно» или «Место», hard — не влезет и архив
+const noRoom = (r) => fail(507, `Не хватает места на диске: нужно около ${gb(r.need)}, свободно ${gb(r.free)}`, { reason: 'space', need: r.need, free: r.free, hard: r.hard });
 
 // Разбор «7zz l -slt -ba»: блоки через пустую строку, в них «Path = …», «Size = …», «Encrypted = +»
 function parseListing(text) {
@@ -87,16 +104,16 @@ async function innerArchives(dir) {
 // зашифрован и список файлов, — «Cannot open encrypted archive»
 const PASSWORD_ERROR = /wrong password|encrypted archive/i;
 
-// Частые отказы 7-Zip — понятными словами, прочее — как сказал он сам
+// Частые отказы 7-Zip — понятными словами и кодом, прочее — как сказал он сам
 function explain7z(text, code) {
-    if (PASSWORD_ERROR.test(text)) return 'Архив под паролем';
-    if (/missing volume/i.test(text)) return 'Архив из нескольких частей — упакуйте игру в один архив';
-    if (/dangerous link/i.test(text)) return 'В архиве ссылка на файлы вне игры — такой архив не распаковываем';
-    if (/no space left/i.test(text)) return 'Кончилось место на диске при распаковке';
-    if (/is not archive|cannot open the file as/i.test(text)) return 'Файл не открывается как архив: он повреждён или это не архив';
-    if (/crc failed|data error|unexpected end|headers error/i.test(text)) return 'Архив повреждён: 7-Zip нашёл ошибки в данных. Проверьте его у себя и загрузите снова';
+    if (PASSWORD_ERROR.test(text)) return new Error('Архив под паролем');
+    if (/missing volume/i.test(text)) return refuse('Архив из нескольких частей — упакуйте игру в один архив', 'archive-volumes');
+    if (/dangerous link/i.test(text)) return refuse('В архиве ссылка на файлы вне игры — такой архив не распаковываем', 'archive-link');
+    if (/no space left/i.test(text)) return refuse('Кончилось место на диске при распаковке', 'disk-full');
+    if (/is not archive|cannot open the file as/i.test(text)) return refuse('Файл не открывается как архив: он повреждён или это не архив', 'archive-bad');
+    if (/crc failed|data error|unexpected end|headers error/i.test(text)) return refuse('Архив повреждён: 7-Zip нашёл ошибки в данных. Проверьте его у себя и загрузите снова', 'archive-broken');
     const line = text.split('\n').map((s) => s.trim()).find((s) => /error/i.test(s));
-    return `7-Zip не справился: ${(line || `код ${code}`).slice(0, 200)}`;
+    return refuse(`7-Zip не справился: ${(line || `код ${code}`).slice(0, 200)}`, 'archive-tool', { detail: (line || `exit code ${code}`).slice(0, 200) });
 }
 
 // 7-Zip без вопросов: пароль — тот, что дал человек, а без него заведомо неверный: иначе на архиве
@@ -109,12 +126,12 @@ function run7z(args, { output = false, password = '' } = {}) {
         let stderr = '';
         proc.stdout?.on('data', (d) => out.push(d));
         proc.stderr.on('data', (d) => { if (stderr.length < 20000) stderr += d; });
-        proc.on('error', (e) => reject(new Error(`7-Zip не запустился: ${e.message}`)));
+        proc.on('error', (e) => reject(refuse(`7-Zip не запустился: ${e.message}`, 'tool-missing', { detail: e.message })));
         proc.on('close', (code) => {
             const stdout = Buffer.concat(out).toString('utf8');
             const text = `${stderr}\n${stdout}`;
             if (code === 0) resolve(stdout);
-            else reject(Object.assign(new Error(explain7z(text, code)), { password: PASSWORD_ERROR.test(text) }));
+            else reject(Object.assign(explain7z(text, code), { password: PASSWORD_ERROR.test(text), space: /no space left/i.test(text) }));
         });
     });
 }
@@ -174,9 +191,9 @@ function planPatch(patchFiles, gameFiles) {
     }
     if (!best) {
         const patcher = patchFiles.find((f) => PATCHER_FILE.test(f));
-        throw new Error(patcher
-            ? `В архиве не файлы игры, а программа-патчер («${path.basename(patcher)}»): её запускают на компьютере с Windows`
-            : 'Не понял, куда класть патч: в архиве нет ни файлов этой игры, ни папок движка (data, js, img, audio)');
+        throw patcher
+            ? refuse(`В архиве не файлы игры, а программа-патчер («${path.basename(patcher)}»): её запускают на компьютере с Windows`, 'patch-program', { file: path.basename(patcher) })
+            : refuse('Не понял, куда класть патч: в архиве нет ни файлов этой игры, ни папок движка (data, js, img, audio)', 'patch-unknown');
     }
     const plan = [];
     let skipped = 0;
@@ -200,6 +217,10 @@ class UploadService {
         this.refreshGame = async () => ({});
         this.findGameFolder = async () => null;
         this.afterAdd = () => {};
+        // Игра «на полке» (services/trash.js): папки нет, карточка ждёт файлы. Её прежние файлы, если они ещё в корзине, —
+        // в _old, прежней версией (oldFromShelf(игра, куда) → true, если переехали)
+        this.isShelved = async () => false;
+        this.oldFromShelf = async () => false;
         this.tools = defaultTools;
         // Кусок молчит дольше takeoverMs, а тот же файл уже шлют снова — старое соединение мёртвое
         // (телефон ушёл из сети, а сервер об этом не узнал): его место занимает новый запрос.
@@ -227,10 +248,21 @@ class UploadService {
         this.finished = new Set();
         this.onFinished = null;
         this.unattendedMs = 60 * 1000;
+        // Идущая распаковка: сколько займёт (список 7-Zip) и сколько было свободно перед ней — бронь места (reserved)
+        this.unpacking = null;
+        // Чужие передачи, которые тоже лягут на этот диск (JDownloader, seedbox, «Две установки»; server.js):
+        // [{ names, size, have }]
+        this.inFlight = async () => [];
+        // Новая игра из архива человека: открыть ему (services/gameAccess.js), иначе ограниченный не увидит то, что загрузил сам
+        this.grant = async () => {};
     }
 
-    setDependencies({ dir, gamesDir, oldDir, inboxDir, addGameToDB, refreshGame, findGameFolder, afterAdd, tools }) {
+    setDependencies({ dir, gamesDir, oldDir, inboxDir, addGameToDB, refreshGame, findGameFolder, afterAdd, tools, inFlight, isShelved, oldFromShelf, grant }) {
         Object.assign(this, { dir, gamesDir, addGameToDB, findGameFolder, inboxDir });
+        if (inFlight) this.inFlight = inFlight;
+        if (isShelved) this.isShelved = isShelved;
+        if (oldFromShelf) this.oldFromShelf = oldFromShelf;
+        if (grant) this.grant = grant;
         this.oldDir = oldDir || path.join(gamesDir, '_old');
         if (refreshGame) this.refreshGame = refreshGame;
         if (afterAdd) this.afterAdd = afterAdd;
@@ -238,9 +270,21 @@ class UploadService {
     }
 
     // Номер загрузки: тот же файл — та же загрузка. Новая версия для игры из библиотеки — своя:
-    // тот же архив, загруженный как новая игра, её не продолжит
-    static idFor(name, size, fingerprint, target = '', mode = '') {
-        return crypto.createHash('sha256').update(`${name}\n${size}\n${fingerprint}${target ? `\n${target}` : ''}${mode ? `\n${mode}` : ''}`).digest('hex').slice(0, 32);
+    // тот же архив, загруженный как новая игра, её не продолжит. by — человек: у двоих с одним файлом загрузки разные, а у
+    // владельца номера прежние
+    static idFor(name, size, fingerprint, target = '', mode = '', by = '') {
+        return crypto.createHash('sha256').update(`${name}\n${size}\n${fingerprint}${target ? `\n${target}` : ''}${mode ? `\n${mode}` : ''}${by ? `\nby:${by}` : ''}`).digest('hex').slice(0, 32);
+    }
+
+    // Человек трогает только своё: чужая загрузка отвечает как несуществующая. Владельцу (by пусто) проверять нечего
+    async checkBy(id, by) {
+        if (!by) return;
+        this.checkId(id);
+        if ((await this.readMeta(id))?.by !== by) throw gone();
+    }
+
+    async grantTo(meta) {
+        if (meta.by && !meta.target) await this.grant(meta.by, meta.folder).catch((e) => console.error(`[Upload] ${meta.name}: доступ не выдан:`, e.message));
     }
 
     archivePath(id) { return this.parts.get(id) || path.join(this.dir, `${id}.archive`); }
@@ -294,29 +338,64 @@ class UploadService {
         if (!/^[0-9a-f]{32}$/.test(String(id || ''))) throw fail(400, 'Непонятный номер загрузки');
     }
 
+    // Сколько места уже обещано начатому: идущие загрузки — остаток архива и игра, ждущие распаковки (очередь, пароль) —
+    // игра, идущая распаковка — сколько ей ещё писать. Плюс чужие передачи (inFlight). self — своя загрузка, name — свой
+    // файл у чужих: себя не считаем. Брошенная загрузка (IDLE_UPLOAD_MS) и архив, который уже не влез («space»), — нет:
+    // он и так ждёт «Повторить», а его бронь не пускала бы ничего, пока место не освободят руками
+    async reserved(self = '', name = '') {
+        let sum = 0;
+        const freeNow = this.unpacking ? await this.tools.freeSpace(this.dir) : 0;
+        for (const u of await this.list()) {
+            if (u.id === self || u.state === 'error' || u.state === 'space') continue;
+            if (u.state === 'uploading') sum += u.busy || Date.now() - u.updatedAt < IDLE_UPLOAD_MS ? estimate(u.size, u.received) : 0;
+            else if (this.unpacking?.id === u.id && this.unpacking.freeAt) sum += Math.max(0, this.unpacking.unpacked - Math.max(0, this.unpacking.freeAt - freeNow));
+            else sum += estimate(u.size, u.size);
+        }
+        for (const x of await this.inFlight().catch(() => [])) {
+            if (!(x.size > 0) || (name && (x.names || []).includes(name))) continue;
+            sum += estimate(x.size, x.have || 0);
+        }
+        return sum;
+    }
+
+    // Влезет ли архив size (have уже на диске) вместе с распакованной игрой. Оценка не сходится — force («всё равно»)
+    // пускает, но не дальше минимума: сам архив и запас. { ok, hard, need, min, free, reserved }; free — за вычетом брони.
+    // hard — по месту на диске без брони: бронь — тоже оценка, и «всё равно» пускает всё, что на диск правда ляжет
+    async room({ size, have = 0, force = false, self = '', name = '' }) {
+        const reserved = await this.reserved(self, name);
+        const disk = await this.tools.freeSpace(this.dir);
+        const free = Math.max(0, disk - reserved);
+        const need = estimate(size, have) + SPACE_MARGIN;
+        const min = Math.max(0, size - have) + SPACE_MARGIN;
+        const hard = disk < min;
+        return { ok: free >= need || (force && !hard), hard, need, min, free, reserved, text: `нужно около ${gb(need)}, свободно ${gb(free)}` };
+    }
+
     // Начать или продолжить. Тот же файл — та же загрузка: сколько уже получено, с того и продолжаем
     // target — игра из библиотеки, которую архив обновляет (её папка); без него это новая игра
     // mode: 'patch' — архив не новая версия, а патч или мод поверх игры target
-    async start({ name, size, fingerprint, target, mode } = {}) {
+    // force — «Загрузить всё равно»: оценка места не сошлась, а человек знает лучше (сжатый репак). Помнится в метке
+    // by — чей архив, когда грузит не владелец (routes/uploads.js: target, mode и force ему не передаются)
+    async start({ name, size, fingerprint, target, mode, force } = {}, by = '') {
         // Айфон отдаёт имена в разложенном виде («и» + значок над ней): приводим к обычному,
         // иначе у того же файла с другого устройства был бы другой номер загрузки
         name = String(name || '').normalize('NFC').trim();
         size = Number(size);
         fingerprint = String(fingerprint || '');
-        if (!ARCHIVE.test(name) || name.length > 255 || /[\\/]/.test(name)) throw fail(400, 'Поддерживаются только архивы ZIP, 7z и RAR');
+        if (!ARCHIVE.test(name) || name.length > 255 || /[\\/]/.test(name)) throw fail(400, 'Поддерживаются только архивы ZIP, 7z и RAR', { reason: 'archive-only' });
         if (!Number.isInteger(size) || size <= 0 || size > MAX_SIZE) throw fail(400, 'Непонятный размер файла');
         if (!/^[0-9a-z]{1,64}$/.test(fingerprint)) throw fail(400, 'Непонятный отпечаток файла');
         target = target ? String(target) : '';
         mode = mode === 'patch' ? 'patch' : '';
         if (mode && !target) throw fail(400, 'Непонятно, к какой игре патч');
         // Игру, которую не обновить, видно сразу — а не после гигабайтов загрузки
-        if (target) await this.checkTarget(target);
+        if (target) await this.checkTarget(target, { patch: !!mode });
         await fsp.mkdir(this.dir, { recursive: true });
 
-        const id = UploadService.idFor(name, size, fingerprint, target, mode);
+        const id = UploadService.idFor(name, size, fingerprint, target, mode, by);
         let meta = await this.readMeta(id);
-        // Распаковывается (или распаковывался, а сервер перезапустился) или ждёт пароля — тот же архив
-        if (meta?.state === 'processing' || meta?.state === 'password') return this.status(id);
+        // Распаковывается (или распаковывался, а сервер перезапустился), ждёт пароля или места — тот же архив
+        if (['processing', 'password', 'space'].includes(meta?.state)) return this.status(id);
         // Тот же файл ещё раз после готовой или неудачной загрузки — это новая загрузка
         if (meta && meta.state !== 'uploading') {
             await this.forget(id);
@@ -329,13 +408,16 @@ class UploadService {
             await fsp.truncate(this.archivePath(id), 0);
             received = 0;
         }
-        const need = size - received + SPACE_MARGIN;
-        const free = await this.tools.freeSpace(this.dir);
-        if (free < need) throw fail(507, `Не хватает места на диске: нужно ещё ${gb(need)}, свободно ${gb(free)}`);
+        // Место — под архив и под распакованную игру: иначе архив грузился бы минутами, чтобы упереться в распаковку
+        force = force === true || !!meta?.force;
+        const room = await this.room({ size, have: received, force, self: id });
+        if (!room.ok) throw noRoom(room);
 
         // Состояние пишем, только когда его нет: перезапись старой копией могла бы вернуть
-        // «загружается» файлу, который другое устройство только что догрузило
-        if (!meta) meta = await this.writeMeta({ id, name, size, state: 'uploading', createdAt: Date.now(), ...(target ? { target } : {}), ...(mode ? { mode } : {}) });
+        // «загружается» файлу, который другое устройство только что догрузило. «Всё равно» — исключение: его
+        // запоминаем, чтобы продолжение после перезагрузки страницы не спрашивало второй раз
+        if (!meta) meta = await this.writeMeta({ id, name, size, state: 'uploading', createdAt: Date.now(), ...(target ? { target } : {}), ...(mode ? { mode } : {}), ...(force ? { force: true } : {}), ...(by ? { by } : {}) });
+        else if (force && !meta.force) meta = await this.writeMeta({ ...meta, force: true });
         this.seen.set(id, Date.now());
         console.log(`[Upload] ${name}: ${received ? `продолжение с ${mb(received)} из ${mb(size)} МБ` : `начало, ${mb(size)} МБ`}`);
         return { id, state: 'uploading', received, size };
@@ -347,7 +429,8 @@ class UploadService {
     // target — игра библиотеки: архив встаёт её обновлением, как «Обновить игру» (прежняя версия — в _old). Игру уже не
     // обновить (убрали, ссылка только для чтения) — берём как новую, а не теряем архив
     // file — архив или его тома списком (первый — первым)
-    async importFile(file, { target = '', version = '', passwords = [] } = {}) {
+    // version и link — версия темы, откуда скачали, и сама тема: новой игре — своя версия и ссылка сразу (addGameToDB)
+    async importFile(file, { target = '', version = '', passwords = [], link = '' } = {}) {
         const files = [].concat(file);
         const name = path.basename(files[0]).normalize('NFC');
         if (target) {
@@ -365,7 +448,7 @@ class UploadService {
         await fsp.mkdir(this.dir, { recursive: true });
         const known = (Array.isArray(passwords) ? passwords : []).map((p) => String(p || '').slice(0, 200)).filter((p) => p && !p.includes('\0')).slice(0, 5);
         const parts = files.length > 1 ? files.map((f) => path.basename(f)) : null;
-        await this.writeMeta({ id, name, size: st.size, state: 'processing', createdAt: Date.now(), inbox: true, ...(target ? { target, ...(version ? { expect: version } : {}) } : {}), ...(known.length ? { passwords: known } : {}), ...(parts ? { parts } : {}) });
+        await this.writeMeta({ id, name, size: st.size, state: 'processing', createdAt: Date.now(), inbox: true, ...(target ? { target } : {}), ...(version ? { expect: String(version).slice(0, 40) } : {}), ...(link && !target ? { link: String(link).slice(0, 300) } : {}), ...(known.length ? { passwords: known } : {}), ...(parts ? { parts } : {}) });
         if (parts) {
             await fsp.mkdir(this.partsDir(id), { recursive: true });
             this.parts.set(id, path.join(this.partsDir(id), parts[0]));
@@ -416,7 +499,7 @@ class UploadService {
         for (;;) {
             const other = this.writing.get(id);
             if (!other) break;
-            if (!other.stalled(this.takeoverMs)) throw fail(409, 'Этот файл уже загружается — в другой вкладке или с другого устройства', { busy: true });
+            if (!other.stalled(this.takeoverMs)) throw fail(409, 'Этот файл уже загружается — в другой вкладке или с другого устройства', { busy: true, reason: 'upload-busy' });
             other.stop(fail(499, 'соединение молчало, его место занял новый запрос'));
             await other.closed;
         }
@@ -442,7 +525,7 @@ class UploadService {
         this.seen.set(id, t0);
         try {
             const meta = await this.readMeta(id);
-            if (!meta) throw fail(404, 'Такой загрузки нет — начните заново');
+            if (!meta) throw gone();
             if (meta.state !== 'uploading') throw fail(409, 'Файл уже получен целиком', { state: meta.state });
             const received = await this.received(id);
             if (offset !== received) throw fail(409, 'Не то место в файле', { received });
@@ -454,7 +537,7 @@ class UploadService {
             } catch (e) {
                 const total = offset + (e.written || 0);
                 console.warn(`[Upload] ${meta.name}: кусок с ${mb(offset)} МБ прервался на ${mb(total)} МБ — ${e.message}`);
-                if (e.code === 'ENOSPC') throw fail(507, 'Кончилось место на диске', { received: total });
+                if (e.code === 'ENOSPC') throw fail(507, 'Кончилось место на диске', { received: total, reason: 'disk-full' });
                 throw e;
             }
 
@@ -521,14 +604,30 @@ class UploadService {
     async status(id) {
         this.checkId(id);
         const meta = await this.readMeta(id);
-        if (!meta) throw fail(404, 'Такой загрузки нет — начните заново');
+        if (!meta) throw gone();
         this.seen.set(id, Date.now());
         if (meta.state === 'processing' && !this.jobs.has(id)) this.finalize(id);
         return {
             id, name: meta.name, state: meta.state, received: await this.received(id), size: meta.size,
-            step: this.steps.get(id) || '', folder: meta.folder || '', error: meta.error || '', target: meta.target || '',
-            mode: meta.mode || '', patch: meta.patch || null,
+            step: this.steps.get(id) || '', folder: meta.folder || '', copy: !!meta.copy, error: meta.error || '', reason: meta.reason || '', params: meta.params, target: meta.target || '',
+            mode: meta.mode || '', patch: meta.patch || null, ...(meta.state === 'space' ? { need: meta.need || 0, free: meta.free || 0 } : {}),
         };
+    }
+
+    // «Повторить» у архива, которому не хватило места на распаковку: место освободили — распаковываем снова.
+    // Не хватит и теперь — архив снова ждёт, с новыми числами
+    async retry(id) {
+        this.checkId(id);
+        const meta = await this.readMeta(id);
+        if (!meta) throw gone();
+        if (meta.state !== 'space' || this.jobs.has(id)) throw fail(409, 'Архив сейчас не ждёт места', { state: meta.state });
+        this.seen.set(id, Date.now());
+        Object.assign(meta, { state: 'processing', error: '' });
+        delete meta.need;
+        delete meta.free;
+        await this.writeMeta(meta);
+        this.finalize(id);
+        return this.status(id);
     }
 
     // Пароль к архиву, который его ждёт. Проверяет его сама распаковка: не подошёл — архив снова
@@ -536,9 +635,9 @@ class UploadService {
     async setPassword(id, password) {
         this.checkId(id);
         password = String(password ?? '');
-        if (!password || password.length > 1000 || password.includes('\0')) throw fail(400, 'Введите пароль');
+        if (!password || password.length > 1000 || password.includes('\0')) throw fail(400, 'Введите пароль', { reason: 'password-empty' });
         const meta = await this.readMeta(id);
-        if (!meta) throw fail(404, 'Такой загрузки нет — начните заново');
+        if (!meta) throw gone();
         if (meta.state !== 'password' || this.jobs.has(id)) throw fail(409, 'Архив сейчас не ждёт пароля', { state: meta.state });
         this.passwords.set(id, password);
         this.seen.set(id, Date.now());
@@ -573,22 +672,22 @@ class UploadService {
     }
 
     // Недогруженные, распаковывающиеся и неудачные — чтобы после перезагрузки страницы было видно,
-    // что осталось и что с ним делать
-    async list() {
+    // что осталось и что с ним делать. by — только загрузки этого человека (бронь места считает все)
+    async list(by = '') {
         let files = [];
         try { files = await fsp.readdir(this.dir); } catch (e) { return []; }
         const items = [];
         for (const file of files) {
             const id = (file.match(/^([0-9a-f]{32})\.json$/) || [])[1];
             const meta = id && await this.readMeta(id);
-            if (!meta || meta.state === 'done') continue;
+            if (!meta || meta.state === 'done' || (by && meta.by !== by)) continue;
             const received = await this.received(id);
             if (meta.state === 'uploading' && !received) continue;
             let mtime = 0;
             try { mtime = (await fsp.stat(this.archivePath(id))).mtimeMs; } catch (e) {}
             // Байты шли только что — её сейчас грузят (с другого устройства): удалить не предложим
             const busy = meta.state === 'uploading' && (this.writing.has(id) || Date.now() - mtime < 30 * 1000);
-            items.push({ id, name: meta.name, size: meta.size, received, state: meta.state, error: meta.error || '', target: meta.target || '', mode: meta.mode || '', busy, queued: this.queued(id), updatedAt: Math.max(meta.updatedAt || 0, mtime) });
+            items.push({ id, name: meta.name, size: meta.size, received, state: meta.state, error: meta.error || '', reason: meta.reason || '', params: meta.params, target: meta.target || '', mode: meta.mode || '', busy, queued: this.queued(id), updatedAt: Math.max(meta.updatedAt || 0, mtime), ...(meta.state === 'space' ? { need: meta.need || 0, free: meta.free || 0 } : {}) });
         }
         return items.sort((a, b) => b.updatedAt - a.updatedAt);
     }
@@ -604,7 +703,7 @@ class UploadService {
             const meta = id && await this.readMeta(id);
             if (meta?.inbox && names.includes(meta.name) && meta.createdAt >= since && (!best || meta.createdAt > best.createdAt)) best = meta;
         }
-        return best && { state: best.state, error: best.error || '', game: best.target || best.folder || '', step: this.steps.get(best.id) || (this.queued(best.id) ? 'queued' : '') };
+        return best && { state: best.state, error: best.error || '', reason: best.reason || '', params: best.params, game: best.target || best.folder || '', step: this.steps.get(best.id) || (this.queued(best.id) ? 'queued' : ''), ...(best.state === 'space' ? { need: best.need || 0, free: best.free || 0 } : {}) };
     }
 
     // После перезапуска сервера: доделать распаковки, прерванные посередине, — даже если страницу,
@@ -641,7 +740,8 @@ class UploadService {
 
     // Архив, который сейчас распакуем: пути внутри и место на диске. Пароль — тот, что дал человек,
     // и для вложенных тот же; нет его или не тот — needPassword
-    async checkArchive(file, { password, needPassword }) {
+    async checkArchive(file, ctx) {
+        const { password, needPassword } = ctx;
         let entries;
         try {
             entries = await this.tools.list(file, password);
@@ -650,12 +750,15 @@ class UploadService {
             if (e.password) throw needPassword();
             throw e;
         }
-        if (!entries.length) throw new Error('Архив пуст');
+        if (!entries.length) throw refuse('Архив пуст', 'archive-empty');
         if (entries.some((e) => e.encrypted) && !password) throw needPassword();
-        if (entries.some((e) => unsafePath(e.path))) throw new Error('В архиве путь наружу («../») — такой архив не распаковываем');
+        if (entries.some((e) => unsafePath(e.path))) throw refuse('В архиве путь наружу («../») — такой архив не распаковываем', 'archive-path');
         const unpacked = entries.reduce((sum, e) => sum + e.size, 0);
         const free = await this.tools.freeSpace(this.dir);
-        if (free < unpacked + SPACE_MARGIN) throw new Error(`Не хватает места для распаковки: нужно ${gb(unpacked + SPACE_MARGIN)}, свободно ${gb(free)}`);
+        // Не хватило — архив ждёт места (space), а не пропадает: его гигабайты уже здесь
+        if (free < unpacked + SPACE_MARGIN) throw Object.assign(new Error(`Не хватает места для распаковки: нужно ${gb(unpacked + SPACE_MARGIN)}, свободно ${gb(free)}`), { space: true, need: unpacked + SPACE_MARGIN, free });
+        // Бронь идущей распаковки: сколько ей писать, от того, что было свободно сейчас (reserved)
+        if (ctx.id) this.unpacking = { id: ctx.id, unpacked, freeAt: free };
     }
 
     async extractArchive(file, dir, { password, needPassword }) {
@@ -687,26 +790,64 @@ class UploadService {
         return null;
     }
 
+    // Страница спрашивает перед отправкой: новая ли это версия игры из библиотеки (utils/audit.js). Ответ — самая точная из
+    // игр, которые можно обновить: папку-ссылку только для чтения не предлагаем, «Заменить» упёрлось бы в отказ
+    async versionMatch(rows, { name, link } = {}) {
+        name = String(name || '').normalize('NFC').trim();
+        if (!ARCHIVE.test(name)) return null;
+        const title = name.replace(VOLUME, '').replace(ARCHIVE, '');
+        for (const { row, why } of newVersionMatches(rows, { title, link: String(link || '') })) {
+            if (await this.checkTarget(row.id).then(() => true, () => false)) return { id: row.id, title: shownTitle(row).title, cover: row.cover || '', why };
+        }
+        return null;
+    }
+
     // Игра, которую обновляют: должна быть в библиотеке и быть настоящей папкой. В dev игры прода —
-    // ссылки только для чтения, их здесь не обновить
-    async checkTarget(target) {
+    // ссылки только для чтения, их здесь не обновить. 'shelf' — игра на полке: папки нет, новая версия встанет на её
+    // место. Патч ложится на файлы игры — с полки его не поставить
+    async checkTarget(target, { patch = false } = {}) {
         if (!isSafeSegment(target) || RESERVED.includes(target.toLowerCase())) throw fail(400, 'Непонятная игра');
         const st = await fsp.lstat(path.join(this.gamesDir, target)).catch(() => null);
+        if (!st && await this.isShelved(target)) {
+            if (patch) throw fail(403, 'Игра на полке: патч ставится на её файлы — сначала верните игру', { reason: 'patch-shelved' });
+            return 'shelf';
+        }
         if (!st) throw fail(404, 'Такой игры в библиотеке нет');
         // 403, а не 409: 409 страница понимает как «занято, повторить позже»
-        if (st.isSymbolicLink() || !st.isDirectory()) throw fail(403, 'Эту игру здесь не обновить: её папка — ссылка только для чтения');
+        if (st.isSymbolicLink() || !st.isDirectory()) throw fail(403, 'Эту игру здесь не обновить: её папка — ссылка только для чтения', { reason: 'target-readonly' });
+    }
+
+    // Где лежит прежняя версия игры, которую обновили; '' — её нет (игра была на полке)
+    backupOf(meta) {
+        return meta.backup ? path.join(this.oldDir, meta.backup) : '';
     }
 
     // Новые файлы — в папку игры, прежние — в _old/<игра>/<дата>. Два переименования в пределах диска,
     // мгновенно; без папки игра остаётся лишь на этот миг (сверка библиотеки его переживает). Куда
     // уедет прежняя версия, записано заранее: перезапуск сервера посередине — следующий заход
     // доделывает по тому, где что лежит
+    // С полки (meta.shelf) в библиотеке прежних файлов нет: новая версия просто встаёт на место (папка уже там — сервер
+    // перезапустился сразу после переезда). Прежние, если ещё в корзине, — в _old, как при обычном обновлении: «Вернуть
+    // прежнюю версию» их вернёт, «Место» предложит убрать. Сначала переезд, потом отметка: оборвётся между ними — в _old
+    // папка без описания, а не описание без папки
     async swapIn(meta, source) {
         const dest = path.join(this.gamesDir, meta.target);
-        if (!meta.backup) {
-            await this.checkTarget(meta.target);
-            meta.backup = path.join(meta.target, new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
+        const stamp = () => path.join(meta.target, new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
+        if (!meta.backup && !meta.shelf) {
+            if (await this.checkTarget(meta.target) === 'shelf') meta.shelf = true;
+            else meta.backup = stamp();
             await this.writeMeta(meta);
+        }
+        if (meta.shelf) {
+            if (!fs.existsSync(dest)) {
+                const backup = meta.backup ? '' : stamp();
+                if (backup && await this.oldFromShelf(meta.target, path.join(this.oldDir, backup))) {
+                    meta.backup = backup;
+                    await this.writeMeta(meta);
+                }
+                await fsp.rename(source, dest);
+            }
+            return dest;
         }
         const backup = path.join(this.oldDir, meta.backup);
         const moved = fs.existsSync(backup);
@@ -731,7 +872,7 @@ class UploadService {
         // Перезапуск сервера между двумя переименованиями swapIn: игра уже в _old, готовая копия ждёт
         const halfway = backup && fs.existsSync(backup) && !fs.existsSync(dest) && fs.existsSync(staging);
         if (!halfway) {
-            await this.checkTarget(meta.target);
+            await this.checkTarget(meta.target, { patch: true });
             let files = await listFiles(extractDir);
             // Патч, запакованный ещё раз, — распакуем вложенный архив
             if (files.length && files.every((f) => isInnerArchive(path.basename(f)))) {
@@ -742,7 +883,7 @@ class UploadService {
                 await fsp.rm(inner, { force: true });
                 files = await listFiles(extractDir);
             }
-            if (!files.length) throw new Error('Архив пустой');
+            if (!files.length) throw refuse('Архив пустой', 'archive-empty');
             const { plan, replaced, added, skipped } = planPatch(files, await listFiles(dest));
             say('save');
             await fsp.rm(staging, { recursive: true, force: true });
@@ -807,8 +948,9 @@ class UploadService {
         if (!meta) return;
         try {
             await this.onFinished({
-                name: meta.name, state: meta.state, error: meta.error || '', folder: meta.folder || '', target: meta.target || '',
-                mode: meta.mode || '', version: meta.version || '', unattended: Date.now() - (this.seen.get(id) || 0) > this.unattendedMs,
+                name: meta.name, state: meta.state, error: meta.error || '', reason: meta.reason || '', params: meta.params, folder: meta.folder || '', target: meta.target || '',
+                mode: meta.mode || '', version: meta.version || '', shelf: !!meta.shelf, unattended: Date.now() - (this.seen.get(id) || 0) > this.unattendedMs,
+                ...(meta.state === 'space' ? { need: meta.need || 0, free: meta.free || 0 } : {}),
             });
         } catch (e) {
             console.error('[Upload] Сообщение о загрузке:', e.message);
@@ -828,19 +970,20 @@ class UploadService {
             // не распаковываем — в базу её добавила сверка библиотеки при старте
             if (meta.folder && fs.existsSync(path.join(this.gamesDir, meta.folder))) {
                 // Новая версия встала на место, а данные из её файлов записать не успели
-                if (meta.target) await this.refreshGame(meta.target, path.join(this.gamesDir, meta.target), { archiveName: meta.name, backupDir: path.join(this.oldDir, meta.backup), patch: meta.mode === 'patch' });
+                if (meta.target) await this.refreshGame(meta.target, path.join(this.gamesDir, meta.target), { archiveName: meta.name, backupDir: this.backupOf(meta), patch: meta.mode === 'patch' });
+                await this.grantTo(meta);
                 await fsp.rm(extractDir, { recursive: true, force: true });
                 await this.dropArchive(id);
                 meta.state = 'done';
                 await this.writeMeta(meta);
                 return;
             }
-            if (await this.received(id) !== meta.size) throw new Error('Архив на сервере неполный — загрузите его снова');
+            if (await this.received(id) !== meta.size) throw refuse('Архив на сервере неполный — загрузите его снова', 'archive-incomplete');
 
             // Пароль не вводили — пробуем известные (заданные при загрузке по ссылке), пока архив не откроется
             if (!password) password = await this.knownPassword(this.archivePath(id), meta.passwords || []);
             let nested = 0;
-            const ctx = { password, needPassword, onNested: () => { nested += 1; say('nested'); } };
+            const ctx = { id, password, needPassword, onNested: () => { nested += 1; say('nested'); } };
             say('check');
             await this.checkArchive(this.archivePath(id), ctx);
 
@@ -862,8 +1005,10 @@ class UploadService {
             if (!source) {
                 // Игра на другом движке — так и говорим: «нет папки www» человеку ничего не объясняет
                 const engine = await otherEngine(extractDir);
-                if (engine) throw new Error(`Это игра на ${engine} — библиотека запускает только игры на RPG Maker MV и MZ`);
-                throw new Error(nested ? 'В архиве нет игры: ни папки www, ни index.html — и во вложенных архивах тоже' : 'В архиве нет игры: не найдены ни папка www, ни index.html');
+                if (engine) throw refuse(`Это игра на ${new Intl.ListFormat('ru', { type: 'disjunction' }).format(engine)} — библиотека запускает только игры на RPG Maker MV и MZ`, 'other-engine', { engine });
+                throw nested
+                    ? refuse('В архиве нет игры: ни папки www, ни index.html — и во вложенных архивах тоже', 'no-game-nested')
+                    : refuse('В архиве нет игры: не найдены ни папка www, ни index.html', 'no-game');
             }
             // Новая версия игры из библиотеки: та же папка, тот же номер — сохранения, наигранное время,
             // статус и найденные данные остаются при ней. Прежние файлы — в _old, а не в корзину
@@ -872,14 +1017,16 @@ class UploadService {
                 const dest = await this.swapIn(meta, source);
                 meta.folder = meta.target;
                 await this.writeMeta(meta);
-                const { version } = await this.refreshGame(meta.target, dest, { archiveName: meta.name, backupDir: path.join(this.oldDir, meta.backup), version: meta.expect || '' });
+                const { version } = await this.refreshGame(meta.target, dest, { archiveName: meta.name, backupDir: this.backupOf(meta), version: meta.expect || '' });
                 await fsp.rm(extractDir, { recursive: true, force: true });
                 await this.dropArchive(id);
                 meta.state = 'done';
                 if (version) meta.version = version;
                 await this.writeMeta(meta);
                 this.finished.add(id);
-                console.log(`[Upload] ${meta.name}: игра ${meta.target} обновлена${version ? ` до ${version}` : ''}, прежняя версия — в _old/${meta.backup}`);
+                console.log(meta.backup
+                    ? `[Upload] ${meta.name}: игра ${meta.target} обновлена${version ? ` до ${version}` : ''}, прежняя версия — в _old/${meta.backup}`
+                    : `[Upload] ${meta.name}: игра ${meta.target} вернулась с полки${version ? `, версия ${version}` : ''}`);
                 this.afterAdd(meta.target, dest);
                 return;
             }
@@ -891,11 +1038,17 @@ class UploadService {
             while (Buffer.byteLength(chars.join('')) > 200) chars.pop();
             let base = chars.join('').trim();
             if (!/[\p{L}\p{N}]/u.test(base) || RESERVED.includes(base.toLowerCase()) || base.startsWith('.')) base = `game_${Date.now()}`;
-            let folder = base;
-            for (let n = 1; fs.existsSync(path.join(this.gamesDir, folder)); n++) folder = `${base}_${n}`;
+            // Имя игры «на полке» тоже занято: её папки нет, но это другая игра, пока человек не скажет «это она»
+            // (routes/games.js, shelf-match)
+            // Человеку имя папки — всегда со случайным хвостом: «Foo_1» сказало бы, что Foo в библиотеке уже есть, даже если она ему закрыта
+            const free = meta.by ? `${base}_${crypto.randomBytes(3).toString('hex')}` : base;
+            let folder = free;
+            for (let n = 1; fs.existsSync(path.join(this.gamesDir, folder)) || await this.isShelved(folder); n++) folder = `${free}_${n}`;
 
-            // Папку запоминаем до переезда: перезапуск сервера после него не распакует игру дважды
+            // Папку запоминаем до переезда: перезапуск сервера после него не распакует игру дважды.
+            // copy — имя уже занято, это вторая карточка: страница скажет об этом, а не «игра добавлена»
             meta.folder = folder;
+            meta.copy = folder !== free;
             await this.writeMeta(meta);
             say('save');
             const dest = path.join(this.gamesDir, folder);
@@ -906,7 +1059,8 @@ class UploadService {
                 if (e.code !== 'EXDEV') throw e;
                 await execFileP('mv', [source, dest]);
             }
-            await this.addGameToDB(folder, dest);
+            await this.addGameToDB(folder, dest, { version: meta.expect || '', link: meta.link || '', ...(meta.by ? { name: base } : {}) });
+            await this.grantTo(meta);
 
             await fsp.rm(extractDir, { recursive: true, force: true });
             await this.dropArchive(id);
@@ -926,16 +1080,52 @@ class UploadService {
                 console.log(`[Upload] ${meta.name}: ${password ? 'пароль не подошёл' : 'архив под паролем — ждём пароль'}`);
                 return;
             }
+            // Не хватило места — архив остаётся ждать, как под паролем: освободят место — «Повторить» (retry).
+            // Числа — из проверки; 7-Zip, упёршийся в диск посреди распаковки, их не даёт — тогда свободное сейчас
+            if (e.space || e.code === 'ENOSPC') {
+                const unpacking = this.unpacking?.id === id ? this.unpacking.unpacked + SPACE_MARGIN : 0;
+                Object.assign(meta, { state: 'space', error: e.message, need: e.need || unpacking, free: e.free ?? await this.tools.freeSpace(this.dir).catch(() => 0) });
+                await this.writeMeta(meta).catch(() => {});
+                this.finished.add(id);
+                console.warn(`[Upload] ${meta.name}: ${e.message} — архив ждёт места`);
+                return;
+            }
             // Архив из «Входящих» не стираем: другой копии у человека может не быть — в _inbox/_failed, разобраться
             if (!meta.inbox || await this.keepInbox(id, meta)) await this.dropArchive(id).catch(() => {});
             meta.state = 'error';
             meta.error = e.message;
+            if (e.reason) Object.assign(meta, { reason: e.reason, params: e.params });
             await this.writeMeta(meta).catch(() => {});
             this.finished.add(id);
             console.error(`[Upload] ${meta.name}: ${e.message}`);
         } finally {
             this.steps.delete(id);
             this.passwords.delete(id);
+            if (this.unpacking?.id === id) this.unpacking = null;
+        }
+    }
+
+    // Уборка временной папки (server.js, раз в час): старше суток — долой. Загрузку убираем вместе с её архивом и по
+    // времени метки, через forget: архив из «Входящих» уходит в _inbox/_failed, а не стирается. Время самого архива
+    // не годится — у архива из «Входящих» оно прежнее, и ждущий пароля или места стёрся бы через час
+    async cleanup(maxAgeMs = 24 * 60 * 60 * 1000) {
+        let files = [];
+        try { files = await fsp.readdir(this.dir); } catch (e) { return; }
+        const now = Date.now();
+        const metas = new Set(files.map((f) => (f.match(/^([0-9a-f]{32})\.json$/) || [])[1]).filter(Boolean));
+        for (const file of files) {
+            const full = path.join(this.dir, file);
+            const st = await fsp.stat(full).catch(() => null);
+            if (!st) continue;
+            const id = (file.match(/^([0-9a-f]{32})\.(?:json|archive|parts)$/) || [])[1];
+            if (id && metas.has(id)) {
+                if (file !== `${id}.json` || now - st.mtimeMs <= maxAgeMs || this.jobs.has(id) || this.writing.has(id)) continue;
+                await this.forget(id).catch((e) => console.error(`[Cleanup] ${file}:`, e.message));
+                console.log(`[Cleanup] Убрана старая загрузка: ${file}`);
+            } else if (now - st.mtimeMs > maxAgeMs) {
+                await fsp.rm(full, { recursive: true, force: true }).catch(() => {});
+                console.log(`[Cleanup] Удален старый временный файл: ${file}`);
+            }
         }
     }
 }

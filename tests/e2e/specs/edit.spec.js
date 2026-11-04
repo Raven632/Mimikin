@@ -6,7 +6,7 @@ const game = async (page, title) => (await apiGames(page)).find((g) => g.title =
 async function edit(page, title) {
   await openLibrary(page);
   await openGame(page, title);
-  await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click();
+  await page.locator('.act-edit').click();
   await expect(page.locator('.edit-form')).toBeVisible();
 }
 
@@ -59,7 +59,7 @@ test.describe('правка сведений', () => {
     await expect(page.locator('#modal-title')).toHaveText('Ashen Crown');
     expect((await apiGames(page)).some((g) => g.title === 'Ashen Crown Remastered')).toBe(false);
 
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click();
+    await page.locator('.act-edit').click();
     await page.locator('.edit-footer .cancel-btn').click();
     await expect(page.locator('.edit-form')).toHaveCount(0);
     await expect(page.locator('.confirm-box')).toHaveCount(0);
@@ -96,13 +96,13 @@ test.describe('правка сведений', () => {
     await expect(page.locator('.edit-form')).toHaveCount(0);
     expect((await game(page, 'Sky Knight Chronicles')).cover).toBe(before);
 
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click();
+    await page.locator('.act-edit').click();
     await file.setInputFiles({ name: 'cover.png', mimeType: 'image/png', buffer: png });
     await page.locator('.edit-footer .save-btn').click();
     await expect(page.locator('.edit-form')).toHaveCount(0);
     await expect.poll(async () => (await game(page, 'Sky Knight Chronicles')).cover).toMatch(/cover_custom/);
 
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click();
+    await page.locator('.act-edit').click();
     await page.locator('.edit-cover button', { hasText: 'Вернуть найденную' }).click();
     await expect(page.locator('.edit-cover')).toContainText('вернётся после «Сохранить»');
     await expect(page.locator('.edit-cover-frame img')).toHaveAttribute('src', new RegExp(before.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));

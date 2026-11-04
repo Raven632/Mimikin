@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { timeAgo } from '../formatAgo';
+import { gameOrigin, gameServerReady } from '../launchGame';
 
 const MAX_MS = 4 * 60 * 1000;
 
@@ -19,8 +20,9 @@ const GameCheck = ({ game, t, lang, last, auto, onSaved }) => {
       const res = await fetch(`/api/play/${encodeURIComponent(game.id)}`, { method: 'POST' });
       const data = await res.json();
       if (!res.ok || data.mode !== 'frame') throw new Error();
-      const origin = data.origin || `${window.location.protocol}//${window.location.hostname}:${data.port}`;
-      setRun({ url: `${origin}${data.path}?mimikin-check=1&lang=${localStorage.getItem('rpg_lang') || 'ru'}`, origin, steps: [] });
+      if (!(await gameServerReady(data))) return;
+      const origin = gameOrigin(data);
+      setRun({ url: `${origin}${data.path}?mimikin-check=1&lang=${lang}${data.session ? `&s=${data.session}` : ''}`, origin, steps: [] });
     } catch {
       setError(t.chk_cant);
     }

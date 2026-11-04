@@ -1,24 +1,34 @@
 const express = require('express');
 const fsp = require('fs').promises;
 const path = require('path');
+const crypto = require('crypto');
 const dbService = require('../db/database.js');
 const scraperService = require('../services/scraper.js');
-const { GAMES_DIR, SAVES_DIR, OLD_DIR, TRASH_DIR } = require('../config/index.js');
+const { GAMES_DIR, SAVES_DIR, OLD_DIR, TRASH_DIR, OFFLINE } = require('../config/index.js');
+const { offlineMeta } = require('../utils/offline.js');
 const { coverUpload } = require('../utils/upload.js');
 const { getFolderSize } = require('../utils/archive.js');
 const { validateIdParam } = require('../utils/validate.js');
-const { redisClient, invalidateGamesList, GAMES_LIST_KEY } = require('../utils/cache.js');
+const { redisClient, invalidateGamesList, GAMES_LIST_KEY, emitToPerson } = require('../utils/cache.js');
 const { normalizeTags } = require('../utils/tags.js');
 const { shownTitle } = require('../utils/title.js');
 const { installedVersion } = require('../utils/version.js');
 const { splitLinks, linkKey, removedAfterEdit, parseRemoved } = require('../utils/links.js');
-const { duplicateGroups, improvable, coverage } = require('../utils/audit.js');
+const { duplicateGroups, shelfMatches, improvable, coverage } = require('../utils/audit.js');
+const { createCopies } = require('../services/copies.js');
+const uploadService = require('../services/uploads.js');
 const { createTrash } = require('../services/trash.js');
+const shownMeta = OFFLINE ? offlineMeta : (meta) => meta;
 const gameArchive = require('../services/gameArchive.js');
 const { pipeline } = require('stream');
 const spaceService = require('../services/space.js');
 const translateService = require('../services/translate.js');
 const pictureService = require('../services/pictures.js');
+const sceneLines = require('../services/sceneLines.js');
+const galleryService = require('../services/gallery.js');
+const personal = require('../services/personal.js');
+const { cleanName, goodName, cleanLists, parseLists, renamed, NOTES_MAX } = require('../utils/gameLists.js');
+const SERIES_MAX = 120;
 
 const router = express.Router();
 
@@ -28,6 +38,7 @@ router.param('id', validateIdParam);
 let isCalculatingSizes = false; // Глобальный замок
 
 const trash = createTrash({ db: () => dbService.get(), trashDir: TRASH_DIR, gamesDir: GAMES_DIR, onChange: invalidateGamesList });
+const copies = createCopies({ db: () => dbService.get(), trash, savesDir: SAVES_DIR, gamesDir: GAMES_DIR, onChange: invalidateGamesList });
 
 // --- КОРЗИНА (services/trash.js): удалённые игры 30 дней ---
 router.get('/trash', async (req, res) => {
@@ -43,10 +54,13 @@ router.get('/trash', async (req, res) => {
 
 router.post('/trash/:key/restore', async (req, res) => {
     try {
-        res.json({ success: true, ...(await trash.restore(req.params.key)) });
+        const back = await trash.restore(req.params.key);
+        // Вернули из корзины — реплики снова в поиске (сценарии галереи в _media остались)
+        if (back?.id) sceneLines.indexGame(back.id).catch((e) => console.warn(`[Реплики] ${back.id}: ${e.message}`));
+        res.json({ success: true, ...back });
     } catch (e) {
         if (!e.status) console.error('[Корзина]', e.message);
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось вернуть игру' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось вернуть игру', reason: e.reason });
     }
 });
 
@@ -56,13 +70,18 @@ router.delete('/trash/:key', async (req, res) => {
         res.json({ success: true });
     } catch (e) {
         if (!e.status) console.error('[Корзина]', e.message);
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось стереть' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось стереть', reason: e.reason });
     }
 });
 
 // Прежние версии игры в _old/<игра>: папки по дате, старые первыми (рядом — их .json)
 const oldVersionsOf = async (id) => (await fsp.readdir(path.join(OLD_DIR, id), { withFileTypes: true }).catch(() => []))
     .filter((e) => e.isDirectory()).map((e) => e.name).sort();
+
+// Своё у игры уже есть — сейвы (_saves/<игра>) или моменты и «Где вышли» (_saves/.marks/<игра>). Только владельца:
+// сейвы других людей (_saves/.people) вопрос о переносе не блокируют
+const hasPlayData = async (id) => (await fsp.readdir(path.join(SAVES_DIR, id)).catch(() => [])).length > 0
+    || (await fsp.readdir(path.join(SAVES_DIR, '.marks', id)).catch(() => [])).length > 0;
 
 // Строку пишем мы сами, но битое значение в базе не должно ронять весь список
 const parseProgress = (raw) => { try { return raw ? JSON.parse(raw) : null; } catch { return null; } };
@@ -87,7 +106,9 @@ router.get('/', async (req, res) => {
         // [REDIS] 1. Проверяем кэш. Если есть — отдаем мгновенно!
         const cachedGames = await redisClient.get(GAMES_LIST_KEY);
         if (cachedGames) {
-            return res.json(JSON.parse(cachedGames));
+            const list = JSON.parse(cachedGames);
+            // Список в Redis один и несёт личное владельца; человеку подменяем его поля его строками (services/personal.js)
+            return res.json(personal.other(req.person) ? await personal.overlay(list, req.person) : list);
         }
 
         const rows = await dbService.get().all('SELECT * FROM games WHERE ready = 1');
@@ -95,7 +116,8 @@ router.get('/', async (req, res) => {
         // =========================================================
         // БЕЗОПАСНОЕ ФОНОВОЕ ВЗВЕШИВАНИЕ (С ЗАЩИТОЙ ОТ ГОНКИ)
         // =========================================================
-        const gamesWithoutSize = rows.filter(r => !r.size || r.size === 0);
+        // У игры с полки папки нет — взвешивать нечего, размер остаётся прежним: столько вернёт «Скачать снова»
+        const gamesWithoutSize = rows.filter(r => (!r.size || r.size === 0) && !r.shelved_at);
         if (gamesWithoutSize.length > 0 && !isCalculatingSizes) {
             isCalculatingSizes = true; 
             
@@ -126,6 +148,20 @@ router.get('/', async (req, res) => {
         for (const id of await fsp.readdir(OLD_DIR).catch(() => [])) {
             oldVersions[id] = (await oldVersionsOf(id)).length;
         }
+        // Игры с полки: файлы в корзине ещё лежат — их можно вернуть сразу (key) до purgeAt
+        const shelves = rows.some((r) => r.shelved_at) ? await trash.shelves().catch(() => new Map()) : new Map();
+        const shelfOf = (row) => {
+            if (!row.shelved_at) return null;
+            const files = shelves.get(row.id);
+            return { at: row.shelved_at, key: files?.key || '', until: files?.purgeAt || 0 };
+        };
+        // Загружена как новая, а похоже, это игра с полки (utils/audit.js): спросить в её окне, пока своих сейвов и
+        // моментов у неё нет — с ними перенос смешал бы два прохождения
+        const shelfMatch = new Map();
+        for (const [id, { row, why }] of shelfMatches(rows)) {
+            if (await hasPlayData(id)) continue;
+            shelfMatch.set(id, { id: row.id, title: shownTitle(row).title, playtime: row.playtime || 0, why });
+        }
 
         const games = rows.map(row => ({
             id: row.id, 
@@ -138,7 +174,7 @@ router.get('/', async (req, res) => {
             size: row.size || 0,
             ...titleFields(row),
             // Без этого поля значок «ждёт метаданные» горел на каждой карточке
-            scraped: !!row.scraped,
+            scraped: !!row.scraped || OFFLINE,
             tags: normalizeTags(row.tags ? JSON.parse(row.tags) : []),
             description: row.description, 
             url: `/${row.id}/`, 
@@ -148,28 +184,36 @@ router.get('/', async (req, res) => {
             rating: row.rating,
             status: row.status || '',
             favorite: !!row.favorite,
+            notes: row.notes || '',
+            lists: parseLists(row.lists),
+            // Серию страница считает сама по этому же списку: человеку приходят только его игры, скрытые части не посчитать
+            series: row.series || '',
             playtime: row.playtime || 0,
             progress: parseProgress(row.progress),
             screens: parseProgress(row.screens) || [],
             oldVersions: oldVersions[row.id] || 0,
+            // «На полке»: { at, key, until } — файлов нет; key — их запись в корзине, пока не прошли 30 дней
+            shelf: shelfOf(row),
+            // «Похоже, это … с полки»: { id, title, playtime, why } — why: по чему совпали (name, code, thread)
+            shelfMatch: shelfMatch.get(row.id) || null,
             // Язык по тексту самой игры: { main, langs, original }. language выше —
             // только ручная правка, она главнее
             textLang: parseProgress(row.text_lang),
             // Состояние поиска метаданных — для строчки в окне игры и для ревизии
-            meta: {
+            meta: shownMeta({
                 status: row.meta_status || 'new',
                 attempts: row.meta_attempts || 0,
                 retryAt: row.meta_retry_at || null,
                 checkedAt: row.meta_checked_at || 0,
                 error: row.meta_error || '',
-            },
+            }),
         })).sort((a, b) => b.addedAt - a.addedAt); 
         games.forEach((g, i) => g.number = i + 1);
 
         // [REDIS] 2. Сохраняем собранный список в кэш на 5 минут (300 секунд)
         await redisClient.set(GAMES_LIST_KEY, JSON.stringify(games), { EX: 300 });
 
-        res.json(games);
+        res.json(personal.other(req.person) ? await personal.overlay(games, req.person) : games);
     } catch (e) { res.status(500).json({ error: 'DB Error' }); }
 });
 
@@ -213,6 +257,39 @@ router.post('/lookup-queue/pause', async (req, res) => {
 });
 
 // «Искать сейчас» из окна игры и «Искать первой» из очереди: игра — в начало очереди
+// Переименовать подборку (to) или удалить её (to нет): игры остаются. В игре, где подборка to уже есть, они сливаются
+router.post('/lists/change', async (req, res) => {
+    const from = cleanName(req.body?.from);
+    const to = cleanName(req.body?.to);
+    if (!goodName(from) || (req.body?.to !== undefined && !goodName(to))) return res.status(400).json({ error: 'Неверное имя подборки' });
+    try {
+        const db = dbService.get();
+        // Человек переименовывает свои подборки: его строки в user_games, а не games
+        const user = personal.other(req.person);
+        let changed = 0;
+        const rows = user
+            ? await db.all("SELECT game_id AS id, lists FROM user_games WHERE user_id = ? AND lists <> '[]'", [user.id])
+            : await db.all("SELECT id, lists FROM games WHERE COALESCE(lists, '[]') <> '[]'");
+        for (const row of rows) {
+            const list = parseLists(row.lists);
+            if (!list.includes(from)) continue;
+            // Только если список с чтения не менялся: иначе запись затёрла бы подборку, добавленную в эту минуту
+            const { changes } = user
+                ? await db.run('UPDATE user_games SET lists = ?, at = ? WHERE user_id = ? AND game_id = ? AND lists = ?', [JSON.stringify(renamed(list, from, to)), Date.now(), user.id, row.id, row.lists])
+                : await db.run('UPDATE games SET lists = ? WHERE id = ? AND lists = ?', [JSON.stringify(renamed(list, from, to)), row.id, row.lists]);
+            changed += changes;
+        }
+        if (changed) {
+            if (user) emitToPerson(user.id, 'library-changed');
+            else await invalidateGamesList();
+        }
+        res.json({ changed });
+    } catch (e) {
+        console.error('[Подборки]', e.message);
+        res.status(500).json({ error: 'Не удалось изменить подборку' });
+    }
+});
+
 router.post('/:id/rescrape', async (req, res) => {
     try {
         const queued = await scraperService.requestScrape([path.basename(req.params.id)], { priority: true });
@@ -236,8 +313,10 @@ router.get('/audit', async (req, res) => {
 
         // Движок открывает игру через index.html: либо в корне папки, либо в www —
         // ровно так его ищет раздача файлов. Нет ни того, ни другого — игра не запустится
+        // Игры с полки — без файлов нарочно: ни «не запустится», ни «место занимает» к ним не относится
+        const onDisk = rows.filter((g) => !g.shelved_at);
         const broken = [];
-        for (const g of rows) {
+        for (const g of onDisk) {
             const dir = path.join(GAMES_DIR, g.id);
             const ok = await exists(path.join(dir, 'index.html'))
                 || await exists(path.join(dir, 'www', 'index.html'));
@@ -245,13 +324,13 @@ router.get('/audit', async (req, res) => {
         }
 
         // Одна игра в двух папках: одно название или одна страница магазина (utils/audit.js)
-        const duplicates = duplicateGroups(rows);
+        const duplicates = duplicateGroups(rows, await copies.dismissed());
 
         const slim = (g) => ({ id: g.id, title: g.title, size: g.size || 0 });
         const bySize = (a, b) => b.size - a.size;
 
-        const never = rows.filter(g => !g.lastPlayed && !g.playtime).map(slim).sort(bySize);
-        const heavy = rows.map(slim).sort(bySize).slice(0, 10);
+        const never = onDisk.filter(g => !g.lastPlayed && !g.playtime).map(slim).sort(bySize);
+        const heavy = onDisk.map(slim).sort(bySize).slice(0, 10);
 
         // Поиск метаданных: берём готовое состояние, а не угадываем по пустым полям.
         // Раньше ревизия и кнопка «Дозагрузить» считали «без метаданных» по-разному.
@@ -259,7 +338,7 @@ router.get('/audit', async (req, res) => {
         const missing = rows.filter(g => g.meta_status === 'not_found' || g.meta_status === 'error').map(withMeta).sort(bySize);
         const partial = rows.filter(g => g.meta_status === 'partial').map(withMeta).sort(bySize);
         const now = Date.now();
-        const pending = rows.filter(g => g.meta_status === 'new' || (g.meta_retry_at && g.meta_retry_at <= now)).length;
+        const pending = OFFLINE ? 0 : rows.filter(g => g.meta_status === 'new' || (g.meta_retry_at && g.meta_retry_at <= now)).length;
 
         // Папки, игры к которым уже нет. Сейвы в таком случае — единственное, что
         // осталось от прохождения, поэтому показываем отдельно и ничего не трогаем.
@@ -286,6 +365,36 @@ router.get('/audit', async (req, res) => {
     } catch (e) {
         console.error('[Audit] Ошибка:', e.message);
         res.status(500).json({ error: 'Не удалось собрать ревизию' });
+    }
+});
+
+// Две копии одной игры из ревизии (services/copies.js): что будет при склейке, сама склейка, «Не дубликат»
+const copiesRoute = (work) => async (req, res) => {
+    try {
+        res.json(await work(req));
+    } catch (e) {
+        if (!e.status) console.error('[Копии]', e.message);
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось склеить: обе копии остались как были', reason: e.reason });
+    }
+};
+router.get('/duplicates/plan', copiesRoute((req) => copies.plan(String(req.query.a || ''), String(req.query.b || ''))));
+router.post('/duplicates/merge', copiesRoute(async (req) => {
+    const result = await copies.merge(String(req.body?.keep || ''), String(req.body?.drop || ''));
+    // В корзине игры нет в библиотеке — и её реплик в поиске
+    sceneLines.dropGame(result.drop).catch((e) => console.warn(`[Реплики] ${result.drop}: ${e.message}`));
+    return result;
+}));
+router.post('/duplicates/dismiss', copiesRoute((req) => copies.dismiss(String(req.body?.a || ''), String(req.body?.b || ''))));
+
+// Архив перед отправкой: похоже, это новая версия игры из библиотеки? { match: { id, title, cover, why } | null }
+router.post('/upload-match', async (req, res) => {
+    try {
+        const rows = await dbService.get().all('SELECT * FROM games WHERE ready = 1');
+        res.json({ match: await uploadService.versionMatch(rows, req.body) });
+    } catch (e) {
+        // Не вышло сравнить — не повод мешать загрузке: страница просто не спросит
+        console.error('[Upload]', e.message);
+        res.json({ match: null });
     }
 });
 
@@ -384,9 +493,9 @@ router.post('/:id/old/restore', async (req, res) => {
     const game = path.join(GAMES_DIR, id);
     try {
         const latest = (await oldVersionsOf(id)).pop();
-        if (!latest) return res.status(404).json({ error: 'Прежней версии нет' });
+        if (!latest) return res.status(404).json({ error: 'Прежней версии нет', reason: 'no-old-version' });
         const st = await fsp.lstat(game).catch(() => null);
-        if (!st || st.isSymbolicLink() || !st.isDirectory()) return res.status(409).json({ error: 'Эту игру здесь не вернуть' });
+        if (!st || st.isSymbolicLink() || !st.isDirectory()) return res.status(409).json({ error: 'Эту игру здесь не вернуть', reason: 'game-readonly' });
         let saved = {};
         try { saved = JSON.parse(await fsp.readFile(path.join(dir, `${latest}.json`), 'utf8')); } catch (e) {}
         await fsp.rename(game, path.join(dir, new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')));
@@ -598,13 +707,13 @@ router.post('/:id/edit', async (req, res) => {
                 tags: normalizeTags(g.tags ? JSON.parse(g.tags) : []),
                 description: g.description || '',
                 screens: parseProgress(g.screens) || [],
-                meta: {
+                meta: shownMeta({
                     status: g.meta_status,
                     attempts: g.meta_attempts || 0,
                     retryAt: g.meta_retry_at || null,
                     checkedAt: g.meta_checked_at || 0,
                     error: g.meta_error || '',
-                },
+                }),
             }
         });
     } catch (e) { 
@@ -633,7 +742,7 @@ router.post('/:id/translation', async (req, res) => {
         if (!(await dbService.get().get('SELECT id FROM games WHERE id = ?', [id]))) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.setLang(id, String(req.body?.lang || '')));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось включить перевод' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось включить перевод', reason: e.reason });
     }
 });
 router.post('/:id/translation/pause', async (req, res) => {
@@ -644,7 +753,7 @@ router.post('/:id/translation/resume', async (req, res) => {
     const id = path.basename(req.params.id);
     try {
         const lang = await translateService.langOf(id);
-        if (!lang) return res.status(409).json({ error: 'Перевод не включён' });
+        if (!lang) return res.status(409).json({ error: 'Перевод не включён', reason: 'tl-off' });
         translateService.enqueue(id, lang);
         res.json(await translateService.status(id));
     } catch (e) { res.status(500).json({ error: 'Не удалось' }); }
@@ -655,7 +764,7 @@ router.get('/:id/translation/estimate', async (req, res) => {
     try {
         if (await noGame(path.basename(req.params.id))) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.estimate(path.basename(req.params.id), String(req.query.lang || ''))); } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 // Проверка перевода: слипшиеся слова и текст, который не влезет в окно; «Исправить» — то, что исправляется само
@@ -665,12 +774,12 @@ router.post('/:id/translation/estimate-redo', async (req, res) => {
     try {
         if (await noGame(id)) return res.status(404).json({ error: 'Игра не найдена' });
         const lang = await translateService.langOf(id);
-        if (!lang) return res.status(409).json({ error: 'Перевод не включён' });
+        if (!lang) return res.status(409).json({ error: 'Перевод не включён', reason: 'tl-off' });
         const lines = Array.isArray(req.body?.lines) ? req.body.lines.map(String).slice(0, 20000) : null;
         if (lines && !lines.length) return res.status(400).json({ error: 'Нужен список строк' });
         res.json(await translateService.estimate(id, lang, lines || 'all'));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 // «Перевести заново»: { lines? }
@@ -682,7 +791,7 @@ router.post('/:id/translation/redo', async (req, res) => {
         if (lines && !lines.length) return res.status(400).json({ error: 'Нужен список строк' });
         res.json(await translateService.redo(id, lines));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 // Строки перевода с поиском: ?q=Мэйбел
@@ -692,7 +801,7 @@ router.get('/:id/translation/lines', async (req, res) => {
         if (await noGame(id)) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.lines(id, String(req.query.q || '').slice(0, 200)));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 // Итог проверки переведённой игры в браузере: { ok, steps, errors } (rpg-fixes, setupSelfTest)
@@ -702,7 +811,7 @@ router.post('/:id/translation/check-result', async (req, res) => {
         if (await noGame(id)) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.saveCheck(id, req.body || {}));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 // Перевод игры файлом (JSON «оригинал → перевод», как у MTool): скачать
@@ -715,21 +824,21 @@ router.get('/:id/translation/export', async (req, res) => {
         res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(`${id}.${lang}.json`)}`);
         res.send(JSON.stringify(data, null, 2));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось', reason: e.reason });
     }
 });
 router.get('/:id/translation/check', async (req, res) => {
     try {
         if (await noGame(path.basename(req.params.id))) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.check(path.basename(req.params.id))); } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось проверить перевод' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось проверить перевод', reason: e.reason });
     }
 });
 router.post('/:id/translation/fix', async (req, res) => {
     try {
         if (await noGame(path.basename(req.params.id))) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.fix(path.basename(req.params.id))); } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось исправить' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось исправить', reason: e.reason });
     }
 });
 // Готовый перевод из файла (MTool, свой): { lang, content } — JSON «оригинал → перевод» или CSV
@@ -739,7 +848,7 @@ router.post('/:id/translation/import', express.json({ limit: '50mb' }), async (r
         if (!(await dbService.get().get('SELECT id FROM games WHERE id = ?', [id]))) return res.status(404).json({ error: 'Игра не найдена' });
         res.json(await translateService.importFile(id, String(req.body?.lang || ''), String(req.body?.content || '')));
     } catch (e) {
-        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось загрузить перевод' });
+        res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось загрузить перевод', reason: e.reason });
     }
 });
 
@@ -766,7 +875,7 @@ router.post('/:id/pictures', async (req, res) => {
     const id = path.basename(req.params.id);
     try {
         if (await noGame(id)) return res.status(404).json({ error: 'Игра не найдена' });
-        if (!(await pictureService.available({ fresh: true }))) return res.status(503).json({ error: 'Служба распознавания не отвечает' });
+        if (!(await pictureService.available({ fresh: true }))) return res.status(503).json({ error: 'Служба распознавания не отвечает', reason: 'ocr-down' });
         pictureService.start(id, req.body?.scope === 'all' ? 'all' : 'ui');
         res.json(await pictureService.status(id));
     } catch (e) { res.status(500).json({ error: 'Не удалось' }); }
@@ -820,7 +929,7 @@ router.post('/:id/pictures/box', async (req, res) => {
         if (!label) return res.status(422).json({ error: 'В рамке текст не найден' });
         res.json({ label });
     } catch (e) {
-        if (e instanceof pictureService.OcrDown) return res.status(503).json({ error: 'Служба распознавания не отвечает' });
+        if (e instanceof pictureService.OcrDown) return res.status(503).json({ error: 'Служба распознавания не отвечает', reason: 'ocr-down' });
         res.status(500).json({ error: 'Не удалось' });
     }
 });
@@ -852,45 +961,160 @@ router.get('/:id/lookup', async (req, res) => {
 // --- 5. СОХРАНЕНИЕ РЕЙТИНГА И ВРЕМЕНИ ИГРЫ ---
 router.post('/:id/meta', async (req, res) => {
     const folder = path.basename(req.params.id);
-    const { rating, lastPlayed, status, favorite } = req.body;
+    const { rating, lastPlayed, status, favorite, notes, lists } = req.body;
 
     try {
         const game = await dbService.get().get('SELECT id FROM games WHERE id = ?', [folder]);
         if (!game) return res.status(404).json({ error: 'Игра не найдена' });
 
-        const updates = [], params = [];
-        if (rating !== undefined) { updates.push('rating = ?'); params.push(rating); }
-        if (lastPlayed !== undefined) { updates.push('lastPlayed = ?'); params.push(lastPlayed); }
+        // Что менять — по порядку, как всегда; саму запись делает personal.write (владельцу тот же UPDATE games, человеку — его строка)
+        const fields = {};
+        if (rating !== undefined) fields.rating = rating;
+        if (lastPlayed !== undefined) fields.lastPlayed = lastPlayed;
 
         // Статус приходит из браузера — принимаем только известные значения.
         // Иначе в базе окажется любой текст, который пришлёт клиент.
         const STATUSES = ['', 'playing', 'done', 'dropped', 'wish'];
         if (status !== undefined) {
             if (!STATUSES.includes(status)) return res.status(400).json({ error: 'Неизвестный статус' });
-            updates.push('status = ?'); params.push(status);
+            fields.status = status;
         }
-        if (favorite !== undefined) { updates.push('favorite = ?'); params.push(favorite ? 1 : 0); }
+        if (favorite !== undefined) fields.favorite = favorite ? 1 : 0;
+        if (notes !== undefined) {
+            if (typeof notes !== 'string' || notes.length > NOTES_MAX) return res.status(400).json({ error: 'Слишком длинная заметка' });
+            fields.notes = notes;
+        }
+        if (lists !== undefined) {
+            const clean = cleanLists(lists);
+            if (!clean) return res.status(400).json({ error: 'Неверные подборки' });
+            fields.lists = JSON.stringify(clean);
+        }
 
-        if (updates.length > 0) {
-            params.push(folder);
-            await dbService.get().run(`UPDATE games SET ${updates.join(', ')} WHERE id = ?`, params);
-            
-            // [REDIS] Сбрасываем кэш, так как рейтинг или время игры обновились
-            await invalidateGamesList();
+        if (Object.keys(fields).length > 0) {
+            const mine = await personal.write(req.person, folder, fields);
+            // [REDIS] Сбрасываем кэш, так как рейтинг или время игры обновились. Запись человека общий список не меняет:
+            // сообщаем только его устройствам
+            if (mine) emitToPerson(req.person.id, 'library-changed');
+            else await invalidateGamesList();
         }
         res.json({ success: true });
     } catch (e) { res.status(500).json({ error: 'Ошибка сохранения метаданных' }); }
 });
 
+// Поправка серии владельцем: кнопки в окне игры. В USER_ROUTES этого адреса нет: человеку 403
+router.post('/:id/series', async (req, res) => {
+    const id = path.basename(req.params.id);
+    const series = typeof req.body?.series === 'string' ? req.body.series.trim() : null;
+    // eslint-disable-next-line no-control-regex
+    // Без единой буквы и цифры ключ серии пуст (gameSeries.js), и разные такие серии склеились бы в одну
+    if (series === null || series.length > SERIES_MAX || /[\u0000-\u001f\u007f]/.test(series) || (series && !/[\p{L}\p{N}]/u.test(series))) return res.status(400).json({ error: 'Неверное имя серии' });
+    try {
+        const done = await dbService.get().run('UPDATE games SET series = ? WHERE id = ?', [series, id]);
+        if (!done.changes) return res.status(404).json({ error: 'Игра не найдена' });
+        await invalidateGamesList();
+        res.json({ success: true, series });
+    } catch (e) {
+        console.error('[Серия]', e.message);
+        res.status(500).json({ error: 'Ошибка сохранения серии' });
+    }
+});
+
+// --- «НА ПОЛКУ» ---
+// Файлы — в корзину на 30 дней (services/trash.js, shelveGame), карточка, сейвы, моменты и наигранное время остаются в
+// библиотеке. Ответ несёт key — тост «Отменить» и «Вернуть» в окне игры кладут файлы обратно. Обложка из самой папки
+// игры — сначала копией в _media: иначе карточка на полке осталась бы без картинки
+router.post('/:id/shelf', async (req, res) => {
+    const id = path.basename(req.params.id);
+    try {
+        const game = await dbService.get().get('SELECT id, cover FROM games WHERE id = ?', [id]);
+        if (!game || !(await fsp.lstat(path.join(GAMES_DIR, id)).catch(() => null))) return res.status(404).json({ error: 'Игра не найдена' });
+        if (game.cover && game.cover.startsWith(`${id}/`)) {
+            const buf = await fsp.readFile(path.join(GAMES_DIR, game.cover)).catch(() => null);
+            if (buf) {
+                // Имя — по содержимому, как у найденных поиском (database.js, addGameToDB)
+                const name = `cover-${crypto.createHash('md5').update(buf).digest('hex').slice(0, 10)}${path.extname(game.cover).toLowerCase() || '.jpg'}`;
+                await fsp.mkdir(path.join(GAMES_DIR, '_media', id), { recursive: true });
+                await fsp.writeFile(path.join(GAMES_DIR, '_media', id, name), buf);
+                await dbService.get().run('UPDATE games SET cover = ? WHERE id = ?', [`_media/${id}/${name}`, id]);
+            } else console.warn(`[Полка] ${id}: обложку из папки игры не прочитать (${game.cover}) — на полке карточка будет без неё`);
+        }
+        const { key } = await trash.shelveGame(id);
+        // Сцен этой игры без её файлов не открыть — и в поиске по репликам их нет
+        sceneLines.dropGame(id).catch((e) => console.warn(`[Реплики] ${id}: ${e.message}`));
+        res.json({ success: true, trashKey: key });
+    } catch (e) {
+        console.error('[Полка]', e.message);
+        res.status(500).json({ error: 'Не удалось убрать игру на полку' });
+    }
+});
+
+// «Похоже, это … с полки» в окне игры, загруженной как новая (utils/audit.js, shelfMatches). accept — её папка встаёт на
+// место игры с полки: та же карточка, её сейвы, моменты, время и найденные данные, а строка новой уходит (своего у неё
+// ещё нет — иначе не спрашиваем). Прежние файлы с полки, если ещё в корзине, — в _old, как при обновлении. Иначе
+// «нет, это другая» — больше не спрашивать про эту игру с полки
+router.post('/:id/shelf-match', async (req, res) => {
+    const id = path.basename(req.params.id);
+    try {
+        const db = dbService.get();
+        const game = await db.get('SELECT * FROM games WHERE id = ?', [id]);
+        const shelf = await db.get('SELECT * FROM games WHERE id = ?', [String(req.body?.into || '')]);
+        if (!game || game.shelved_at || !shelf?.shelved_at) return res.status(404).json({ error: 'Игра не найдена' });
+        // «Нет» — про эту игру с полки; ответы копятся: у одной игры бывает несколько копий на полке
+        if (!req.body?.accept) {
+            const no = String(game.shelf_dismissed || '').split('\n').filter(Boolean);
+            await db.run('UPDATE games SET shelf_dismissed = ? WHERE id = ?', [[...new Set([...no, shelf.id])].join('\n'), id]);
+            await invalidateGamesList();
+            return res.json({ success: true });
+        }
+        const from = path.join(GAMES_DIR, id);
+        const to = path.join(GAMES_DIR, shelf.id);
+        if (!(await fsp.lstat(from).catch(() => null))) return res.status(404).json({ error: 'Игра не найдена' });
+        if (await hasPlayData(id)) return res.status(409).json({ error: 'У этой игры уже свои сейвы или моменты — перенос смешал бы два прохождения', reason: 'shelf-has-data' });
+        if (await fsp.lstat(to).catch(() => null)) return res.status(409).json({ error: 'Игра с полки уже на месте', reason: 'shelf-in-place' });
+        // Сначала папка: не переехала — ничего не поменялось. Прежние файлы с полки — после, в _old
+        await fsp.rename(from, to);
+        const backupDir = path.join(OLD_DIR, shelf.id, new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-'));
+        const old = await trash.shelfToOld(shelf.id, backupDir).catch((e) => { console.warn(`[Полка] ${shelf.id}: прежние файлы остались в корзине (${e.message})`); return false; });
+        // Что человек успел отметить у новой сам — статус, оценку, избранное, картинки галереи — не теряется: туда, где у
+        // игры с полки пусто. Найденное поиском у той своё; время — вместе
+        await db.run(`UPDATE games SET playtime = COALESCE(playtime, 0) + ?, lastPlayed = MAX(COALESCE(lastPlayed, 0), ?),
+            status = CASE WHEN COALESCE(status, '') = '' THEN ? ELSE status END,
+            rating = CASE WHEN COALESCE(rating, 0) = 0 THEN ? ELSE rating END,
+            favorite = MAX(COALESCE(favorite, 0), ?),
+            notes = CASE WHEN COALESCE(notes, '') = '' THEN ? ELSE notes END,
+            lists = CASE WHEN COALESCE(lists, '[]') = '[]' THEN ? ELSE lists END,
+            series = CASE WHEN series = '' THEN ? ELSE series END WHERE id = ?`,
+        [game.playtime || 0, game.lastPlayed || 0, game.status || '', game.rating || 0, game.favorite || 0, game.notes || '', game.lists || '[]', game.series === 'none' ? '' : game.series || '', shelf.id]);
+        await db.run('UPDATE OR IGNORE gallery_favorites SET game_id = ? WHERE game_id = ?', [shelf.id, id]);
+        // Другие люди: их сейвы и личные строки тоже встают на место игры с полки, где у них там пусто; где нет — остаются
+        // на месте. Вопрос о переносе их сейвы не блокируют (hasPlayData смотрит только владельца), а сбой здесь владельцу
+        // не помеха: файлы уже переехали
+        await copies.movePeople(id, shelf.id).catch((e) => console.warn(`[Полка] ${id}: сейвы других людей не перенеслись (${e.message})`));
+        await db.run('DELETE FROM games WHERE id = ?', [id]);
+        // Версия — из имени папки новой (это имя её архива) или своя у неё; название и прочее из файлов — как у новой версии
+        await dbService.refreshGame(shelf.id, to, { archiveName: id, version: game.my_version || '', backupDir: old ? backupDir : '' });
+        galleryService.forget(id).catch(() => {});
+        sceneLines.dropGame(id).catch((e) => console.warn(`[Реплики] ${id}: ${e.message}`));
+        console.log(`[Полка] ${id}: это ${shelf.id} с полки — файлы встали на её место`);
+        res.json({ success: true, id: shelf.id });
+    } catch (e) {
+        console.error('[Полка]', e.message);
+        res.status(500).json({ error: 'Не удалось' });
+    }
+});
+
 // --- 6. УДАЛЕНИЕ ИГРЫ ---
-// Не стираем, а в корзину на 30 дней: ответ несёт key — по нему тост «Отменить» вернёт игру
+// Не стираем, а в корзину на 30 дней: ответ несёт key — по нему тост «Отменить» вернёт игру.
+// Игра с полки — без папки: в корзину уходит карточка (и её файлы, если они ещё там)
 router.delete('/:id', async (req, res) => {
     const id = path.basename(req.params.id);
     try {
         // Удаляем только то, что есть в библиотеке (не _saves, не library.db и т.п.)
-        const game = await dbService.get().get('SELECT id FROM games WHERE id = ?', [id]);
-        if (!game || !(await fsp.lstat(path.join(GAMES_DIR, id)).catch(() => null))) return res.status(404).json({ error: 'Игра не найдена' });
+        const game = await dbService.get().get('SELECT id, shelved_at FROM games WHERE id = ?', [id]);
+        if (!game || (!game.shelved_at && !(await fsp.lstat(path.join(GAMES_DIR, id)).catch(() => null)))) return res.status(404).json({ error: 'Игра не найдена' });
         const { key } = await trash.trashGame(id);
+        // В корзине игры нет в библиотеке — и её реплик в поиске
+        sceneLines.dropGame(id).catch((e) => console.warn(`[Реплики] ${id}: ${e.message}`));
         res.json({ success: true, trashKey: key });
     } catch (e) {
         console.error('[Корзина]', e.message);

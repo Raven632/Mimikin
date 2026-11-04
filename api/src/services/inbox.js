@@ -114,7 +114,7 @@ class InboxService {
         for (const f of files) this.seen.delete(f);
         const name = path.basename(files[0]);
         const hit = this.targetOf ? await this.targetOf(name).catch(() => null) : null;
-        await this.uploads.importFile(files.length > 1 ? files : files[0], hit ? { target: hit.target || '', version: hit.version || '', passwords: hit.passwords || [] } : {})
+        await this.uploads.importFile(files.length > 1 ? files : files[0], hit ? { target: hit.target || '', version: hit.version || '', passwords: hit.passwords || [], link: hit.link || '' } : {})
             .catch((e) => console.error(`[Входящие] ${name}:`, e.message, denied(e)));
     }
 

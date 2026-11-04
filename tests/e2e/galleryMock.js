@@ -24,7 +24,7 @@ export async function mockGallery(page) {
 export async function openTrio(page) {
   await openLibrary(page);
   await openGame(page, 'Starfall Inn');
-  await page.locator('.grimoire-action-btn', { hasText: 'Галерея' }).click();
+  await page.locator('.act-gallery').click();
   await page.locator('.gallery-tile').first().click({ timeout: 20_000 });
   await expect(page.locator('.gallery-view > img:not(.gallery-layer)')).toHaveAttribute('src', /p1\.png/);
 }

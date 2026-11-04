@@ -8,9 +8,9 @@
   z-index: 9000;
   overflow-y: auto;
   display: flex;
+  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  padding: calc(24px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
+  padding: calc(16px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
   background:
     radial-gradient(ellipse 70% 60% at 50% 45%, transparent 35%, rgba(0,0,0,0.9) 85%),
     url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='96' height='96' shape-rendering='crispEdges'%3E%3Cpath d='M0 1H96M0 49H96M1 0V48M49 0V48M25 48V96M73 48V96' stroke='%23c9a84c' stroke-opacity='0.07' stroke-width='2' fill='none'/%3E%3C/svg%3E"),
@@ -18,7 +18,11 @@
   animation: overlay-in 0.15s ease-out;
 }
 
+/* По центру — автоотступами: они, в отличие от центрирования родителем, не уводят верх высокой карточки за край,
+   куда уже не прокрутить */
 .auth-card {
+  flex: none;
+  margin-block: auto;
   width: min(400px, 100%);
   display: flex;
   flex-direction: column;
@@ -40,16 +44,6 @@
   letter-spacing: 0.24em;
   text-transform: uppercase;
   margin-right: -0.24em;
-}
-
-/* Подпись — обычной фразой: что это за библиотека. Капсом с разрядкой длинная фраза читалась как крик */
-.auth-tagline {
-  margin: -8px 0 6px;
-  text-align: center;
-  font-family: var(--font-ui);
-  font-size: var(--fs-xs);
-  color: var(--gold-muted);
-  letter-spacing: 0.01em;
 }
 
 .auth-title {
@@ -156,7 +150,38 @@
 
 .auth-note { margin: 0; font-size: var(--fs-sm); color: var(--text-dim); text-align: center; }
 
-.auth-langs { display: flex; justify-content: center; gap: 8px; margin-top: 2px; }
+/* Забытый пароль: строка без рамки, под ней — команда. Выделяется целиком одним нажатием: её будут копировать */
+.auth-forgot {
+  align-self: center;
+  padding: 2px 4px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: var(--fs-sm);
+  color: var(--gold);
+}
+
+@media (hover: hover) {
+  .auth-forgot:hover { color: var(--gold-light); }
+}
+
+.auth-forgot:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+.auth-forgot-help { display: flex; flex-direction: column; gap: 8px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
+
+.auth-forgot-help p { margin: 0; }
+
+.auth-forgot-help code {
+  padding: 8px 10px;
+  border-left: 2px solid var(--gold);
+  background: rgba(201,168,76,0.06);
+  color: var(--gold-light);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.auth-langs { flex: none; align-self: flex-end; display: flex; gap: 8px; margin-bottom: 12px; }
 
 .auth-lang {
   min-width: 44px;

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useLayer } from '../layers';
-import { refreshJobs } from '../jdJobs';
+import { jdRefused, refreshJobs } from '../jdJobs';
 
 // Закладка «В Mimikin» открывает библиотеку с #jd=<страница файла>. Здесь человек видит, что именно уйдёт в JDownloader
 // (хостинг, ссылка), вписывает название и версию и жмёт «Загрузить».
@@ -24,7 +24,7 @@ const JdLinkPanel = ({ t, url, onClose, showToast }) => {
       });
       const d = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setError(d.reason === 'off' ? t.jd_off : d.reason === 'site' ? t.jd_bad_link : t.jd_error(d.error || res.status));
+        setError(jdRefused(t, d, res.status));
         return;
       }
       refreshJobs();

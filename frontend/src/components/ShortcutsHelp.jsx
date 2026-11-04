@@ -12,6 +12,8 @@ const ROWS = [
   [['+', '−'], 'key_zoom'],
   [['Space'], 'key_space'],
   [['↑', '↓', 'Enter'], 'key_lists'],
+  [['←', '→', '↑', '↓'], 'key_cards'],
+  [['Shift', 'Enter'], 'key_card_play'],
   [['Tab'], 'key_tab'],
   [['H'], 'key_hide'],
   [['?'], 'key_help'],

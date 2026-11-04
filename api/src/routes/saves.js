@@ -5,13 +5,14 @@ const crypto = require('crypto');
 const { execFile } = require('child_process');
 const util = require('util');
 const execFilePromise = util.promisify(execFile);
-const { SAVES_DIR, GAMES_DIR } = require('../config/index.js');
+const { GAMES_DIR } = require('../config/index.js');
 const { spawnExtract } = require('../utils/archive.js');
-const { upload, uploadLimiter } = require('../utils/upload.js');
+const { savesUpload, uploadLimiter } = require('../utils/upload.js');
 const { isSafeSegment } = require('../utils/validate.js');
 const { requireAuth } = require('./auth.js');
+const { sendErrorPage } = require('../utils/errorPage.js');
 const { updateProgress, parseSave } = require('../utils/saveprogress.js');
-const { createSaveStore } = require('../utils/savestore.js');
+const personStores = require('../utils/personStores.js');
 
 // В архиве с компьютера сейвы называются так, как их пишет сама игра: file1.rpgsave
 // у MV и file1.rmmzsave у MZ. Движок же в браузере спрашивает сейв по своему ключу —
@@ -28,7 +29,9 @@ function desktopSaveKey(file) {
         : `RPG ${name.charAt(0).toUpperCase()}${name.slice(1)}`;
 }
 
-const store = createSaveStore(SAVES_DIR);
+// Хранилище владельца; у остальных людей свои (utils/personStores.js), в обработчиках берём по req.person
+const store = personStores.owner.saves;
+const mine = (req) => personStores.storesFor(req.person);
 
 // Что показать о версии слота: уровень, золото, время в игре и карта. Разбор сейва — десятки
 // миллисекунд, а окно истории открывают снова и снова: помним по файлу, размеру и времени
@@ -85,7 +88,7 @@ module.exports = function(EXTRACT_TMP) {
     // --- 1. АРХИВЫ И ИСТОРИЯ (Должны быть вверху) ---
     router.get('/export/:id', async (req, res) => {
         const gameId = path.basename(req.params.id);
-        const gameSavesDir = path.join(SAVES_DIR, gameId);
+        const gameSavesDir = path.join(mine(req).root, gameId);
 
         try {
             const files = await fsp.readdir(gameSavesDir);
@@ -95,16 +98,22 @@ module.exports = function(EXTRACT_TMP) {
             await execFilePromise('7zz', ['a', '-tzip', tmpZip, path.join(gameSavesDir, '*.json')]);
 
             res.download(tmpZip, `${gameId}_saves.zip`, () => fsp.unlink(tmpZip).catch(() => {}));
-        } catch (e) { res.status(404).json({ error: 'У этой игры еще нет сохранений' }); }
+        // Скачивание — переход по адресу (GameModal.jsx): ответ человек видит страницей, а не сообщением в библиотеке
+        } catch (e) { sendErrorPage(req, res, 404, 'saves'); }
     });
 
-    router.post('/import/:id', uploadLimiter, upload.single('saves'), async (req, res) => {
+    // multer обрывает приём на 50 МБ сам и удаляет начатый файл; ответ — тот же, что и у проверки ниже
+    const takeSaves = (req, res, next) => savesUpload.single('saves')(req, res, (err) => {
+        if (err && err.code === 'LIMIT_FILE_SIZE') return res.status(400).json({ error: 'Архив слишком большой', reason: 'saves-too-big' });
+        next(err);
+    });
+    router.post('/import/:id', uploadLimiter, takeSaves, async (req, res) => {
         if (!req.file) return res.status(400).json({ error: 'Файл не получен' });
 
         // ВОЗВРАЩЕНА ПРОВЕРКА: Лимит 50MB
         if (req.file.size > 50 * 1024 * 1024) {
             await fsp.unlink(req.file.path).catch(() => {});
-            return res.status(400).json({ error: 'Архив слишком большой' });
+            return res.status(400).json({ error: 'Архив слишком большой', reason: 'saves-too-big' });
         }
 
         const gameId = path.basename(req.params.id);
@@ -137,12 +146,12 @@ module.exports = function(EXTRACT_TMP) {
                 }
                 if (key) saves.push({ key, value: await fsp.readFile(filePath, 'utf8') });
             }
-            if (!saves.length) throw Object.assign(new Error('В архиве нет сейвов'), { status: 400 });
-            await store.importSaves(gameId, saves);
-            updateProgress(gameId).catch(() => {});
+            if (!saves.length) throw Object.assign(new Error('В архиве нет сейвов'), { status: 400, reason: 'saves-none' });
+            await mine(req).saves.importSaves(gameId, saves);
+            updateProgress(gameId, req.person).catch(() => {});
             res.json({ success: true, message: 'Сохранения загружены!' });
         } catch (e) {
-            res.status(e.status || 500).json({ error: e.status ? e.message : 'Ошибка импорта' });
+            res.status(e.status || 500).json({ error: e.status ? e.message : 'Ошибка импорта', reason: e.reason });
         } finally {
             await fsp.unlink(archivePath).catch(() => {});
             await fsp.rm(unpackDir, { recursive: true, force: true }).catch(() => {});
@@ -156,12 +165,12 @@ module.exports = function(EXTRACT_TMP) {
             const mapNames = await mapNamesOf(gameId);
             const describe = async ({ file, ...rest }) => ({ ...rest, summary: await summaryOf(file, rest.size, rest.at, mapNames) });
             const slots = [];
-            for (const slot of await store.history(gameId)) {
+            for (const slot of await mine(req).saves.history(gameId)) {
                 slots.push({
                     key: slot.key,
                     current: slot.current ? await describe(slot.current) : null,
                     // Снимок экрана — только к нынешнему сейву слота
-                    shot: !!(slot.current && await store.shotOf(gameId, slot.key)),
+                    shot: !!(slot.current && await mine(req).saves.shotOf(gameId, slot.key)),
                     versions: await Promise.all(slot.versions.map(describe)),
                 });
             }
@@ -175,7 +184,7 @@ module.exports = function(EXTRACT_TMP) {
     // Снимок экрана к слоту (где был, когда игра сохранилась) — для списка «Продолжить с…»
     router.get('/shot/:id', async (req, res) => {
         const key = typeof req.query.key === 'string' ? req.query.key : '';
-        const shot = key && await store.shotOf(path.basename(req.params.id), key);
+        const shot = key && await mine(req).saves.shotOf(path.basename(req.params.id), key);
         if (!shot) return res.status(404).end();
         res.sendFile(shot.file, { dotfiles: 'allow', headers: { 'Cache-Control': 'private, max-age=60' } });
     });
@@ -186,9 +195,9 @@ module.exports = function(EXTRACT_TMP) {
         const { key, version } = req.body || {};
         if (typeof key !== 'string' || !key || typeof version !== 'string') return res.status(400).json({ error: 'Непонятно, что вернуть' });
         try {
-            await store.restore(gameId, key, version);
+            await mine(req).saves.restore(gameId, key, version);
             console.log(`[Saves] ${gameId}: слот «${key}» возвращён к версии ${version}`);
-            updateProgress(gameId).catch(() => {});
+            updateProgress(gameId, req.person).catch(() => {});
             res.json({ success: true });
         } catch (e) {
             res.status(e.status || 500).json({ error: e.status ? e.message : 'Не удалось вернуть версию' });
@@ -197,7 +206,7 @@ module.exports = function(EXTRACT_TMP) {
 
     // --- 2. ОДИНОЧНЫЕ ФАЙЛЫ ДВИЖКА (Внизу) ---
     router.get('/:gameId', async (req, res) => {
-        const gameSavesDir = path.join(SAVES_DIR, path.basename(req.params.gameId));
+        const gameSavesDir = path.join(mine(req).root, path.basename(req.params.gameId));
         try {
             const files = await fsp.readdir(gameSavesDir);
             const saves = {};
@@ -227,21 +236,21 @@ module.exports = function(EXTRACT_TMP) {
         try {
             const gameId = path.basename(req.params.gameId);
             const key = path.basename(req.params.key);
-            const result = await store.write(gameId, key, req.body.value, req.body.updatedAt);
+            const result = await mine(req).saves.write(gameId, key, req.body.value, req.body.updatedAt);
             res.json(result === 'older' ? { success: true, kept: 'server' } : { success: true });
             if (result === 'older') console.log(`[Saves] ${gameId}: «${key}» на сервере новее — присланный сейв ушёл в историю`);
 
             // Игра ждёт ответа на запись, поэтому разбор сейва делаем уже после ответа.
             // Слоты — единственное, где есть прогресс: config и global пропускаем.
             if (result === 'saved' && /^(RPG File\d+|MZ_file\d+)$/i.test(key)) {
-                updateProgress(gameId).catch(() => {});
+                updateProgress(gameId, req.person).catch(() => {});
             }
         } catch(e) { res.status(500).json({ error: 'Server error' }); }
     });
 
     // Удаление сейва. Слот не стирается, а уходит в историю сейвов
     router.delete('/:gameId/:key', async (req, res) => {
-        try { await store.remove(path.basename(req.params.gameId), path.basename(req.params.key)); } catch(e) {}
+        try { await mine(req).saves.remove(path.basename(req.params.gameId), path.basename(req.params.key)); } catch(e) {}
         res.json({ success: true });
     });
 

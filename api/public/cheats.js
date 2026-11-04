@@ -878,8 +878,9 @@
             return !!(data && data[id] && $gameParty.hasItem(data[id], true));
         },
     });
-    // Все карты игры — один раз за открытие страницы, по восемь за раз (у Labyrinth of Subjugation их 583, 25 МБ:
-    // пара секунд, дальше браузер берёт из кэша). Держим не всё: карты комнат — целиком, у остальных — условия и
+    // Все карты игры — один раз за открытие страницы: сервер отдаёт их одним ответом без плиток (data/mimikin-maps.json,
+    // routes/play.js), а не вышло — по восемь за раз (у Labyrinth of Subjugation их 583, 25 МБ: пара секунд, дальше браузер
+    // берёт из кэша). Держим не всё: карты комнат — целиком, у остальных — условия и
     // запуск страниц (что запустится само) и команды страниц с переносом (входы в комнату). Часть карт не прочиталась —
     // ответ не запоминаем: что запустится само на непрочитанной карте, не знаем. Нет файла (404) или он битый — карты нет
     // и в игре (движок её тоже не откроет); больше MAX_MAPS — хвост не прочитан
@@ -899,6 +900,18 @@
         }
         return scan;
     }
+    // Запрос с пределом времени (считается и чтение ответа): зависший запрос оставлял «Ищу сцены…» до перезагрузки страницы.
+    // В браузере без AbortSignal.timeout — без предела, как раньше
+    const timedFetch = (url, ms) => fetch(url, typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(ms) } : undefined);
+    // Всё сразу. Нет ответа (перевод включён, старый сервер, сбой) — null, и это не ошибка: прочитаем по одной
+    async function readWhole() {
+        try {
+            const r = await timedFetch('data/mimikin-maps.json', 60000);
+            if (!r.ok) return null;
+            const all = JSON.parse(await r.text());
+            return all && typeof all === 'object' && !Array.isArray(all) ? all : null;
+        } catch (e) { return null; }
+    }
     async function readMaps() {
         const infos = (typeof $dataMapInfos !== 'undefined' && $dataMapInfos) || [];
         const ces = (typeof $dataCommonEvents !== 'undefined' && $dataCommonEvents) || [];
@@ -917,27 +930,40 @@
         const ids = all.slice(0, MAX_MAPS);
         const maps = {};
         let failed = all.length - ids.length;
+        const take = (id, d) => {
+            if (!d) return;
+            const hub = isRec ? hubScore(d, isRec) : 0;
+            if (hub >= HUB_MIN) hubs.push([id, hub]);
+            const hallN = hall ? hall(d, (infos[id] || {}).name) : 0;
+            if (hallN) halls.push([id, hallN]);
+            maps[id] = roomIds.has(id) || hub >= HUB_MIN || hallN ? d : slim(d);
+        };
         scanAt.done = 0;
+        scanAt.total = 0;
+        // Фоном (scanPace) — только по одной: разбор большого ответа разом остановил бы игру, пока человек играет
+        const whole = scanPace ? null : await readWhole();
         scanAt.total = ids.length;
-        // Фоном (scanPace) — по одной карте: большие карты разбираются долго, восемь подряд останавливали игру на секунды.
-        // Шаг — заново на каждом круге: открыли чит-меню посреди фонового чтения — дальше подряд
-        for (let i = 0, step = 8; i < ids.length; i += step) {
-            step = scanPace ? 1 : 8;
-            await Promise.all(ids.slice(i, i + step).map((id) => fetch(`data/Map${String(id).padStart(3, '0')}.json`)
-                .then((r) => { if (r.status === 404) return ''; if (!r.ok) throw new Error(String(r.status)); return r.text(); })
-                .then((text) => {
-                    let d = null;
-                    try { d = text ? JSON.parse(text.replace(/^\uFEFF/, '')) : null; } catch (e) { d = null; }
-                    if (!d) return;
-                    const hub = isRec ? hubScore(d, isRec) : 0;
-                    if (hub >= HUB_MIN) hubs.push([id, hub]);
-                    const hallN = hall ? hall(d, (infos[id] || {}).name) : 0;
-                    if (hallN) halls.push([id, hallN]);
-                    maps[id] = roomIds.has(id) || hub >= HUB_MIN || hallN ? d : slim(d);
-                }).catch(() => { failed++; })));
-            scanAt.done = Math.min(i + step, ids.length);
-            if (scanPace) await new Promise((r) => setTimeout(r, scanPace));
+        if (whole) {
+            // Карта странного вида — сбой этой карты, как и при чтении по одной, а не всего чтения
+            for (const id of ids) { try { take(id, whole[id]); } catch (e) { failed++; } }
+            scanAt.done = ids.length;
             scanTick();
+        } else {
+            // Фоном (scanPace) — по одной карте: большие карты разбираются долго, восемь подряд останавливали игру на секунды.
+            // Шаг — заново на каждом круге: открыли чит-меню посреди фонового чтения — дальше подряд
+            for (let i = 0, step = 8; i < ids.length; i += step) {
+                step = scanPace ? 1 : 8;
+                await Promise.all(ids.slice(i, i + step).map((id) => timedFetch(`data/Map${String(id).padStart(3, '0')}.json`, 30000)
+                    .then((r) => { if (r.status === 404) return ''; if (!r.ok) throw new Error(String(r.status)); return r.text(); })
+                    .then((text) => {
+                        let d = null;
+                        try { d = text ? JSON.parse(text.replace(/^\uFEFF/, '')) : null; } catch (e) { d = null; }
+                        take(id, d);
+                    }).catch(() => { failed++; })));
+                scanAt.done = Math.min(i + step, ids.length);
+                if (scanPace) await new Promise((r) => setTimeout(r, scanPace));
+                scanTick();
+            }
         }
         const best = (list) => list.sort((a, b) => b[1] - a[1]).map(([id]) => infos[id]).filter(Boolean);
         const vnames = (typeof $dataSystem !== 'undefined' && $dataSystem && $dataSystem.variables) || [];
@@ -1037,6 +1063,9 @@
         #_cheats ._ch_tabs, #_cheats ._ch_chips { display: flex; gap: 6px; flex-wrap: wrap; }
         #_cheats ._ch_tabs { padding: 0 12px 8px; border-bottom: 1px solid rgba(255,255,255,0.08); }
         #_cheats ._ch_body { overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 12px; }
+        /* Сжимается только тело: полоса вкладок с overflow-x может сжаться в ноль, и длинный список выдавливал её — назад было не выйти */
+        #_cheats ._ch_head, #_cheats ._ch_tabs, #_cheats ._ch_note { flex: none; }
+        #_cheats ._ch_body { flex: 1 1 auto; min-height: 0; }
         #_cheats ._ch_chip, #_cheats ._ch_btn { min-height: 32px; padding: 5px 11px; border-radius: 999px; border: 1px solid rgba(255,255,255,0.18); background: transparent; color: inherit; font: inherit; cursor: pointer; white-space: nowrap; }
         #_cheats ._ch_chip._on { border-color: #d9b45e; color: #d9b45e; background: rgba(217,180,94,0.1); }
         #_cheats ._ch_btn { border-radius: 9px; border-color: rgba(217,180,94,0.45); }
@@ -1500,5 +1529,5 @@
         return { total: list.length, open: list.filter((x) => $gameSwitches.value(x.switchId)).length, rooms: [] };
     }
 
-    window.__rpgCheats = { open, close, toggle: toggleOpen, actions, findScenes, roomStatus, pluginScenes, roomMaps, pluginUnlock, findRoomEntry, roomScene, goRoom, safeScenes, riskyConds, hubRooms, pickRooms };
+    window.__rpgCheats = { open, close, toggle: toggleOpen, actions, findScenes, scanMaps, roomStatus, pluginScenes, roomMaps, pluginUnlock, findRoomEntry, roomScene, goRoom, safeScenes, riskyConds, hubRooms, pickRooms };
 })();

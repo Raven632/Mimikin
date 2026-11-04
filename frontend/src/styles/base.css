@@ -128,6 +128,10 @@ kbd {
    (Toolbar меряет --sticky-total): заголовок «Вся библиотека» и карточка, до которой дошли Tab'ом,
    больше не прячутся под панелью (WCAG 2.2, 2.4.11) */
 html { scroll-padding-top: var(--sticky-total, 0px); }
+/* Открыто окно (layers.js, holdPage) — страница сзади не прокручивается. У body — clip, а не hidden: hidden сделал бы его
+   отдельной областью прокрутки, и липкая шапка уехала бы вместе с прокруткой страницы */
+html.layer-open { overflow: hidden; overscroll-behavior: none; }
+html.layer-open body { overflow: clip; }
 
 @media (max-width: 700px) {
   /* clip, а не hidden: hidden у html и body разом делает body отдельной прокруткой, и липкая

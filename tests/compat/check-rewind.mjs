@@ -1,6 +1,7 @@
 // Проверка перемотки в настоящих играх (rpg-fixes, setupSceneMarks): новая игра → P (момент) → игра меняется →
 // Backspace → вернуться к моменту → всё как было; у сейвов — прохождение и путь (_rpgLine, _rpgLast), «До перемотки»
-// и «Где вышли» — сбоку истории; «Это прохождение» на плёнке; под плёнкой игра стоит; «Игра окончена» открывает плёнку.
+// и «Где вышли» — сбоку истории; «Где вышли» посреди сцены — на той же реплике; «Это прохождение» на плёнке; под
+// плёнкой игра стоит; «Игра окончена» открывает плёнку.
 // Клавиши игры: A — авто-текст листает реплику сам, V — картинка без окон, M — без звука, T — турбо (буква, которую
 // занимает сама игра, не наша — шаг пропускается).
 // TOUCH=1 — как телефон: ещё и включённый «Пропуск» переживает плёнку, касание экрана листает реплику.
@@ -84,7 +85,7 @@ for (const game of games) {
     const ok = (what) => result.steps.push(what);
     const ev = (fn, arg) => page.evaluate(fn, arg);
     try {
-        await page.goto(`${GAME_URL}${play.path}`, { waitUntil: 'domcontentloaded' });
+        await page.goto(`${GAME_URL}${play.path}?s=${play.session}`, { waitUntil: 'domcontentloaded' });
         for (let i = 0; i < 90; i++) { const s = await ev(() => window.SceneManager?._scene?.constructor?.name).catch(() => null); if (s && s !== 'Scene_Boot') break; await page.waitForTimeout(1000); }
         await page.waitForTimeout(2000);
         await ev(() => { DataManager.setupNewGame(); SceneManager.goto(Scene_Map); });
@@ -224,33 +225,101 @@ for (const game of games) {
                 if (process.env.DEBUG) console.log('   касание:', await ev(([x, y]) => { const el = document.elementFromPoint(x, y); return { el: el && (el.id || el.tagName), path: el && [...(function* (n) { while (n) { yield n.id || n.tagName; n = n.parentElement; } })(el)].join('<'), busy: $gameMessage.isBusy(), choice: $gameMessage.isChoice(), win: !!SceneManager._scene._messageWindow, pause: SceneManager._scene._messageWindow?.pause, touch: window.__rpgTouchEnabled, text: $gameMessage.allText().slice(0, 60) }; }, [box.x + box.width * 0.6, box.y + box.height * 0.4]));
             }
         }
-        // «Где вышли» — когда вкладку убрали, если после перемотки играли (клавиша) и не посреди события; сбоку
-        // истории: игра дальше — от прежней точки
+        // «Где вышли» — когда вкладку убрали, если после перемотки играли (клавиша). Посреди сцены — тоже, на той же
+        // реплике; сбоку истории: игра дальше — от прежней точки. Запрос уходит сразу, с keepalive, если тело меньше 60000
         const hide = () => ev(() => {
             Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
             document.dispatchEvent(new Event('visibilitychange'));
             Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
         });
-        const press = async () => { await page.keyboard.down('ArrowDown'); await page.waitForTimeout(400); await page.keyboard.up('ArrowDown'); await page.waitForTimeout(300); };
-        const exits = () => marks.posts.filter((b) => b.why === 'exit').length;
-        await press();
-        if (await ev(() => $gameMap.isEventRunning())) {
-            await hide();
-            await page.waitForTimeout(1500);
-            if (exits() === 0) ok('«Где вышли» посреди события — нет');
-            else fail('«Где вышли» взята посреди события');
-        }
-        // Событие на старте игры (вступление) идёт без конца — для проверки самой точки его не считаем
-        await ev(() => { $gameMap.isEventRunning = () => false; });
-        await press();
+        // Программная графика — несколько кадров в секунду: короткое нажатие движок не замечает, клавишу держим
+        const hold = async (key) => { await page.keyboard.down(key); await page.waitForTimeout(400); await page.keyboard.up(key); await page.waitForTimeout(300); };
+        const exits = () => marks.posts.filter((b) => b.why === 'exit');
+        const text = () => ev(() => ($gameMessage.allText ? $gameMessage.allText() : ($gameMessage._texts || []).join(' ')));
+        const atLine = (s) => async () => (await text()).includes(s) && (await paused());
+        // Enter — до следующей реплики: держим, пока она не появится (короткое нажатие движок не видит, долгое — повтор
+        // клавиши листает дальше, через реплику)
+        const enterTo = async (s) => {
+            await page.keyboard.down('Enter');
+            for (let i = 0; i < 40 && !(await text()).includes(s); i++) await page.waitForTimeout(50);
+            await page.keyboard.up('Enter');
+            return waitFor(async () => (await text()).includes(s), 3000);
+        };
+        // keepalive подмена маршрута не показывает — смотрим обёрткой fetch на странице. Размер — в байтах, как считает
+        // браузер; __noKeepalive — браузер отклоняет keepalive (предел 64 КБ на всё в полёте занят)
+        await ev(() => {
+            window.__exitFetch = [];
+            const f = window.fetch;
+            window.fetch = function (u, o) {
+                if (o && o.method === 'POST' && /"why":"exit"/.test(String(o.body || ''))) {
+                    window.__exitFetch.push({ keepalive: !!o.keepalive, size: new Blob([String(o.body)]).size });
+                    if (o.keepalive && window.__noKeepalive) return Promise.reject(new TypeError('Failed to fetch'));
+                }
+                return f.apply(this, arguments);
+            };
+        });
+        // Своё событие из трёх реплик — одним evaluate с очисткой: иначе автозапуск вступления снова забирает интерпретатор
+        await ev(() => {
+            $gameMessage.clear(); $gameMap._interpreter.clear();
+            const line = (s) => [{ code: 101, indent: 0, parameters: ['', 0, 0, 2, ''] }, { code: 401, indent: 0, parameters: [s] }];
+            $gameMap._interpreter.setup([...line('Mimikin line one'), ...line('Mimikin line two'), ...line('Mimikin line three'), { code: 0, indent: 0, parameters: [] }], 0);
+        });
+        await waitFor(atLine('line one'), 8000);
+        if (!(await enterTo('line two'))) throw new Error(`своё событие не дошло до второй реплики: «${(await text()).slice(0, 40)}»`);
+        // Пауза не обязательна: окно своей системы сообщений её может и не ставить
+        await waitFor(paused, 3000);
+        await hold('Shift');
         const lastBefore = await ev(() => $gameSystem._rpgLast);
         await hide();
-        for (let i = 0; i < 20 && !exits(); i++) await page.waitForTimeout(250);
-        const exit = marks.posts.find((b) => b.why === 'exit');
+        for (let i = 0; i < 20 && !exits().length; i++) await page.waitForTimeout(250);
+        const exit = exits()[0];
         const lastAfter = await ev(() => $gameSystem._rpgLast);
-        if (exit && exit.parent === lastBefore && lastAfter === lastBefore) ok('«Где вышли» — записана, сбоку');
-        else fail(`«Где вышли»: ${JSON.stringify({ exit: !!exit, parent: exit?.parent, lastBefore, lastAfter })}`);
-        await ev(() => { delete $gameMap.isEventRunning; });
+        if (exit && exit.mid === true && /line two/.test(exit.label) && exit.parent === lastBefore && lastAfter === lastBefore) ok('«Где вышли» посреди сцены — на реплике, сбоку');
+        else fail(`«Где вышли»: ${JSON.stringify({ exit: !!exit, mid: exit?.mid, label: exit?.label, parent: exit?.parent, lastBefore, lastAfter })}`);
+        const sent = (await ev(() => window.__exitFetch))[0];
+        if (sent && sent.keepalive === sent.size < 60000) ok(`«Где вышли»: ${Math.round(sent.size / 1024)} КБ, keepalive ${sent.keepalive ? 'да' : 'нет'}`);
+        else fail(`«Где вышли» keepalive: ${JSON.stringify(sent)}`);
+        // Второе скрытие без ввода — новой точки нет
+        await hide();
+        await page.waitForTimeout(1500);
+        if (exits().length === 1) ok('второе скрытие без ввода — без новой точки');
+        else fail(`второе скрытие без ввода: точек ${exits().length}`);
+        // Браузер отклонил keepalive — та же точка уходит без него, а не пропадает
+        await ev(() => { window.__noKeepalive = true; });
+        await hold('Shift');
+        await hide();
+        for (let i = 0; i < 20 && exits().length < 2; i++) await page.waitForTimeout(250);
+        await ev(() => { window.__noKeepalive = false; });
+        if (exits().length === 2) ok('keepalive отклонён — точка ушла без него');
+        else fail(`keepalive отклонён: точек ${exits().length}`);
+        // Старая MV без времени ввода (Input.date нет): скрытие и pagehide следом — не две точки; чаще раза в 30 с — ни одной
+        await ev(() => { Object.defineProperty(Input, 'date', { get: () => undefined, set() {}, configurable: true }); });
+        await hide();
+        await ev(() => window.dispatchEvent(new Event('pagehide')));
+        await page.waitForTimeout(1500);
+        const quiet = exits().length;
+        // Вернулись во вкладку и снова ушли — это новый уход, его не глотают 30 с
+        await ev(() => document.dispatchEvent(new Event('visibilitychange')));
+        await hide();
+        for (let i = 0; i < 20 && exits().length < 3; i++) await page.waitForTimeout(250);
+        await ev(() => { delete Input.date; });
+        if (quiet === 2) ok('без времени ввода — скрытие и pagehide следом без лишних точек');
+        else fail(`без времени ввода: точек ${quiet} вместо 2`);
+        if (exits().length === 3) ok('без времени ввода — вернулись и снова ушли: новая точка');
+        else fail(`без времени ввода, второй уход: точек ${exits().length} вместо 3`);
+        // Страницу выгрузили — открыли с точки: та же реплика, Enter — дальше по сцене
+        if (exit) {
+            await page.goto(`${GAME_URL}${play.path}?s=${play.session}&mark=${encodeURIComponent(exit.id)}`, { waitUntil: 'domcontentloaded' });
+            const shown = await waitFor(async () => (await ev(() => SceneManager._scene instanceof Scene_Map && $gameMessage.isBusy()).catch(() => false)), 60000);
+            const now = shown ? await text() : '';
+            if (now.includes('line two')) ok('с точки — та же реплика');
+            else fail(`с точки — другая реплика: «${now.slice(0, 40)}»`);
+            await waitFor(paused, 8000);
+            if (await enterTo('line three')) ok('Enter — сцена идёт дальше');
+            else fail(`после Enter: «${(await text()).slice(0, 40)}»`);
+            await hold('Enter');
+            await waitFor(async () => !(await ev(() => $gameMessage.isBusy())), 5000);
+        }
         // «Игра окончена» — плёнка сама; вернуться — на карту
         await ev(() => SceneManager.goto(Scene_Gameover));
         // Под нагрузкой (программная графика, тяжёлая игра) затемнение и список — дольше обычного

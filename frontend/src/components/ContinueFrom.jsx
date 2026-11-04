@@ -7,23 +7,28 @@ import { slotName } from '../saveSlots';
 import { useLayer } from '../layers';
 import { useCoversHidden } from '../coversHidden';
 import { loadResume } from '../resumePoint';
-import { IconBookmark, IconClose, IconEdit, IconHistory, IconPlay, IconChevronDown } from './icons';
+import { IconClose, IconEdit, IconHistory, IconPin, IconPlay } from './icons';
 import { pageZoom } from '../pageZoom';
 import MetaLine from './MetaLine';
 
+// Уголок стрелки — пикселями, как шрифт заголовков и мимик; на ровных клетках, без сглаживания
+const PixelChevron = () => (
+  <svg viewBox="0 0 9 4" aria-hidden="true"><path d="M0 0h2v1H0zM7 0h2v1H7zM1 1h2v1H1zM6 1h2v1H6zM2 2h2v1H2zM5 2h2v1H5zM3 3h3v1H3z" /></svg>
+);
+
 const marksApi = (id, rest = '') => `/api/marks/${encodeURIComponent(id)}${rest}`;
 
-// «Продолжить с…» под «Играть» (окно игры): откуда продолжить — из сейва игры или из момента.
+// Стрелка у «Играть» (окно игры): откуда продолжить — из сейва игры или из момента.
 //   Сейвы  — слоты, которые сохранила сама игра (её меню, автосохранение), со снимком экрана: где был, когда сохранился.
 //            «прежние версии» — история слота (SaveHistory, onHistory).
 //   Моменты — наши «Запомнить момент» из меню ⚙ в игре: где угодно, хоть посреди сцены (rpg-fixes, setupSceneMarks).
-// Нажал — игра открывается сразу там (onPlay({ slot }) или onPlay({ mark })). Нет ни сейвов, ни моментов — кнопки нет,
-// но если окно открыли кнопкой «Сейвы» с главной (open), список виден: с подсказкой, откуда они берутся.
-// Список — всплывающий, поверх окна (как меню «⋯»): в карточке игры всегда одна строка. Рисуется в body, прямо под
-// кнопкой (или над ней, если внизу не хватает места): внутри окна игры его обрезал бы край окна. Закрывают нажатие
-// мимо и Escape
+// Нажал — игра открывается сразу там (onPlay({ slot }) или onPlay({ mark })). Нет ни сейвов, ни моментов — стрелки нет
+// (остаётся одна «Играть»), но если окно открыли кнопкой «Сейвы» с главной (open), список виден: с подсказкой, откуда они берутся.
+// children — сама кнопка «Играть»: она и стрелка — одна кнопка из двух частей, играет по-прежнему родитель.
+// Список — всплывающий, поверх окна (как меню «⋯»). Рисуется в body, прямо под кнопкой (или над ней, если внизу не
+// хватает места): внутри окна игры его обрезал бы край окна. Закрывают нажатие мимо и Escape
 // reload — номер: вырос — прочитать сейвы заново (вернули версию в «Истории сейвов»)
-const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, reload = 0, onPlay, onHistory }) => {
+const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, reload = 0, onPlay, onHistory, onSaves, children }) => {
   const [slots, setSlots] = useState(null);
   const [marks, setMarks] = useState(null);
   const [open, setOpen] = useState(openInitially);
@@ -38,9 +43,9 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
 
   useEffect(() => {
     let alive = true;
-    loadResume(game.id).then((d) => { if (alive) { setSlots(d.slots); setMarks(d.marks); } });
+    loadResume(game.id).then((d) => { if (alive) { setSlots(d.slots); setMarks(d.marks); onSaves?.(d.slots?.length > 0); } });
     return () => { alive = false; };
-  }, [game.id, reload]);
+  }, [game.id, reload]); // eslint-disable-line react-hooks/exhaustive-deps
   // Escape закрывает список, а не окно игры; нажатие мимо — тоже
   useLayer(panelRef, () => setOpen(false), { active: open && !!place, history: false, trap: false, focus: '.continue-from-tabs .chip.active' });
   useEffect(() => {
@@ -58,7 +63,8 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
   useLayoutEffect(() => {
     if (!open) return undefined;
     const measure = () => {
-      const btn = boxRef.current?.querySelector('.continue-from-btn');
+      // Телефон — по всему ряду действий, иначе список был бы уже кнопки; широкий экран — от левого края «Играть»
+      const btn = window.innerWidth / pageZoom() < 600 ? boxRef.current?.closest('.modal-actions') : boxRef.current;
       if (!btn) return;
       // В точках вёрстки: на широком экране страница в масштабе, а список ставится стилями (pageZoom.js)
       const z = pageZoom();
@@ -85,11 +91,17 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
   }, [open, slots, marks]);
   useEffect(() => { if (editing) inputRef.current?.focus(); }, [editing?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  if (!slots || !marks || (!slots.length && !marks.length && !openInitially)) return null;
+  // Нечего продолжать — только «Играть», без стрелки
+  // Пока ответа нет — невидимое место под стрелку, чтобы значки справа не прыгали, когда она появится
+  if (!slots || !marks) return <div className="play-split">{children}<span className="play-split-more ghost" aria-hidden="true" /></div>;
+  if (!slots.length && !marks.length && !openInitially) return <div className="play-split">{children}</div>;
   // Вкладка сама — где самое свежее
   const auto = !slots.length && marks.length ? 'moments' : !marks.length ? 'saves'
     : (marks[0].at > slots[0].current.at ? 'moments' : 'saves');
-  const current = tab || auto;
+  // Пустую вкладку не показываем: «Моменты 0» рядом с сейвами — лишняя кнопка. Нет ни того ни другого — одна «Сейвы» с подсказкой
+  const showSaves = slots.length > 0 || marks.length === 0;
+  const showMarks = marks.length > 0;
+  const current = (tab === 'saves' && showSaves) || (tab === 'moments' && showMarks) ? tab : auto;
 
   const renameSave = async () => {
     if (cancelled.current || !editing) { cancelled.current = false; return; }
@@ -112,17 +124,17 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
   };
 
   return (
-    <div ref={boxRef} className={`continue-from${open ? ' open' : ''}`}>
-      <button type="button" className="continue-from-btn" aria-expanded={open} onClick={() => setOpen((v) => !v)}>
-        <span>{t.continue_from}</span>
-        <span className="continue-from-count">{t.continue_from_count(slots.length, marks.length) || '—'} <span className="continue-from-caret" aria-hidden="true"><IconChevronDown /></span></span>
+    <div ref={boxRef} className={`play-split${open ? ' open' : ''}`}>
+      {children}
+      <button type="button" className="play-split-more" aria-haspopup="dialog" aria-expanded={open} aria-label={t.continue_from} data-tip={t.continue_from} onClick={(e) => { e.currentTarget.focus(); setOpen((v) => !v); }}>
+        <PixelChevron />
       </button>
       {open && place && createPortal(
         <div ref={panelRef} className={`continue-from-panel${hidden ? ' covers-hidden' : ''}`} role="dialog" aria-label={t.continue_from}
           style={{ ...place, position: 'fixed' }} onClick={(e) => e.stopPropagation()}>
           <div className="continue-from-tabs" role="tablist">
-            <button type="button" role="tab" aria-selected={current === 'saves'} className={`chip${current === 'saves' ? ' active' : ''}`} onClick={() => setTab('saves')}>{t.continue_saves} {slots.length}</button>
-            <button type="button" role="tab" aria-selected={current === 'moments'} className={`chip${current === 'moments' ? ' active' : ''}`} onClick={() => setTab('moments')}>{t.marks_title} {marks.length}</button>
+            {showSaves && <button type="button" role="tab" aria-selected={current === 'saves'} className={`chip${current === 'saves' ? ' active' : ''}`} onClick={() => setTab('saves')}>{t.continue_saves} {slots.length}</button>}
+            {showMarks && <button type="button" role="tab" aria-selected={current === 'moments'} className={`chip${current === 'moments' ? ' active' : ''}`} onClick={() => setTab('moments')}>{t.marks_title} {marks.length}</button>}
           </div>
 
           {current === 'saves' && (slots.length === 0 ? <p className="continue-from-empty">{t.saves_none_short}</p> : slots.map((s) => (
@@ -145,10 +157,10 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
           {current === 'moments' && (marks.length === 0 ? <p className="continue-from-empty">{t.marks_empty}</p> : marks.map((m) => (
             <div key={m.id} className="continue-item">
               <button type="button" className="continue-item-play" onClick={() => onPlay({ mark: m.id })} data-tip={t.mark_play}>
-                {m.thumb ? <img src={marksApi(game.id, `/${m.id}/thumb`)} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconBookmark /></span>}
+                {m.thumb ? <img src={marksApi(game.id, `/${m.id}/thumb`)} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconPin /></span>}
                 <span className="continue-item-text">
-                  {editing?.id === m.id ? null : <span className="continue-item-name">{m.exit ? t.resume_exit : m.label || m.map || '—'}</span>}
-                  <MetaLine className="continue-item-sub" parts={[m.exit ? m.map || m.label : m.label && m.map !== m.label ? m.map : '', timeAgo(m.at, lang)]} />
+                  {editing?.id === m.id ? null : <span className="continue-item-name">{m.exit ? (m.mid && m.label ? `${t.resume_exit}: ${m.label}` : t.resume_exit) : m.label || m.map || '—'}</span>}
+                  <MetaLine className="continue-item-sub" parts={[m.exit ? m.map || (m.mid ? '' : m.label) : m.label && m.map !== m.label ? m.map : '', timeAgo(m.at, lang)]} />
                 </span>
               </button>
               {editing?.id === m.id && (

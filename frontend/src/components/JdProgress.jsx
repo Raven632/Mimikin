@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { ACTIVE, STEPS, forgetJob, jdLine, jdShare, retryJob, stepOf, useJdJobs } from '../jdJobs';
 import { IconCheck, IconClose, IconDownload } from './icons';
 import MetaLine from './MetaLine';
+import { isOwner } from '../me';
 
-// Ход загрузки «Загрузить»: шкала этапов в окне игры, значок на обложке в «Новинках», список в шапке.
+// Ход загрузки «Загрузить»: шкала этапов в окне игры, значок на обложке в «Найти», список в шапке.
 // Сбор ссылок — без числа: сколько ещё, неизвестно
 const Bar = ({ job, label }) => (
   <div className={`jd-bar ${job.stage}`} role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100}
@@ -17,6 +18,10 @@ const Bar = ({ job, label }) => (
 export function JdSteps({ job, t, onOpenGame }) {
   const now = stepOf(job);
   const bad = job.stage === 'error' || job.stage === 'captcha';
+  const [why, setWhy] = useState('');
+  // Не хватило места: освободили — «Повторить»; оценка не сошлась, а человек знает лучше — «Скачать всё равно»
+  const space = job.stage === 'error' && job.error === 'space' && job.retry;
+  const retry = async (force) => setWhy(await retryJob(job.key, t, { force }));
   return (
     <div className="jd-steps-box">
       <ol className="jd-steps">
@@ -33,7 +38,10 @@ export function JdSteps({ job, t, onOpenGame }) {
         {job.file && <span className="jd-file">{job.file}</span>}
         {jdLine(job, t)}
         {job.stage === 'done' && job.game && <button type="button" className="jd-open" onClick={() => onOpenGame(job.game)}>{t.jd_open_game}</button>}
+        {space && <button type="button" className="jd-open" onClick={() => retry(false)}>{t.jd_retry}</button>}
+        {space && !job.hard && <button type="button" className="jd-open" onClick={() => retry(true)}>{t.jd_space_anyway}</button>}
       </p>
+      {space && why && <p className="jd-line bad" role="alert">{why}</p>}
     </div>
   );
 }
@@ -42,7 +50,7 @@ export function JdSteps({ job, t, onOpenGame }) {
 export function JdDownloads({ t, onOpenGame }) {
   const jobs = useJdJobs();
   const [open, setOpen] = useState(false);
-  const [retryError, setRetryError] = useState({});   // thread → почему не повторилось
+  const [retryError, setRetryError] = useState({});   // key → почему не повторилось
   const ref = useRef(null);
   useEffect(() => {
     if (!open) return undefined;
@@ -70,7 +78,8 @@ export function JdDownloads({ t, onOpenGame }) {
               <div className="jd-item-head">
                 <b>{job.title}</b>
                 {/* Убрать можно и идущую: зависла (пакет удалили в JDownloader, архив не дошёл) — иначе висела бы сутками */}
-                <button type="button" className="jd-forget" data-tip={t.jd_dismiss} aria-label={t.jd_dismiss} onClick={() => forgetJob(job.key)}><IconClose /></button>
+                {/* Человек с правом видеть загрузки только смотрит: сервер ему этого и не даст */}
+                {isOwner() && <button type="button" className="jd-forget" data-tip={t.jd_dismiss} aria-label={t.jd_dismiss} onClick={() => forgetJob(job.key)}><IconClose /></button>}
               </div>
               <small className={job.stage === 'error' || job.stage === 'captcha' ? 'bad' : job.stage === 'done' ? 'ok' : ''}>
                 {/* Этап словом — пока идёт; готово и ошибка говорят сами за себя */}
@@ -79,6 +88,10 @@ export function JdDownloads({ t, onOpenGame }) {
                   jdLine(job, t),
                   job.stage === 'done' && job.game && <button key="open" type="button" className="jd-open" onClick={() => { setOpen(false); onOpenGame(job.game); }}>{t.jd_open_game}</button>,
                   /* Встала — повторить то же, не ища игру заново (записи старше этой версии адреса не помнят) */
+                  job.stage === 'error' && job.retry && job.error === 'space' && !job.hard && <button key="force" type="button" className="jd-open" onClick={async () => {
+                    const why = await retryJob(job.key, t, { force: true });
+                    setRetryError((m) => ({ ...m, [job.key]: why }));
+                  }}>{t.jd_space_anyway}</button>,
                   job.stage === 'error' && job.retry && <button key="retry" type="button" className="jd-open" onClick={async () => {
                     const why = await retryJob(job.key, t);
                     setRetryError((m) => ({ ...m, [job.key]: why }));

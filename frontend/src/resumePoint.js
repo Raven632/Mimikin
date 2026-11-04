@@ -6,7 +6,9 @@ import { slotName } from './saveSlots';
 // Точки перемотки сюда не идут: их игра ставит сама (перед боем, перед выбором), и «Продолжить» с них начинало бы
 // прямо перед боем; снимок без сейва — не откуда продолжить. Кроме одной — «Где вышли» (exit: true), когда она свежее
 // всех сейвов и моментов: сыгранное после перемотки без сохранения иначе потерялось бы, а сейв из брошенной ветки
-// был бы «самым свежим»
+// был бы «самым свежим». Она бывает и посреди сцены (mid: iPhone выгрузил свёрнутую вкладку) — тогда на той же реплике.
+// Но середину сцены из прежней версии игры (stale: игру обновили) сама не берёт: список команд события мог стать
+// другим. Её можно выбрать вручную — на плёнке и во вкладке «Моменты»
 export async function loadResume(id, signal) {
   let failed = false;
   const get = (url, empty) => fetch(url, { signal }).then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
@@ -20,7 +22,7 @@ export async function loadResume(id, signal) {
   const slots = (hist.slots || []).filter((s) => s.current).sort((a, b) => b.current.at - a.current.at);
   const all = Array.isArray(marks) ? marks : [];
   const own = all.filter((m) => m.kind !== 'auto' && m.save !== false);
-  const exit = all.find((m) => m.kind === 'auto' && m.why === 'exit' && m.save !== false);
+  const exit = all.find((m) => m.kind === 'auto' && m.why === 'exit' && m.save !== false && !(m.mid && m.stale));
   const fresh = exit && (!own[0] || exit.at > own[0].at) && (!slots[0] || exit.at > slots[0].current.at);
   return { slots, marks: fresh ? [{ ...exit, exit: true }, ...own] : own, failed };
 }
@@ -30,7 +32,7 @@ export function latestOf({ slots, marks }, t) {
   const s = slots[0];
   const m = marks[0];
   if (!s && !m) return null;
-  if (m && (!s || m.at > s.current.at)) return { mark: m.id, at: m.at, name: m.exit ? m.map || m.label || '' : m.label || m.map || '', kind: m.exit ? 'exit' : 'moment' };
+  if (m && (!s || m.at > s.current.at)) return { mark: m.id, at: m.at, name: m.exit ? (m.mid && m.label) || m.map || m.label || '' : m.label || m.map || '', kind: m.exit ? 'exit' : 'moment' };
   return { slot: s.key, at: s.current.at, name: [slotName(s.key, t), s.current.summary?.map].filter(Boolean).join(', '), kind: 'save' };
 }
 

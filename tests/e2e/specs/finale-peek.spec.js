@@ -7,7 +7,7 @@ import { test, expect, openHome } from '../fixtures.js';
 const NEW_ID = 'Finale_Test_Game';
 
 // Игра, которой нет в демо-библиотеке: копия первой, но самая новая в «Добавленных»
-async function mockUpload(page) {
+async function mockUpload(page, { list = false } = {}) {
   const state = { done: false };
   await page.route(/\/api\/games\/upload\/start$/, (route) => {
     const { name, size } = route.request().postDataJSON();
@@ -21,9 +21,11 @@ async function mockUpload(page) {
   await page.route(/\/api\/games(\?.*)?$/, async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
     const res = await route.fetch();
-    const list = await res.json();
-    if (state.done) list.push({ ...list[0], id: NEW_ID, title: 'Finale Test Game', displayTitle: 'Finale Test Game', addedAt: Date.now(), lastPlayed: 0 });
-    return route.fulfill({ response: res, json: list });
+    const games = await res.json();
+    // Своя подборка у второй игры: вкладка, где новой игры точно не будет
+    if (list) games[1].lists = ['Вечер'];
+    if (state.done) games.push({ ...games[0], id: NEW_ID, title: 'Finale Test Game', displayTitle: 'Finale Test Game', addedAt: Date.now(), lastPlayed: 0 });
+    return route.fulfill({ response: res, json: games });
   });
   return state;
 }
@@ -127,10 +129,10 @@ test.describe('финал загрузки', () => {
       const orig = Element.prototype.animate;
       Element.prototype.animate = function (frames, opts) { window.__anims.push(this.className); return orig.call(this, frames, opts); };
     });
-    const state = await mockUpload(page);
+    const state = await mockUpload(page, { list: true });
     await openHome(page);
-    // «Недавно играли»: новой игры в ней не будет
-    await page.locator('.shelf-tab', { hasText: 'Недавно играли' }).click();
+    // Своя подборка: новой игры в ней не будет
+    await page.locator('.shelf-tab', { hasText: 'Вечер' }).click();
     await upload(page);
     await expect(page.locator('.tb .tb-mimic.chew')).toBeVisible();
     state.done = true;

@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom';
 import { OPEN, HALF, SHUT } from '../brandGrid';
 import { useCrispSide } from '../crispSize';
 import { IconChevronDown, IconChevronUp, IconClose, IconHourglass, IconLock, IconPause, IconPlus, IconCheck } from './icons';
+import { reasonText, serverWords } from '../apiError';
 import { ACTIVE, STEPS, forgetJob, jdLine, jdShare, retryJob, stepOf, useJdJobs } from '../jdJobs';
+import { isOwner } from '../me';
 import { useLayer } from '../layers';
 import { fmtOf } from '../transferSize';
 import { useOtherMimic } from '../mimicMood';
@@ -57,7 +59,8 @@ const Segments = ({ stage, frac, bad, labels, t }) => (
 );
 
 // Жуёт только пока работает: ждёт пароля или встала с ошибкой — глаза открыты, но не двигается
-const mimicMode = (item) => (item.stage === 2 ? 'done' : item.stage === 1 ? (item.bad || item.ask === 'password' ? 'still' : 'chew') : 'wait');
+// Ждёт места на диске — тоже стоит
+const mimicMode = (item) => (item.stage === 2 ? 'done' : item.stage === 1 ? (item.bad || item.ask === 'password' || item.ask === 'space' ? 'still' : 'chew') : 'wait');
 
 const Pct = ({ value, dim }) => <span className={`tb-pct${dim ? ' dim' : ''}`}>{value}<small>%</small></span>;
 
@@ -75,13 +78,19 @@ const Name = ({ text, className }) => {
   );
 };
 
-const ICONS = { password: IconLock, left: IconPause, wait: IconHourglass, bad: IconClose };
+const ICONS = { password: IconLock, left: IconPause, wait: IconHourglass, space: IconHourglass, bad: IconClose };
+
+// Действия строки ссылками (ждёт места: «Повторить», «Открыть «Место»»). close — сперва свернуть панель: окно «Место» встаёт поверх
+const Acts = ({ acts, onClose }) => (acts?.length ? (
+  <div className="tb-jd-acts">
+    {acts.map((a) => <button key={a.key} type="button" className="tb-link" onClick={() => { if (a.close) onClose(); a.onClick(); }}>{a.label}</button>)}
+  </div>
+) : null);
 
 // Короткая причина остановки: полный текст с путём по настройкам остаётся в окне игры (JdProgress.jsx)
 const jdBad = (job, t) => {
   const B = t.tb_jd_bad;
-  if (job.error === 'account') return B[job.account] || B.failed;
-  return B[job.error] || t.jd_error(job.error);
+  return B[job.error] || reasonText(t, job) || t.jd_error(serverWords(t, job.error));
 };
 
 // Скорость и остаток у скачивания JDownloader: справа от «640 из 1500 МБ»
@@ -112,7 +121,7 @@ const HOLD_MS = 30000;
 export default function TransferBar({ t, current, pending, queue, onAdd, onOpenGame }) {
   const jobs = useJdJobs();
   const [open, setOpen] = useState(false);
-  const [retryError, setRetryError] = useState({});   // thread → почему не повторилось
+  const [retryError, setRetryError] = useState({});   // key → почему не повторилось
   const rowRef = useRef(null);
   const panelRef = useRef(null);
   const scrollRef = useRef(null);
@@ -120,8 +129,8 @@ export default function TransferBar({ t, current, pending, queue, onAdd, onOpenG
 
   // Закончившаяся задача JDownloader держит плашку HOLD_MS: на телефоне кольца в шапке нет, и без этого
   // «Открыть игру» было бы негде нажать. Давно готовые (с прошлых сеансов) плашку не открывают
-  const [held, setHeld] = useState({});   // thread → держим
-  const seen = useRef({});                // thread → этап при прошлом опросе
+  const [held, setHeld] = useState({});   // key → держим
+  const seen = useRef({});                // key → этап при прошлом опросе
   useEffect(() => {
     const fresh = jobs.filter((j) => j.stage === 'done' && seen.current[j.key] && seen.current[j.key] !== 'done');
     for (const j of jobs) seen.current[j.key] = j.stage;
@@ -205,6 +214,7 @@ export default function TransferBar({ t, current, pending, queue, onAdd, onOpenG
           {item.onStop && <button type="button" className="tb-x" onClick={item.onStop} data-tip={item.stopTitle} aria-label={item.stopTitle}><IconClose /></button>}
         </div>
         {item.extra}
+        <Acts acts={item.acts} onClose={() => setOpen(false)} />
       </div>
     );
   };
@@ -245,6 +255,7 @@ export default function TransferBar({ t, current, pending, queue, onAdd, onOpenG
             <div className={`tb-nums${lead.bad ? ' bad' : ''}`}><span>{lead.text}</span>{(lead.eta || lead.right) && <span>{lead.eta || lead.right}</span>}</div>
             <Segments stage={lead.stage} frac={lead.frac} bad={lead.bad} labels t={t} />
             {lead.extra}
+            <Acts acts={lead.acts} onClose={() => setOpen(false)} />
             <div className="tb-actions">
               {lead.onPick && <button type="button" className="tb-pill" onClick={lead.onPick}>{t.up_pick}</button>}
               <button type="button" className="tb-pill" onClick={onAdd}><IconPlus />{t.tb_add}</button>
@@ -287,7 +298,7 @@ export default function TransferBar({ t, current, pending, queue, onAdd, onOpenG
                   <div className="tb-jd-top">
                     <Name className="tb-jd-name" text={job.title} />
                     {item.pct != null && <span className="tb-jd-pct">{item.pct}<small>%</small></span>}
-                    <button type="button" className="tb-x" onClick={() => forgetJob(job.key)} data-tip={t.jd_dismiss} aria-label={t.jd_dismiss}><IconClose /></button>
+                    {isOwner() && <button type="button" className="tb-x" onClick={() => forgetJob(job.key)} data-tip={t.jd_dismiss} aria-label={t.jd_dismiss}><IconClose /></button>}
                   </div>
                   {ACTIVE.includes(job.stage) && <div className="tb-line"><i className={job.stage} style={{ width: job.stage === 'collect' ? '30%' : `${jdShare(job) * 100}%` }} /></div>}
                   <div className={`tb-jd-state${item.bad ? ' bad' : ok ? ' ok' : ''}`}>
@@ -297,6 +308,11 @@ export default function TransferBar({ t, current, pending, queue, onAdd, onOpenG
                   {(ok && job.game) || (job.stage === 'error' && job.retry) ? (
                     <div className="tb-jd-acts">
                       {ok && job.game && <button type="button" className="tb-link" onClick={() => { setOpen(false); onOpenGame(job.game); }}>{t.jd_open_game}</button>}
+                      {/* Не хватило места по оценке — можно и всё равно: оценка, а не точный счёт (не влезет и архив — нельзя) */}
+                      {job.stage === 'error' && job.retry && job.error === 'space' && !job.hard && <button type="button" className="tb-link" onClick={async () => {
+                        const why = await retryJob(job.key, t, { force: true });
+                        setRetryError((m) => ({ ...m, [job.key]: why }));
+                      }}>{t.jd_space_anyway}</button>}
                       {job.stage === 'error' && job.retry && <button type="button" className="tb-link" onClick={async () => {
                         const why = await retryJob(job.key, t);
                         setRetryError((m) => ({ ...m, [job.key]: why }));

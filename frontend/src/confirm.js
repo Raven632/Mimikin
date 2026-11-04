@@ -2,6 +2,7 @@
 // кнопкой своего цвета. Рисует окно ConfirmHost (components/ConfirmDialog.jsx, стоит в App), а здесь
 // — только «спросить и дождаться ответа»:
 //   if (!(await confirmDialog({ title, text, confirmLabel, danger: true }))) return;
+// otherLabel — третья кнопка: ответ тогда 'other', а не true
 // Вопросы по очереди: второй ждёт, пока ответят на первый
 let host = null;
 const queue = [];
@@ -19,7 +20,7 @@ export function confirmDialog(options) {
 // Ответ на текущий вопрос — от ConfirmHost
 export function answer(ok) {
   const current = queue.shift();
-  current?.resolve(!!ok);
+  current?.resolve(ok === 'other' ? ok : !!ok);
   host?.(queue[0] || null);
 }
 

@@ -24,7 +24,9 @@ const EVERY_MS = 30 * 1000;
 const IDLE_MS = 60 * 1000;
 const DEPTH = 3;
 
-const fail = (message, status = 400) => Object.assign(new Error(message), { status });
+// reason и params — та же причина кодом: «Настройки» пишут её на языке человека (frontend apiError.js)
+const fail = (message, status = 400, reason = '', params = undefined) => Object.assign(new Error(message), { status, reason, params });
+const problemOf = (e) => ({ reason: e.reason || '', params: e.params, text: e.message });
 const token = () => crypto.randomBytes(32).toString('base64url');
 const same = (a, b) => {
     const sum = (s) => crypto.createHash('sha256').update(String(s)).digest();
@@ -46,15 +48,22 @@ class RelayService {
         this.fetch = (...args) => fetch(...args);
         // Где связь и вход MyJDownloader хранятся (utils/secrets.js); в тестах — у каждой установки свои
         this.load = (name) => secret(name);
-        this.state = { last: 0, error: '', peer: '', current: null, pulled: 0 };
+        // waiting — архивы, которые ждут места на диске: имя → { need, free } (как у seedbox)
+        this.state = { last: 0, error: '', problems: [], peer: '', current: null, pulled: 0, waiting: {} };
         this.asks = new Map();   // запросы «Связать» сюда: номер → { id, url, key, nonce, folder, ip, at, status }
         this.outgoing = null;    // наш запрос туда: { url, request, nonce, id, key, at, status, error }
         this.pulling = null;
         this.kept = new Set(); // забрали, а удалить у соседки не вышло — второй раз не забираем
+        this.told = new Set(); // ждущие места, о которых уже написали в журнал
+        this.uploads = null;
+        this.forced = async () => false;
+        this.waits = {};
     }
 
-    setDependencies({ dir, db = null }) {
-        Object.assign(this, { dir, db });
+    // uploads и forced — проверка места перед тем, как забрать архив (как у seedbox, services/seedbox.js)
+    setDependencies({ dir, db = null, uploads = null, forced = null }) {
+        Object.assign(this, { dir, db, uploads });
+        if (forced) this.forced = forced;
     }
 
     // Связь: { self, peer, url, keyIn, keyOut, folder } — свой и её номер, её адрес, ключ к нам и к ней, её папка
@@ -98,12 +107,12 @@ class RelayService {
                 signal: signal || AbortSignal.timeout(timeout),
             });
         } catch (e) {
-            throw fail(`Установка по адресу ${url} не ответила`, 502);
+            throw fail(`Установка по адресу ${url} не ответила`, 502, 'relay-down', { url });
         }
-        if (res.status === 401) throw fail('Та установка не приняла ключ: связь там убрана — свяжите заново', 502);
+        if (res.status === 401) throw fail('Та установка не приняла ключ: связь там убрана — свяжите заново', 502, 'relay-key');
         if (!res.ok) {
             const why = await res.json().then((d) => (typeof d?.error === 'string' ? d.error.slice(0, 200) : ''), () => '');
-            throw fail(why || `Установка по адресу ${url} ответила ${res.status}`, 502);
+            throw fail(why || `Установка по адресу ${url} ответила ${res.status}`, 502, 'relay-refused', { url, status: res.status, why });
         }
         return res;
     }
@@ -118,8 +127,8 @@ class RelayService {
         const me = { id: crypto.randomBytes(4).toString('hex'), key: token(), nonce: token() };
         // Наш вход MyJDownloader туда не уходит: адрес могли набрать с ошибкой. Только папка — она не секрет
         const r = await (await this.call(url, 'pair', { method: 'POST', body: { id: me.id, url: cleanUrl(rawSelf), key: me.key, nonce: me.nonce, folder: this.myjd()?.folder || '' } })).json();
-        if (typeof r?.request !== 'string') throw fail('Та установка ответила непонятно', 502);
-        this.outgoing = { url, request: r.request, ...me, at: Date.now(), status: 'waiting', error: '' };
+        if (typeof r?.request !== 'string') throw fail('Та установка ответила непонятно', 502, 'relay-odd');
+        this.outgoing = { url, request: r.request, ...me, at: Date.now(), status: 'waiting', error: '', problem: null };
     }
 
     // «Отменить» — и там просьбу убираем, чтобы её не разрешили по ошибке
@@ -140,7 +149,7 @@ class RelayService {
             const r = await (await this.call(o.url, `pair/${encodeURIComponent(o.request)}`, { headers: { 'X-Relay-Nonce': o.nonce }, timeout: 3000 })).json();
             if (r?.status === 'denied') o.status = 'denied';
             if (r?.status !== 'approved') return;
-            if (!ID.test(r.id) || !KEY.test(r.key) || r.id === o.id) throw fail('Та установка ответила непонятно', 502);
+            if (!ID.test(r.id) || !KEY.test(r.key) || r.id === o.id) throw fail('Та установка ответила непонятно', 502, 'relay-odd');
             const link = { self: o.id, peer: r.id, url: o.url, keyIn: o.key, keyOut: r.key, folder: String(r.folder || '').slice(0, 500) };
             await this.store('pair', JSON.stringify(link));
             await this.makeDirs(link);
@@ -153,6 +162,7 @@ class RelayService {
             this.pull();
         } catch (e) {
             o.error = e.message;
+            o.problem = problemOf(e);
         }
     }
 
@@ -250,7 +260,7 @@ class RelayService {
         // Свои архивы, что успели лечь в свою папку, — во «Входящие»; архивы той установки остаются в её папке
         await this.moveOwn(link).catch(() => {});
         for (const id of [link.self, link.peer]) await fsp.rmdir(path.join(this.dir, `.${id}`)).catch(() => {});
-        Object.assign(this.state, { error: '', peer: '' });
+        Object.assign(this.state, { error: '', problems: [], peer: '' });
         console.log('[Две установки] Связь убрана');
     }
 
@@ -327,7 +337,7 @@ class RelayService {
         const link = this.link();
         if (!link || !this.dir) return;
         const errors = [];
-        await this.moveOwn(link).catch((e) => errors.push(e.message));
+        await this.moveOwn(link).catch((e) => errors.push(e));
         // Соседка выключена (ноутбук спит) — это не ошибка: её архивы подождут, а JDownloader мог и вовсе писать сюда
         let files = [];
         try {
@@ -336,8 +346,9 @@ class RelayService {
         } catch (e) {
             this.state.peer = e.message;
         }
-        for (const f of Array.isArray(files) ? files : []) await this.take(link, f).catch((e) => { errors.push(e.message); console.error('[Две установки]', e.message); });
-        Object.assign(this.state, { error: errors.join('; '), last: Date.now(), current: null });
+        this.waits = {};
+        for (const f of Array.isArray(files) ? files : []) await this.take(link, f).catch((e) => { errors.push(e); if (!e.quiet) console.error('[Две установки]', e.message); });
+        Object.assign(this.state, { error: errors.map((e) => e.message).join('; '), problems: errors.map(problemOf), last: Date.now(), current: null, waiting: this.waits });
     }
 
     // Свои архивы, которые JDownloader положил сюда, в «.<свой номер>», — во «Входящие» (тот же диск: переименованием)
@@ -363,6 +374,14 @@ class RelayService {
         await fsp.mkdir(this.dir, { recursive: true });
         const dest = path.join(this.dir, name);
         if (await exists(dest)) return;
+        // Места нет — архив остаётся у соседки, следующий проход проверит снова
+        const room = this.uploads ? await this.uploads.room({ size: f.size, force: await this.forced(name), name }).catch(() => null) : null;
+        if (room && !room.ok) {
+            this.waits[name] = { need: room.need, free: room.free };
+            if (!this.told.has(f.path)) { this.told.add(f.path); console.warn(`[Две установки] ${name}: ждёт места — ${room.text}`); }
+            throw Object.assign(fail(`Ждёт места: ${name} — ${room.text}`, 400, 'pull-space', { name }), { quiet: true });
+        }
+        this.told.delete(f.path);
         const tmp = path.join(this.dir, `.${name}.${crypto.randomBytes(4).toString('hex')}.seedbox`);
         const q = `path=${encodeURIComponent(f.path)}`;
         this.state.current = { name, got: 0, total: f.size };
@@ -384,7 +403,7 @@ class RelayService {
             });
             await pipeline(Readable.fromWeb(res.body), count, fs.createWriteStream(tmp));
             const st = await fsp.stat(tmp);
-            if (st.size !== f.size) throw fail(`${name}: пришло ${st.size} байт из ${f.size}`);
+            if (st.size !== f.size) throw fail(`${name}: пришло ${st.size} байт из ${f.size}`, 400, 'pull-short', { name, got: st.size, size: f.size });
             await fsp.rename(tmp, dest);
         } catch (e) {
             await fsp.rm(tmp, { force: true });
@@ -396,7 +415,7 @@ class RelayService {
         // Не удалился — помним до перезапуска, иначе после импорта он пришёл бы снова и встал в библиотеку второй раз
         await this.call(link.url, `file?${q}`, { key: link.keyOut, method: 'DELETE' }).catch((e) => {
             this.kept.add(`${f.path}\n${f.size}`);
-            throw fail(`${name}: забран, но у той установки не удалён (${e.message})`);
+            throw fail(`${name}: забран, но у той установки не удалён (${e.message})`, 400, 'relay-kept', { name });
         });
         console.log(`[Две установки] ${name}: забран у связанной, ${Math.round(f.size / 1048576)} МБ`);
     }
@@ -409,7 +428,7 @@ class RelayService {
         const o = this.outgoing;
         return {
             linked: link ? { url: link.url, self: link.self, folder: String(this.myjd()?.folder || link.folder || '') } : null,
-            outgoing: o ? { url: o.url, status: o.status, error: o.error, code: codeOf(o.id) } : null,
+            outgoing: o ? { url: o.url, status: o.status, error: o.error, problem: o.problem || null, code: codeOf(o.id) } : null,
             asks: [...this.asks].filter(([, a]) => a.status === 'waiting').map(([request, a]) => ({ request, url: a.url, ip: a.ip, at: a.at, code: codeOf(a.id) })),
             ...this.state,
         };

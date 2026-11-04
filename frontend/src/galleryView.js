@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { pageZoom } from './pageZoom';
+import { forgetFindAnswers } from './findData';
 
 // Общее у просмотра галереи игры (GameGallery) и «Избранного» (FavoritesGallery). Выборы человека — одни на все игры
 // и помнятся между заходами; без хранилища (приватное окно) — как по умолчанию
@@ -22,6 +23,18 @@ export const hasSound = (audio, file) => (Array.isArray(audio) ? audio.includes(
 export const AUTO_PACES = [2, 1.5, 1, 0.7, 0.45];
 export const readAutoPace = () => { const v = Number(read('rpg_scene_auto_pace')); return AUTO_PACES.includes(v) ? v : 1; };
 export const writeAutoPace = (v) => write('rpg_scene_auto_pace', v);
+// «Текст сразу» в плеере сцены: реплика встаёт целиком, без печати по буквам. Один на все игры, как темп «Авто»
+// Теги под картинкой в просмотре галереи (кнопка «Теги»): включены ли — на этом браузере
+export const readTagsOn = () => read('rpg_gallery_tags') === '1';
+export const writeTagsOn = (on) => write('rpg_gallery_tags', on ? '1' : '0');
+// Название тега картинки (теги Danbooru от разметчика): из списка языка, иначе как у модели, без подчёркиваний
+export const tagLabel = (t, name) => t.tag_names?.[name] || name.replace(/_/g, ' ');
+// Поиск по картинкам по тегу — из любого окна: App открывает окно поиска с этими словами
+export const searchPictures = (q) => window.dispatchEvent(new CustomEvent('rpg-pictures', { detail: { q } }));
+// «Похожие» на этот кадр — из любого окна: то же окно поиска, сразу с результатом
+export const similarPictures = (game, file) => window.dispatchEvent(new CustomEvent('rpg-pictures', { detail: { like: { game, file } } }));
+export const readSceneWhole = () => read('rpg_scene_whole') === '1';
+export const writeSceneWhole = (on) => write('rpg_scene_whole', on ? '1' : '0');
 
 // Скорость анимаций (кадры, петли): кнопка перебирает по кругу
 export const SPEEDS = [1, 2, 0.5];
@@ -372,3 +385,62 @@ export const sceneRows = (albums, dialogue) => {
     return { ...r, title: `${r.title} ${no}` };
   });
 };
+
+// Теги всей игры (сервер: gallery.js, gameTags): { of: кадр → его теги, has: тег → его кадры }. null — ещё не пришли или
+// сервер не ответил: кнопки «Теги» нет. Пусто — разметчик игру ещё не прошёл: кнопка есть, панель говорит почему
+export const useTagIndex = (id, on) => {
+  const [res, setRes] = useState({ id: '', index: null });
+  useEffect(() => {
+    if (!on) return undefined;
+    let alive = true;
+    fetch(`/api/gallery/${encodeURIComponent(id)}/tags`).then((r) => (r.ok ? r.json() : null)).catch(() => null).then((d) => {
+      if (!alive || !d) return;
+      const of = new Map();
+      const has = new Map();
+      for (const { tag, f } of d.tags || []) {
+        const files = f.map((i) => d.files[i]);
+        has.set(tag, new Set(files));
+        for (const file of files) (of.get(file) || of.set(file, []).get(file)).push(tag);
+      }
+      setRes({ id, index: { of, has, hidden: d.hidden || [] } });
+    });
+    return () => { alive = false; };
+  }, [id, on]);
+  return res.id === id ? res.index : null;
+};
+
+// Кадры сцены — строки вкладок «Сцены» и «Диалоги» (galleryView.js, sceneRows)
+export const rowFiles = (r) => (r.album.scenes?.length ? (r.album.scenes[r.n]?.f || []).map((i) => r.album.files[i]) : r.album.files).filter(Boolean);
+
+// Кадры живой плитки сцены (SceneList): до 5 равномерно по сцене; то же считает сервер для окна «Сцены» (libraryScenes.js,
+// r.peek). У наборов Spine и Live2D и у диалогов менять нечего
+export const peekFrames = (r) => {
+  if (r.peek) return r.peek;
+  if (!r.album.files || r.album.spine || r.album.live2d || r.album.kind === 'dialogue') return [];
+  const files = rowFiles(r);
+  const n = Math.min(5, files.length);
+  return n < 2 ? [] : Array.from({ length: n }, (_, k) => files[Math.floor((k * files.length) / n)]);
+};
+
+// Подходит ли набор кадров (один кадр или вся сцена): на нём есть все выбранные теги (у сцены — хоть на разных кадрах) и нет
+// ни одного из исключённых
+export const hasTags = (files, picked, index, not = []) => picked.every((tag) => files.some((f) => index.has.get(tag)?.has(f)))
+  && !not.some((tag) => files.some((f) => index.has.get(tag)?.has(f)));
+
+// Числа для панели «Теги»: сколько наборов подходит и сколько из них с каждым тегом. → { counts: [{ tag, n }], total }
+export const tagCounts = (items, picked, not, index) => {
+  const fit = items.filter((files) => hasTags(files, picked, index, not));
+  const seen = new Map();
+  for (const files of fit) {
+    for (const tag of new Set(files.flatMap((f) => index.of.get(f) || []))) seen.set(tag, (seen.get(tag) || 0) + 1);
+  }
+  return { counts: [...seen].map(([tag, n]) => ({ tag, n })), total: fit.length };
+};
+
+// Скрыть теги насовсем (Настройки): { add, remove } → новый список
+export const changeHiddenTags = (body) => fetch('/api/pictures/hidden', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status))))).then((d) => {
+    // Подбор на «Найти» и на Главной не показывает игры со скрытым тегом: их ответы устарели
+    forgetFindAnswers();
+    return d.tags;
+  });

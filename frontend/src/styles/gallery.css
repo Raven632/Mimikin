@@ -5,6 +5,7 @@
   inset: 0;
   z-index: 2500;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   background: var(--bg-deep);
   padding: calc(16px + var(--safe-top)) 16px calc(24px + var(--safe-bottom));
 }
@@ -70,6 +71,17 @@
 /* «?» у пояснения вкладки — в строке кнопок, размером с их подпись */
 .gallery-tools .help-mark { width: 1rem; height: 1rem; margin-left: 4px; font-size: var(--fs-sm); }
 .gallery-tools .gallery-play { padding: 6px 14px; white-space: nowrap; }
+/* Кто в сцене (SceneCast): своя строка под чипами вкладки. Длинное имя — многоточием, число сцен не уходит.
+   На компьютере — сколько влезет в строку и «Ещё N», раскрытый ряд переносится; на телефоне (ниже) — одной лентой.
+   .measure — проход замера до показа: все чипы в строку в полную ширину */
+.gallery-cast { order: 4; width: 100%; display: flex; flex-wrap: wrap; gap: 8px; }
+.gallery-cast .chip { display: inline-flex; align-items: center; max-width: 16em; }
+.gallery-cast .cast-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gallery-cast .chip-count { flex-shrink: 0; }
+.gallery-cast .cast-extra { display: none; }
+.gallery-cast .cast-more { color: var(--gold-muted); }
+.gallery-cast.measure { flex-wrap: nowrap; overflow: hidden; }
+.gallery-cast.measure .chip { flex-shrink: 0; }
 
 .gallery-close {
   order: 2;
@@ -291,9 +303,8 @@
   display: flex;
   flex-direction: column;
   background: #000;
-  border: 1px solid var(--gold-dim);
+  border: 1px solid rgba(201, 168, 76, 0.6);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.75);
   cursor: default;
   /* У окна просмотра touch-action: none (свайпы листают кадры) — список прокручивается пальцем */
   touch-action: pan-y;
@@ -306,8 +317,8 @@
   width: 10px;
   height: 10px;
   background: #000;
-  border-right: 1px solid var(--gold-dim);
-  border-bottom: 1px solid var(--gold-dim);
+  border-right: 1px solid rgba(201, 168, 76, 0.6);
+  border-bottom: 1px solid rgba(201, 168, 76, 0.6);
   transform: rotate(45deg);
 }
 .scene-pick-head {
@@ -390,8 +401,164 @@
   .scene-pick-cell { min-width: 56px; height: 44px; padding: 0 10px; font-size: var(--fs-sm); }
 }
 /* Поиск по картинкам: поле на всю ширину под заголовком (то же SearchBox, что в библиотеке), под ним — сколько игр искали */
-.pics-search { order: 3; width: 100%; display: flex; }
+.pics-search { order: 3; width: 100%; display: flex; gap: 8px; align-items: stretch; }
+.pics-search .search-box { flex: 1; min-width: 0; }
+.pics-image { flex-shrink: 0; }
 .pics-covered { margin: 0 0 12px; color: var(--text-dim); font-size: var(--fs-sm); }
+/* Теги кадра (кнопка «Теги») — первой строкой панели просмотра: панель растёт вверх и кнопок не закрывает. На телефоне —
+   одна строка, листается вбок */
+.gallery-bar:has(.gallery-tags) { flex-wrap: wrap; justify-content: center; width: min(920px, calc(100% - 24px)); row-gap: 8px; }
+.gallery-tags { order: -2; flex-basis: 100%; display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; white-space: normal; }
+.gallery-tags .chip { padding: 3px 10px; }
+.gallery-tags-none { color: var(--text-dim); font-size: var(--fs-sm); }
+.gallery-tags.stale { opacity: 0.5; }
+@media (max-width: 560px) {
+  .gallery-tags { flex-wrap: nowrap; justify-content: flex-start; overflow-x: auto; scrollbar-width: none; }
+  /* У окна просмотра touch-action: none (свайпы листают кадры) — полосу тегов палец листает вбок */
+  .gallery-tags { touch-action: pan-x; }
+  .gallery-tags > * { flex: 0 0 auto; }
+}
+/* Панель «Теги» галереи: чёрная с золотой рамкой, как остальные выпадающие списки. Список как оглавление: название,
+   шкала — какая доля кадров с этим тегом, число. На телефоне — лист снизу на всю ширину */
+.gallery-tools .gallery-play svg { flex: none; }
+/* На телефоне у кнопок раздела только значки; значок тега не такой привычный, подпись остаётся */
+.gallery-tools .tag-tool .tool-label { display: inline; }
+.gallery-tools .tag-tool { display: inline-flex; align-items: center; gap: 6px; }
+.tag-tool-n { min-width: 1.35em; padding: 0 5px; border-radius: var(--radius-pill); background: var(--gold); color: #000; font-size: var(--fs-2xs); font-weight: 600; line-height: 1.35em; text-align: center; }
+.tag-scrim { display: none; }
+.tag-panel {
+  position: fixed;
+  z-index: 20;
+  top: var(--top, 120px);
+  right: var(--right, 16px);
+  width: min(640px, calc(100vw - 24px));
+  max-height: min(600px, calc(100dvh - var(--top, 120px) - 16px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-card);
+  border: 1px solid rgba(201, 168, 76, 0.6);
+  border-radius: var(--radius-lg);
+  outline: none;
+  animation: tag-panel-in 140ms var(--ease-out);
+}
+@keyframes tag-panel-in { from { opacity: 0; transform: translateY(-6px); } }
+/* Уже 200 строка тега не помещается: на тесном экране шире кнопки, левый край всё равно по ней. z-index — выше ряда кнопок
+   (.controls-zone): ниже него панель теряла верхний край */
+.tag-panel.under { z-index: 51; left: var(--left); right: auto; width: min(max(var(--width), 200px), calc(100vw - var(--left) - 12px)); max-height: min(520px, calc(100dvh - var(--top, 120px) - 16px)); }
+.tag-panel.under .tag-list { grid-template-columns: minmax(0, 1fr); padding: 4px 6px 6px; }
+.tag-panel.under .tag-panel-foot { flex-wrap: wrap; gap: 6px 12px; }
+.tag-panel.under .tag-apply { flex: 1 1 auto; white-space: nowrap; }
+.tag-panel-head { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 14px; padding: 8px 8px 0; }
+/* Поле — как в других списках (.picker-search) */
+.tag-panel-head .search-box { flex: 1 1 100%; min-width: 0; }
+.tag-panel-head .search-box input { height: auto; padding-top: 10px; padding-bottom: 10px; background: var(--bg-deep); border: 1px solid var(--line-field); border-radius: var(--radius-sm); }
+.tag-panel-head .search-box input:focus { border-color: var(--gold); }
+.tag-panel-head .tag-sort { margin-left: 2px; }
+.tag-sort { flex: none; display: flex; gap: 14px; }
+.tag-sort button { padding: 6px 0; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-dim); font: inherit; font-size: var(--fs-sm); cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+.tag-sort button.on { color: var(--gold-light); border-bottom-color: var(--gold); }
+.tag-list { flex: 1 1 auto; min-height: 88px; overflow-y: auto; overscroll-behavior: contain; padding: 8px 8px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 8px; align-content: start; scrollbar-width: thin; scrollbar-color: var(--gold-dim) transparent; }
+.tag-row { display: flex; align-items: stretch; border-radius: var(--radius-sm); transition: background-color 0.15s; }
+.tag-row-main { flex: 1 1 auto; min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 36px; padding: 0 2px 0 8px; background: none; border: 0; border-radius: var(--radius-sm); color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; transition: color 0.15s; }
+/* «Без этого тега» — тихий значок справа: заметен, когда нужен, и не спорит со строкой */
+.tag-row-no { flex: none; width: 30px; display: grid; place-items: center; padding: 0; background: none; border: 0; border-radius: var(--radius-sm); color: var(--gold-dim); cursor: pointer; transition: color 0.15s; }
+.tag-row-no svg { width: 14px; height: 14px; }
+.tag-row.no { background: rgba(232, 223, 200, 0.05); }
+.tag-row.no .tag-row-main { color: var(--text-dim); }
+.tag-row.no .tag-row-name { text-decoration: line-through; }
+.tag-row.no .tag-row-no { color: var(--gold-light); }
+.tag-row-mark { display: flex; color: var(--gold-light); }
+.tag-row-mark:empty { display: none; }
+.tag-row-mark svg { width: 14px; height: 14px; }
+.tag-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag-row-n { color: var(--text-dim); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-align: right; }
+.tag-row.on { background: rgba(201, 168, 76, 0.12); }
+.tag-row.on .tag-row-main { color: var(--gold-light); font-weight: 700; }
+.tag-row-main:focus-visible, .tag-row-no:focus-visible, .tag-sort button:focus-visible, .tag-reset:focus-visible { outline: 2px solid var(--gold); outline-offset: 1px; }
+@media (hover: hover) {
+  /* «Без этого тега» — только у строки под мышью: столбец одинаковых значков шумел */
+  .tag-row:not(.no):not(:hover) .tag-row-no:not(:focus-visible) { opacity: 0; }
+  .tag-row:hover { background: rgba(201, 168, 76, 0.07); }
+  .tag-row:not(.no) .tag-row-main:hover, .tag-row-no:hover { color: var(--gold-light); }
+  .tag-sort button:hover, .tag-reset:hover { color: var(--gold-light); }
+}
+.tag-none { grid-column: 1 / -1; margin: 0; padding: 24px 8px; color: var(--text-dim); font-size: var(--fs-sm); text-align: center; }
+.tag-panel-foot { display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 8px calc(8px + var(--safe-right, 0px)) calc(8px + var(--safe-bottom)) 12px; border-top: 1px solid rgba(201, 168, 76, 0.2); }
+.tag-apply { background: var(--gold); border-color: var(--gold); color: #000; font-weight: 600; border-radius: var(--radius-sm); justify-content: center; }
+.tag-reset { margin-right: auto; padding: 6px 0; background: none; border: 0; color: var(--text-dim); font: inherit; font-size: var(--fs-sm); text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+/* Выбранные теги над сеткой */
+.tag-picked { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 14px; }
+.tag-picked-n { margin-right: 4px; color: var(--text-dim); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+.tag-picked-chip { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px 5px 14px; color: var(--gold-light); }
+.tag-picked-chip svg { width: 12px; height: 12px; }
+.tag-picked-chip.no { background: none; border-color: var(--gold-dim); color: var(--text-dim); text-decoration: line-through; }
+.tag-picked .tag-reset { margin: 0 0 0 4px; }
+@media (max-width: 560px) {
+  .tag-scrim { display: block; position: fixed; z-index: 19; inset: 0; background: rgba(0, 0, 0, 0.6); }
+  .tag-panel, .tag-panel.under { top: auto; left: 0; right: 0; bottom: 0; width: 100%; max-height: 82dvh; border-width: 1px 0 0; border-radius: var(--radius-lg) var(--radius-lg) 0 0; animation-name: tag-sheet-in; animation-duration: 200ms; }
+  .tag-panel-head { padding-top: 12px; }
+  .tag-list { grid-template-columns: minmax(0, 1fr); }
+  .tag-row-main { min-height: 46px; font-size: var(--fs-md); }
+  .tag-row-no { width: 44px; }
+  .tag-row-no svg { width: 18px; height: 18px; }
+  .tag-apply { flex: 1 1 auto; justify-content: center; min-height: var(--btn-h); }
+  .tag-panel-foot:has(.tag-reset) .tag-apply { flex: 0 1 auto; }
+}
+@keyframes tag-sheet-in { from { transform: translateY(100%); } }
+@media (prefers-reduced-motion: reduce) { .tag-panel { animation: none; } }
+/* Плитка поиска: кадр открывает галерею, пилюли внизу справа — «Сцена» (кадр есть в сцене) и «Похожие» */
+/* Лента картинок: столбец во всю ширину телефона. Чёрный фон — настоящий: у кадров с прозрачным или чёрным полем нет видимого края.
+   Название игры прилипает к верху: кадры подряд — всегда видно, чьи они; главы разделены пустотой, а не карточками */
+.gallery.feed { padding: 0 0 calc(24px + var(--safe-bottom)); background: #000; }
+.feed .gallery-head { margin: 0; padding: calc(14px + var(--safe-top)) 60px 10px 16px; }
+.feed .gallery-close { position: fixed; z-index: 3; top: calc(6px + var(--safe-top)); right: 6px; width: 44px; height: 44px; justify-content: center; }
+.feed-game { max-width: 860px; margin: 0 auto 56px; }
+.feed-title {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  display: block;
+  width: 100%;
+  padding: calc(13px + var(--safe-top)) 60px 13px 16px;
+  border: 0;
+  border-bottom: 1px solid var(--gold-dim);
+  background: #000;
+  color: var(--gold-light);
+  font: inherit;
+  font-size: var(--fs-md);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.feed-frame { position: relative; margin-top: 2px; }
+.feed-open { display: block; width: 100%; padding: 0; border: 0; background: none; cursor: pointer; }
+.feed-open img { display: block; width: 100%; height: auto; }
+.feed-frame .gallery-count { right: 10px; bottom: 10px; min-height: 36px; padding: 0 12px; border-color: var(--gold-dim); cursor: pointer; font: inherit; font-size: var(--fs-sm); }
+.feed-frame .gallery-count svg { width: 12px; height: 12px; }
+.feed-all { display: block; width: 100%; min-height: 48px; padding: 0 16px; border: 0; background: none; color: var(--text-dim); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+.feed-title:focus-visible, .feed-open:focus-visible, .feed-all:focus-visible { outline: 2px solid var(--gold); outline-offset: -2px; }
+@media (hover: hover) { .feed-all:hover { color: var(--gold-light); } }
+/* Большой экран: глава видна целиком, а не один кадр на экран */
+@media (min-width: 900px) {
+  .feed .gallery-head, .feed-game { max-width: 1240px; margin-inline: auto; }
+  .feed .gallery-head { padding-right: 16px; }
+  .feed-frames { display: grid; grid-template-columns: 1fr 1fr; gap: 2px; align-items: center; }
+}
+.gallery.covers-hidden .feed-open img { filter: blur(18px) brightness(0.55) saturate(0.7); }
+
+.pics-tile { position: relative; }
+.pics-tile .gallery-tile { width: 100%; }
+.pics-acts { position: absolute; right: 6px; bottom: 6px; display: flex; gap: 4px; }
+.pics-acts .gallery-count { position: static; display: inline-flex; align-items: center; gap: 4px; border: 1px solid transparent; cursor: pointer; font: inherit; font-size: var(--fs-sm); }
+.pics-acts .gallery-count:hover, .pics-acts .gallery-count:focus-visible { border-color: var(--gold); }
+.pics-acts .gallery-count svg { width: 12px; height: 12px; }
+/* «Похожие на кадр»: сам кадр маленьким, подпись и «Назад к поиску» */
+.pics-like { display: flex; align-items: center; gap: 12px; margin: 0 0 12px; }
+.pics-like img { width: 96px; aspect-ratio: 4 / 3; object-fit: cover; border: 1px solid var(--gold-dim); border-radius: var(--radius-sm); }
+.pics-like span { flex: 1; min-width: 0; color: var(--text); }
+.gallery.covers-hidden .pics-like img { visibility: hidden; }
 .fav-tools { order: 4; display: flex; gap: 8px; flex-wrap: wrap; width: 100%; }
 .fav-tools .gallery-play { padding: 6px 14px; }
 .fav-where { overflow: hidden; text-overflow: ellipsis; max-width: calc(40 * var(--vw)); }
@@ -564,7 +731,21 @@
   border-radius: var(--radius-pill);
   cursor: default;
 }
-.scene-pos { min-width: 4.5em; text-align: center; font-variant-numeric: tabular-nums; }
+/* Полоса реплик плеера (SeekLine): своя строка над панелью, шириной с рамку реплики; номер строки и сколько их — по краям.
+   Подложка — как у полосы ролика: золото читается и на светлой CG */
+.scene-seek {
+  width: min(920px, 100%);
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: var(--radius-pill);
+  cursor: default;
+  touch-action: none;
+}
+.scene-seek .seek-time:last-child { text-align: right; }
 /* Выбор в панели (BarChoose): таблетка, как кнопки панели, со стрелкой-значком; название обрезается, значок — нет */
 .scene-lang {
   display: inline-flex; align-items: center; gap: 6px; max-width: 12em; padding: 4px 10px; border: 1px solid var(--gold-dim); border-radius: var(--radius-pill);
@@ -578,9 +759,6 @@
   .scene-box { padding: 8px 14px 12px; }
   .scene-bar { border-radius: var(--radius-lg); row-gap: 6px; }
 }
-/* Запасной вид текста: подпись по картинке без рамки. Показан владельцу на выбор, в интерфейс пока не подключён (класс на body). */
-body.scene-subs .scene-box { background: none; border: none; padding: 0 12px; text-shadow: 0 0 4px #000, 0 0 10px #000, 1px 1px 2px #000; }
-body.scene-subs .scene-text, body.scene-subs .scene-who { text-align: center; }
 
 /* Значки внизу слева — группой (ролик, анимация, облачко «у альбома есть сцена», голос, выбор): все — SVG одного размера */
 .tile-badges { position: absolute; left: 6px; bottom: 6px; display: flex; gap: 4px; }
@@ -594,13 +772,32 @@ body.scene-subs .scene-text, body.scene-subs .scene-who { text-align: center; }
 /* У сцены пилюля — с ▶ и золотой рамкой: по нажатию она играет, а не открывает кадры */
 .gallery-count.play { display: inline-flex; align-items: center; gap: 4px; border: 1px solid var(--gold-dim); }
 /* Диалог: портрет почти всегда один и тот же, поэтому он затемнён, а на плитке главное — первая реплика (или название) */
+/* Живая плитка: кадр сцены поверх обложки (SceneList). Долгое нажатие на телефоне — без меню браузера и выделения */
+.gallery-tile img.tile-peek { position: absolute; inset: 0; }
+.scene-tile { -webkit-touch-callout: none; user-select: none; }
 .gallery-tile.talk img { filter: brightness(0.3) saturate(0.6); object-position: right center; }
 .tile-quote { position: absolute; left: 0; right: 0; top: 24px; bottom: 30px; display: flex; align-items: center; padding: 0 10px; }
 .tile-quote span { font-size: var(--fs-sm); line-height: 1.35; color: var(--text); overflow-wrap: anywhere; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 .gallery.covers-hidden .tile-quote { visibility: hidden; }
+/* Найденная реплика (LineTile): кадр к этой реплике приглушён, реплика поверх — с тонкой золотой чертой слева, чтобы не
+   спутать с плиткой диалога. Найденные слова — золотом и подчёркиванием, без жёлтого фона */
+.line-tile img { filter: brightness(0.38) saturate(0.7); }
+.line-tile .tile-quote span { border-left: 2px solid var(--gold-dim); padding-left: 8px; white-space: pre-line; -webkit-line-clamp: 4; }
+.line-tile .line-who { color: var(--gold-muted); }
+.line-hit { background: none; color: var(--gold-light); text-decoration: underline 1px var(--gold); text-underline-offset: 3px; }
+.covers-hidden .line-tile .tile-quote { visibility: hidden; }
+/* Полка «В репликах» под поиском библиотеки: плитки — по ширине карточек полок */
+.line-shelf { padding-top: 28px; border-top: 1px solid rgba(201, 168, 76, 0.12); }
+.line-shelf .line-tile { scroll-snap-align: start; }
+/* Окно «Поиск по репликам»: группы по играм */
+.line-group { margin-bottom: 22px; }
+.line-group-title { margin: 0 0 8px; font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+.line-more { margin-top: 8px; }
+/* Окно «Сцены» без запроса (LibraryScenes): чипы вкладок, тонкая черта, отбор; справа «Смотреть подряд» и «Вперемешку» */
+.lib-scenes-bar { margin-bottom: 14px; }
+.lib-scenes-sep { width: 1px; height: 20px; align-self: center; margin: 0 4px; background: var(--line-window); }
 /* Подсказка под чипами: значки в ней — те же, что на плитках */
 .hint-ic { display: inline-flex; align-items: center; gap: 3px; padding: 2px 6px; margin: 0 2px; border-radius: var(--radius-pill); background: #000; border: 1px solid rgba(201, 168, 76, 0.25); color: var(--gold-light); font-size: var(--fs-2xs); vertical-align: 1px; line-height: 1.2; }
-.hint-sep { color: var(--gold-dim); margin: 0 6px; }
 
 @media (max-width: 560px) {
   .gallery-head h2 { font-size: var(--fs-lg); }
@@ -615,6 +812,26 @@ body.scene-subs .scene-text, body.scene-subs .scene-who { text-align: center; }
   .gallery-tools { margin-left: 0; }
   .gallery-tools .gallery-play { padding: 6px 10px; }
   .tool-label, .hint-more { display: none; }
+  /* Окно «Сцены»: черты между вкладками и отбором нет — ряд всё равно переносится */
+  .lib-scenes-sep { display: none; }
+  /* Кто в сцене — одной лентой с прокруткой, все имена сразу; затухает край, за которым ещё есть имена (fadeEdges.js) */
+  .gallery-cast { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; gap: 6px; }
+  .gallery-cast::-webkit-scrollbar { display: none; }
+  .gallery-cast .chip { flex-shrink: 0; max-width: 12em; }
+  .gallery-cast .cast-extra { display: inline-flex; }
+  .gallery-cast .cast-more { display: none; }
+  .gallery-cast[data-fade~="right"] {
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 40px), transparent);
+  }
+  .gallery-cast[data-fade~="left"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px);
+    mask-image: linear-gradient(to right, transparent, #000 40px);
+  }
+  .gallery-cast[data-fade~="left"][data-fade~="right"] {
+    -webkit-mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+    mask-image: linear-gradient(to right, transparent, #000 40px, #000 calc(100% - 40px), transparent);
+  }
   .gallery-name .tile-sub { display: none; }
   .gallery-name:has(.tile-sub) { padding-bottom: 4px; background: linear-gradient(rgba(0, 0, 0, 0.75), transparent); }
   /* Все четыре значка должны уместиться рядом с пилюлей «▶ N реплик», поэтому совсем мелкие */

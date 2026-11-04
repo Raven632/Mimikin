@@ -75,7 +75,7 @@ test.describe('телефон: плашка загрузок', () => {
       }
     }
     expect(await panel.locator('.tb-scroll').evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
-    // Кольцо в шапке на телефоне спрятано: там оно вставало на «Новинки», а список обрезался; всё теперь в панели
+    // Кольцо в шапке на телефоне спрятано: там оно вставало на «Найти», а список обрезался; всё теперь в панели
     await expect(page.locator('.jd-ring')).toBeHidden();
   });
 });

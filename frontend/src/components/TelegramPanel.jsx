@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { confirmDialog } from '../confirm';
-import { errorText, httpError } from '../apiError';
+import { errorText, httpError, reasonText, serverWords } from '../apiError';
 import StateView from './StateView';
 import { IconHourglass } from './icons';
 
@@ -24,6 +24,11 @@ const TelegramPanel = ({ t, lang, socket, showToast, onBackupAt }) => {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [reload, setReload] = useState(0);
+
+  // Чат из TELEGRAM_CHAT_ID: «Подключить» не нажимают, поэтому язык бота берём отсюда — иначе он писал бы на запасном
+  useEffect(() => {
+    if (state?.linked?.fromEnv && state.prefs?.lang !== lang) call('POST', '/prefs', { lang }).then(setState, () => {});
+  }, [state, lang]);
 
   // Время последней копии — строка состояния под вкладкой «Копии» в настройках
   useEffect(() => { if (state) onBackupAt?.(state.backupAt || 0); }, [state, onBackupAt]);
@@ -84,7 +89,7 @@ const TelegramPanel = ({ t, lang, socket, showToast, onBackupAt }) => {
         </ol>
       )}
 
-      {state?.configured && state.error && <p className="tg-note tg-error">{state.error}</p>}
+      {state?.configured && state.error && <p className="tg-note tg-error">{reasonText(t, state) || serverWords(t, state.error)}</p>}
 
       {state?.configured && !state.linked && (
         <div className="tg-block">

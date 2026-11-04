@@ -44,15 +44,16 @@ async function getFolderSize(dirPath) {
 }
 
 // Игра не на MV/MZ — на каком она движке, по её файлам: чтобы ошибка сказала прямо, а не «нет папки www».
-// '' — не узнали. Смотрим сам архив и три уровня папок под ним: игра лежит в первой-второй.
+// null — не узнали. Смотрим сам архив и три уровня папок под ним: игра лежит в первой-второй.
 // VX Ace/VX/XP — и упакованные (.rgss3a), и открытые (Data/*.rvdata2, переводы и репаки)
+// Названия списком: «или» между ними у каждого языка своё (Intl.ListFormat — на сервере и на странице)
 const ENGINES = [
-    [/\.rgss(3a|2a|ad)$|^rgss\d+\w*\.dll$|\.(rvdata2?|rxdata)$|^game\.rvproj2?$/i, 'RPG Maker VX Ace, VX или XP'],
-    [/^rpg_rt\.(exe|ldb|lmt)$/i, 'RPG Maker 2000 или 2003'],
-    [/\.wolf$/i, 'WOLF RPG Editor'],
-    [/^renpy$|\.rpa$/i, "Ren'Py"],
-    [/^unityplayer\.dll$|^globalgamemanagers$/i, 'Unity'],
-    [/\.xp3$/i, 'KiriKiri'],
+    [/\.rgss(3a|2a|ad)$|^rgss\d+\w*\.dll$|\.(rvdata2?|rxdata)$|^game\.rvproj2?$/i, ['RPG Maker VX Ace', 'VX', 'XP']],
+    [/^rpg_rt\.(exe|ldb|lmt)$/i, ['RPG Maker 2000', '2003']],
+    [/\.wolf$/i, ['WOLF RPG Editor']],
+    [/^renpy$|\.rpa$/i, ["Ren'Py"]],
+    [/^unityplayer\.dll$|^globalgamemanagers$/i, ['Unity']],
+    [/\.xp3$/i, ['KiriKiri']],
 ];
 async function otherEngine(dir, depth = 0) {
     const items = await fsp.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -60,13 +61,13 @@ async function otherEngine(dir, depth = 0) {
         const hit = ENGINES.find(([re]) => re.test(item.name));
         if (hit) return hit[1];
     }
-    if (depth >= 3) return '';
+    if (depth >= 3) return null;
     for (const item of items) {
         if (!item.isDirectory()) continue;
         const found = await otherEngine(path.join(dir, item.name), depth + 1);
         if (found) return found;
     }
-    return '';
+    return null;
 }
 
 module.exports = { spawnExtract, findGameFolder, getFolderSize, otherEngine };

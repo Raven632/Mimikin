@@ -8,11 +8,12 @@ const path = require('path');
 const { classifyUnit, tally, significant, parseCsv } = require('../utils/gamelang.js');
 const { readGameJson } = require('../utils/gameData.js');
 
-const VERSION = 1;
+// 2 — окно имени «\nc<…>», «\nr<…>» (YEP) тоже узнаём: таблица Hakubox находит такие реплики
+const VERSION = 2;
 const MAX_FILE = 32 * 1024 * 1024;
 const MIN_SHARE = 0.1;
 const SAMPLE = 3000;
-const NAMEBOX = /^((?:\\[Cc]\[\d+\])*\\n<([^>]*)>)/i;
+const NAMEBOX = /^((?:\\[Cc]\[\d+\])*\\n[lcr]?<([^>]*)>)/i;
 const TAG = /\{(.*?)\}/g;
 const ALIAS = { jp: 'ja', cn: 'zh', ch: 'zh', tc: 'zh', sc: 'zh', zw: 'zh', kr: 'ko' };
 const SCRIPT = (code) => (['ja', 'zh', 'ko', 'th'].includes(code) ? code : code === 'ru' || code === 'uk' ? 'cyr' : 'latin');

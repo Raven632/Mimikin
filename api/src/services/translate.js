@@ -36,6 +36,8 @@ const month = (now = Date.now()) => new Date(now).toISOString().slice(0, 7);
 const escape = (s) => s.replace(/&/g, '&amp;').replace(/<(?!x i="\d+"\/>)/g, '&lt;').replace(/(?<!<x i="\d+"\/)>/g, '&gt;');
 
 class QuotaError extends Error {}
+// Служба отказала: code идёт в game_translation.error вместо текста, а слова к нему — в локалях страницы (TranslateBar.jsx)
+const refused = (engine, status, detail = '') => Object.assign(new Error(`${engine} ответил ${status}${detail}`), { code: `engine:${engine}:${status}` });
 
 const parseJson = (s) => { try { return JSON.parse(s || '{}') || {}; } catch (e) { return {}; } };
 
@@ -166,7 +168,7 @@ const engines = {
             signal: AbortSignal.timeout(TIMEOUT_MS),
         });
         if (res.status === 456) throw new QuotaError('DeepL: лимит месяца исчерпан');
-        if (!res.ok) throw new Error(`DeepL ответил ${res.status}`);
+        if (!res.ok) throw refused('DeepL', res.status);
         return (await res.json()).translations.map((x) => x.text);
     },
     async microsoft(texts, lang, value) {
@@ -183,7 +185,7 @@ const engines = {
             const body = await res.json().catch(() => ({}));
             if (String(body?.error?.code).startsWith('4030')) throw new QuotaError('Microsoft: лимит исчерпан');
         }
-        if (!res.ok) throw new Error(`Microsoft ответил ${res.status}`);
+        if (!res.ok) throw refused('Microsoft', res.status);
         return (await res.json()).map((x) => x.translations[0].text);
     },
     async google(texts, lang, key) {
@@ -198,9 +200,9 @@ const engines = {
             const body = await res.json().catch(() => ({}));
             const reason = body?.error?.errors?.[0]?.reason || '';
             if (body?.error?.status === 'RESOURCE_EXHAUSTED' || /LimitExceeded|quotaExceeded/i.test(reason)) throw new QuotaError('Google: лимит исчерпан');
-            throw new Error(`Google ответил ${res.status}${reason ? ` (${reason})` : ''}`);
+            throw refused('Google', res.status, reason ? ` (${reason})` : '');
         }
-        if (!res.ok) throw new Error(`Google ответил ${res.status}`);
+        if (!res.ok) throw refused('Google', res.status);
         return (await res.json()).data.translations.map((x) => x.translatedText);
     },
     async libre(texts, lang, value) {
@@ -211,7 +213,7 @@ const engines = {
             body: JSON.stringify({ q: texts, source: 'auto', target: lang, format: 'html', ...(apiKey ? { api_key: apiKey } : {}) }),
             signal: AbortSignal.timeout(TIMEOUT_MS * 5),
         });
-        if (!res.ok) throw new Error(`LibreTranslate ответил ${res.status}`);
+        if (!res.ok) throw refused('LibreTranslate', res.status);
         const data = await res.json();
         return Array.isArray(data.translatedText) ? data.translatedText : [data.translatedText];
     },
@@ -421,7 +423,7 @@ class TranslateService {
     // Итог проверки в браузере (rpg-fixes, setupSelfTest): { ok, steps, errors }. Только для включённого перевода
     async saveCheck(id, result) {
         const lang = await this.langOf(id);
-        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409 });
+        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409, reason: 'tl-off' });
         const clip = (x, n) => String(x || '').slice(0, n);
         const clean = {
             lang,
@@ -643,7 +645,7 @@ class TranslateService {
             if (!job.stop && !tplDone) await this.db().run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [tplFlag, '1']).catch(() => {});
             console.log(`[Перевод] ${id} → ${lang}: ${job.done} из ${job.total}${job.failed ? `, не вышло: ${job.failed}` : ''}`);
         } catch (e) {
-            await save({ state: 'error', error: String(e.message).slice(0, 200), done: job.done, failed: job.failed });
+            await save({ state: 'error', error: e.code || String(e.message).slice(0, 200), done: job.done, failed: job.failed });
             throw e;
         } finally {
             this.current = null;
@@ -697,7 +699,7 @@ class TranslateService {
     // «Перевести заново»: всю игру (lines не задан) или выбранные строки. Перевод должен быть включён
     async redo(id, lines = null) {
         const lang = await this.langOf(id);
-        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409 });
+        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409, reason: 'tl-off' });
         if (lines && (!Array.isArray(lines) || lines.length > 20000)) throw Object.assign(new Error('Нужен список строк'), { status: 400 });
         this.enqueue(id, lang, lines ? lines.map(String) : 'all');
         return this.status(id);
@@ -707,7 +709,7 @@ class TranslateService {
     // выбранное»: нашёл «Мэйбел» — отметил — перевёл ещё раз
     async lines(id, q = '', limit = 100) {
         const lang = await this.langOf(id);
-        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409 });
+        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409, reason: 'tl-off' });
         const text = await this.gameText(id);
         if (!text) return { lang, total: 0, items: [] };
         const dict = await this.dictionary(id, lang, { fresh: true });
@@ -728,9 +730,9 @@ class TranslateService {
     // Перевод игры файлом: { оригинал: перевод } — как хранит MTool и как принимает «Загрузить перевод»
     async exportFile(id, lang) {
         const l = lang || await this.langOf(id);
-        if (!LANGS.includes(l)) throw Object.assign(new Error('Перевод не включён'), { status: 409 });
+        if (!LANGS.includes(l)) throw Object.assign(new Error('Перевод не включён'), { status: 409, reason: 'tl-off' });
         const text = await this.gameText(id);
-        if (!text) throw Object.assign(new Error('У игры нет данных RPG Maker MV/MZ'), { status: 409 });
+        if (!text) throw Object.assign(new Error('У игры нет данных RPG Maker MV/MZ'), { status: 409, reason: 'tl-no-data' });
         const dict = await this.dictionary(id, l, { fresh: true });
         const out = {};
         for (const s of text.all) if (dict.has(s)) out[s] = dict.get(s);
@@ -1028,10 +1030,10 @@ class TranslateService {
     // Само исправляется только машинный перевод: свой (загруженный файлом) не трогаем — его делал человек
     async issuesOf(id) {
         const lang = await this.langOf(id);
-        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409 });
+        if (!lang) throw Object.assign(new Error('Перевод не включён'), { status: 409, reason: 'tl-off' });
         const text = await this.gameText(id);
         const dir = await this.dataDir(id);
-        if (!text || !dir) throw Object.assign(new Error('У игры нет данных RPG Maker MV/MZ'), { status: 409 });
+        if (!text || !dir) throw Object.assign(new Error('У игры нет данных RPG Maker MV/MZ'), { status: 409, reason: 'tl-no-data' });
         const files = [];
         for (const f of (await fsp.readdir(dir)).filter((x) => x.endsWith('.json'))) {
             try { files.push([f.slice(0, -5), JSON.parse((await fsp.readFile(path.join(dir, f), 'utf8')).replace(/^\uFEFF/, ''))]); } catch (e) { /* не JSON — не переводится */ }
@@ -1078,7 +1080,7 @@ class TranslateService {
     async importFile(id, lang, content) {
         if (!LANGS.includes(lang)) throw Object.assign(new Error('Такого языка нет'), { status: 400 });
         const pairs = parseImport(content);
-        if (!pairs.length) throw Object.assign(new Error('В файле нет пар «оригинал — перевод»'), { status: 400 });
+        if (!pairs.length) throw Object.assign(new Error('В файле нет пар «оригинал — перевод»'), { status: 400, reason: 'tl-no-pairs' });
         if (pairs.length > 300000) throw Object.assign(new Error('Слишком большой файл перевода'), { status: 413 });
         const text = await this.gameText(id);
         const ours = new Set(text?.all || []);

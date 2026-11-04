@@ -3,7 +3,9 @@ const path = require('path');
 const zlib = require('zlib');
 const { GAMES_DIR, SAVES_DIR } = require('../config/index.js');
 const dbService = require('../db/database.js');
-const { invalidateGamesList, redisClient } = require('./cache.js');
+const { invalidateGamesList, redisClient, emitToPerson } = require('./cache.js');
+const personStores = require('./personStores.js');
+const personal = require('../services/personal.js');
 const { findDataDir } = require('./gamelang.js');
 const LZString = require('lz-string');
 
@@ -87,8 +89,9 @@ const playtimeOf = (seconds) => {
 };
 
 // Берём самый «продвинутый» слот — с наибольшим временем игры.
-async function readProgress(gameId) {
-    const dir = path.join(SAVES_DIR, path.basename(gameId));
+// root — где лежат сейвы: у владельца _saves, у остальных людей их папка (utils/personStores.js)
+async function readProgress(gameId, root = SAVES_DIR) {
+    const dir = path.join(root, path.basename(gameId));
     let files;
     try { files = await fsp.readdir(dir); } catch { return null; }
 
@@ -122,26 +125,103 @@ async function readProgress(gameId) {
     return best;
 }
 
-// Время игры только растёт: его дают и моменты с точками перемотки (notePlaytime), а сейвы бывают старее них
-async function updateProgress(gameId) {
-    const progress = await readProgress(gameId);
-    if (!progress) return;
+// День на часах сервера: «2026-11-02»
+const pad = (n) => String(n).padStart(2, '0');
+const dayOf = (d = new Date()) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+
+// Записи времени — по очереди: разница считается от прежнего значения, и две записи разом (сейв и точка перемотки) посчитали бы
+// один и тот же кусок дважды
+let playTurn = Promise.resolve();
+const inPlayTurn = (work) => {
+    const run = playTurn.then(work);
+    playTurn = run.catch(() => {});
+    return run;
+};
+
+// Больше за одну запись не наиграть: записи идут каждую минуту игры и на каждом сейве. Такой скачок — наигранное раньше (игру загрузили
+// заново к старым сейвам, у человека первый сейв) или чепуха от клиента, а не сегодняшний день
+const MAX_PLAY_STEP = 12 * 3600;
+
+// Сколько прибавилось — в сегодняшний день (play_days). Сбой календаря не должен мешать ни времени игры, ни самой игре
+async function addPlayDay(userId, gameId, seconds) {
+    if (!(seconds > 0) || seconds > MAX_PLAY_STEP || dbService.restoring) return;
     await dbService.get().run(
-        'UPDATE games SET playtime = MAX(COALESCE(playtime, 0), ?), progress = ? WHERE id = ?',
-        [progress.playtime, JSON.stringify(progress), gameId]
-    );
-    await invalidateGamesList();
+        `INSERT INTO play_days (user_id, game_id, day, seconds) VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id, game_id, day) DO UPDATE SET seconds = seconds + excluded.seconds`,
+        [userId, gameId, dayOf(), seconds]
+    ).catch((e) => console.warn(`[Дни игры] ${gameId}: ${e.message}`));
+}
+
+// Время игры только растёт: его дают и моменты с точками перемотки (notePlaytime), а сейвы бывают старее них
+// person — кто сохранился. Человек не владелец: сейвы из его папки, время и прогресс — в его строку user_games,
+// строка владельца в games и общий список не меняются
+async function updateProgress(gameId, person = null) {
+    const user = personal.other(person);
+    const progress = await readProgress(gameId, user ? personStores.storesFor(user).root : SAVES_DIR);
+    if (!progress) return;
+    await inPlayTurn(async () => {
+        if (user) {
+            const before = await dbService.get().get('SELECT playtime FROM user_games WHERE user_id = ? AND game_id = ?', [user.id, gameId]);
+            await dbService.get().run(
+                `INSERT INTO user_games (user_id, game_id, playtime, progress, at) VALUES (?, ?, ?, ?, ?)
+                 ON CONFLICT(user_id, game_id) DO UPDATE SET playtime = MAX(COALESCE(playtime, 0), excluded.playtime), progress = excluded.progress, at = excluded.at`,
+                [user.id, gameId, progress.playtime, JSON.stringify(progress), Date.now()]
+            );
+            await addPlayDay(user.id, gameId, progress.playtime - (before?.playtime || 0));
+            emitToPerson(user.id, 'library-changed');
+            return;
+        }
+        const before = await dbService.get().get('SELECT playtime FROM games WHERE id = ?', [gameId]);
+        await dbService.get().run(
+            'UPDATE games SET playtime = MAX(COALESCE(playtime, 0), ?), progress = ? WHERE id = ?',
+            [progress.playtime, JSON.stringify(progress), gameId]
+        );
+        if (before) await addPlayDay('owner', gameId, progress.playtime - (before.playtime || 0));
+        await invalidateGamesList();
+    });
 }
 
 // Время игры из моментов и точек перемотки (в них — время игры на миг снимка): играют и без сохранений — с P,
 // перемоткой и «Где вышли», — и библиотека показывала 0 ч. Только вперёд и не чаще раза в минуту игры: точки
 // ставятся перед каждой сценой и выбором, а список игр после записи собирается заново
-async function notePlaytime(gameId, seconds) {
+async function notePlaytime(gameId, seconds, person = null) {
     const s = playtimeOf(seconds);
     if (!s) return;
-    const res = await dbService.get().run('UPDATE games SET playtime = ? WHERE id = ? AND COALESCE(playtime, 0) + 60 <= ?', [s, gameId, s]);
-    if (res?.changes) await invalidateGamesList();
+    // Восстановление копии держит транзакцию на общем соединении; запись сюда пропала бы при откате. Следующая точка перемотки допишет
+    if (dbService.restoring) return;
+    const user = personal.other(person);
+    await inPlayTurn(async () => {
+        if (user) {
+            // Строки ещё нет — первую запись тоже не чаще, чем раз в минуту игры, как у владельца (его UPDATE на пустом времени
+            // меньше минуты ничего не меняет)
+            if (s < 60) return;
+            const before = await dbService.get().get('SELECT playtime FROM user_games WHERE user_id = ? AND game_id = ?', [user.id, gameId]);
+            const res = await dbService.get().run(
+                `INSERT INTO user_games (user_id, game_id, playtime, at) VALUES (?, ?, ?, ?)
+                 ON CONFLICT(user_id, game_id) DO UPDATE SET playtime = excluded.playtime, at = excluded.at WHERE COALESCE(user_games.playtime, 0) + 60 <= excluded.playtime`,
+                [user.id, gameId, s, Date.now()]
+            );
+            if (res?.changes) {
+                await addPlayDay(user.id, gameId, s - (before?.playtime || 0));
+                emitToPerson(user.id, 'library-changed');
+            }
+            return;
+        }
+        const before = await dbService.get().get('SELECT playtime FROM games WHERE id = ?', [gameId]);
+        const res = await dbService.get().run('UPDATE games SET playtime = ? WHERE id = ? AND COALESCE(playtime, 0) + 60 <= ?', [s, gameId, s]);
+        if (res?.changes) {
+            await addPlayDay('owner', gameId, s - (before?.playtime || 0));
+            await invalidateGamesList();
+        }
+    });
 }
+
+// Что сервер игр делает после записи слота и момента (routes/play.js, createGameApp). Тот же код берёт и server.js, и тесты:
+// провод между «кто сохранился» и «чья строка меняется» проверяется на настоящих функциях, а не на копии
+const gameHooks = {
+    onSaved: (id, slot, userId) => { if (/^(RPG File\d+|MZ_file\d+)$/i.test(slot)) updateProgress(id, { id: userId, isOwner: userId === 'owner' }).catch(() => {}); },
+    onMarked: (id, playtime, userId) => { notePlaytime(id, playtime, { id: userId, isOwner: userId === 'owner' }).catch(() => {}); },
+};
 
 // Разовый проход по уже накопленным сейвам: прогресс появится и у старых игр
 async function backfillProgress() {
@@ -162,4 +242,4 @@ async function backfillProgress() {
     }
 }
 
-module.exports = { readProgress, updateProgress, notePlaytime, backfillProgress, parseSave, placeName, mapName };
+module.exports = { dayOf, readProgress, updateProgress, notePlaytime, gameHooks, backfillProgress, parseSave, placeName, mapName };

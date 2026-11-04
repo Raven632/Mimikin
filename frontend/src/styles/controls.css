@@ -12,7 +12,6 @@
 .auth-submit,
 .toast-action,
 .meta-status-btn,
-.grimoire-action-btn,
 .audit-retry,
 .cancel-btn,
 .confirm-actions button,
@@ -55,27 +54,22 @@
 
 /* обычная */
 .meta-status-btn,
-.grimoire-action-btn,
 .audit-retry,
 .toast-action,
 .confirm-actions .confirm-cancel,
+.confirm-actions .confirm-other,
 .cancel-btn {
   background: var(--surface-btn);
   border: 1px solid transparent;
   color: var(--text);
 }
 
-/* Кнопки окна игры подсвечиваются и на сенсорных экранах, после касания: правило без @media (hover) */
-.grimoire-action-btn:hover {
-  background: var(--surface-btn-hover);
-}
-
 @media (hover: hover) {
   .meta-status-btn:hover,
-  .grimoire-action-btn:hover,
   .audit-retry:hover,
   .toast-action:hover,
   .confirm-actions .confirm-cancel:hover,
+  .confirm-actions .confirm-other:hover,
   .cancel-btn:hover {
     background: var(--surface-btn-hover);
     color: var(--gold-light);
@@ -89,14 +83,13 @@
 .catalog-back, .menu-logout { background: none; border: none; color: var(--text-dim); padding: 0 8px; }
 
 /* крупная */
-.auth-submit, .save-btn.welcome-btn, .confirm-actions button { min-height: var(--btn-h-lg); }
+.auth-submit, .confirm-actions button { min-height: var(--btn-h-lg); }
 
 /* Значок и подпись — одного роста */
-.meta-status-btn svg, .grimoire-action-btn svg, .save-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
+.meta-status-btn svg, .save-btn svg { width: 16px; height: 16px; flex-shrink: 0; }
 
 .save-btn:disabled,
 .meta-status-btn:disabled,
-.grimoire-action-btn:disabled,
 .audit-retry:disabled {
   opacity: 0.45;
   cursor: default;
@@ -107,7 +100,7 @@
 .cancel-btn { flex: 1; }
 
 .meta-status-btn { flex-shrink: 0; }
-.meta-status-btn:focus-visible, .grimoire-action-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.meta-status-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 
 /* Чипы: фильтры, статусы, вкладки источников */
 .chip {
@@ -124,6 +117,8 @@
 }
 
 .chip.active { background: rgba(201, 168, 76, 0.12); border-color: var(--gold); color: var(--gold-light); }
+/* «На полке»: значок полки — по высоте строки чипа, как стрелка у «Обновлений» */
+.chip-shelf svg { width: 15px; height: 15px; vertical-align: -3px; }
 .chip:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 
 @media (hover: hover) {
@@ -163,6 +158,10 @@
 
 /* Тост с кнопкой («Отменить»): текст слева, кнопка справа; спрятанный тост кнопкой не мешает */
 .toast.has-action { display: flex; align-items: center; gap: 18px; padding: 10px 12px 10px 22px; text-align: left; }
+/* Длинный текст («не хватает места…») сжимался в столбик: у left: 50% ширина по содержимому — не больше половины
+   экрана. Берём ширину текста (до 90% экрана), а на узком кнопка уходит под текст */
+.toast.has-action { width: max-content; flex-wrap: wrap; row-gap: 8px; }
+.toast.has-action > span { flex: 1 1 220px; }
 .toast:not(.show) { pointer-events: none; }
 .toast-action { flex-shrink: 0; }
 .toast-action:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }

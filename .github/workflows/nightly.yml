@@ -1,0 +1,55 @@
+name: Nightly flake hunt
+
+# Редкий сбой тестов (доли процента) один прогон на пуше не ловит. Каждую ночь тесты API идут четыре раза
+# параллельно на свежем main; упавший прогон виден в Actions раньше, чем он покраснит чей-то пуш.
+# Это идёт на GitHub, а не у владельца дома: домашняя машина бывает выключена, когда в игры не играют
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+jobs:
+  api:
+    name: API tests, run ${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        run: [1, 2, 3, 4]
+
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+        cache: npm
+        cache-dependency-path: api/package-lock.json
+
+    - name: Установка пакетов
+      working-directory: ./api
+      env:
+        ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      run: npm ci
+
+    - name: Установка ffmpeg
+      run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+    # Без повтора: здесь как раз нужно увидеть каждый сбой
+    - name: Тесты API
+      working-directory: ./api
+      env:
+        REDIS_URL: redis://localhost:6379
+      run: npm test

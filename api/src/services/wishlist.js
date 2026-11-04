@@ -1,10 +1,11 @@
-// Список «Хочу поиграть»: игры из окна новинок (itch.io), отложенные на потом.
+// Список «Хочу поиграть»: игры из вкладки «Найти» (itch.io), отложенные на потом.
 //
-// Игру откладывают со всем, что о ней показывало окно новинок (обложка, цена, платформы,
+// Игру откладывают со всем, что о ней показывала вкладка «Найти» (обложка, цена, платформы,
 // описание), и список рисуется без походов на сайт. Игра, которая уже есть в библиотеке
 // (её itch.io-ссылка стоит у игры), помечается: из списка её можно убрать.
 
-const { getIo } = require('../utils/cache.js');
+const { getIo, emitToPerson } = require('../utils/cache.js');
+const { other } = require('./personal.js');
 const { itchGameUrl } = require('../utils/itch.js');
 
 // Картинки — только с сайта источника: адрес уходит в <img> как есть
@@ -65,8 +66,12 @@ class WishlistService {
     }
 
     // Список с отметкой «уже в библиотеке»: скачал игру — видно, что из списка её можно убрать
-    async list() {
-        const rows = await this.db().all('SELECT * FROM wishlist ORDER BY addedAt DESC');
+    // У людей, не владельца, список свой (user_wishlist)
+    async list(person) {
+        const user = other(person);
+        const rows = user
+            ? await this.db().all('SELECT * FROM user_wishlist WHERE user_id = ? ORDER BY addedAt DESC', [user.id])
+            : await this.db().all('SELECT * FROM wishlist ORDER BY addedAt DESC');
         const library = await this.sources.itch.libraryGames();
         const items = rows.map((row) => {
             const item = this.view(row);
@@ -76,10 +81,25 @@ class WishlistService {
         return { items };
     }
 
-    async add(body) {
+    async add(body, person) {
         const entry = normalize(body);
-        if (!entry) throw Object.assign(new Error('Это не игра из новинок'), { bad: true });
+        if (!entry) throw Object.assign(new Error('Это не игра с сайта'), { bad: true });
         const db = this.db();
+        const user = other(person);
+        if (user) {
+            const exists = await db.get('SELECT key FROM user_wishlist WHERE user_id = ? AND key = ?', [user.id, entry.key]);
+            if (!exists && (await db.get('SELECT COUNT(*) AS n FROM user_wishlist WHERE user_id = ?', [user.id])).n >= MAX_ITEMS) {
+                throw Object.assign(new Error(`В списке уже ${MAX_ITEMS} игр`), { bad: true });
+            }
+            const now = Date.now();
+            await db.run(
+                `INSERT INTO user_wishlist (user_id, key, source, ref, url, info, addedAt, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(user_id, key) DO UPDATE SET url = excluded.url, info = excluded.info, at = excluded.at`,
+                [user.id, entry.key, entry.source, entry.ref, entry.url, JSON.stringify(entry.info), now, now]
+            );
+            this.changed(user);
+            return this.view(await db.get('SELECT * FROM user_wishlist WHERE user_id = ? AND key = ?', [user.id, entry.key]));
+        }
         const exists = await db.get('SELECT key FROM wishlist WHERE key = ?', [entry.key]);
         if (!exists && (await db.get('SELECT COUNT(*) AS n FROM wishlist')).n >= MAX_ITEMS) {
             throw Object.assign(new Error(`В списке уже ${MAX_ITEMS} игр`), { bad: true });
@@ -93,15 +113,20 @@ class WishlistService {
         return this.view(await db.get('SELECT * FROM wishlist WHERE key = ?', [entry.key]));
     }
 
-    async remove(key) {
-        const res = await this.db().run('DELETE FROM wishlist WHERE key = ?', [String(key || '')]);
-        if (res.changes) this.changed();
+    async remove(key, person) {
+        const user = other(person);
+        const res = user
+            ? await this.db().run('DELETE FROM user_wishlist WHERE user_id = ? AND key = ?', [user.id, String(key || '')])
+            : await this.db().run('DELETE FROM wishlist WHERE key = ?', [String(key || '')]);
+        if (res.changes) this.changed(user);
         return res.changes > 0;
     }
 
     // Другое устройство тоже держит список открытым — пусть перечитает
-    changed() {
-        getIo()?.emit('wishlist-changed');
+    // Список человека — его устройствам; владельца — через getIo(), который и так слышит только владелец
+    changed(user = null) {
+        if (user) emitToPerson(user.id, 'wishlist-changed');
+        else getIo()?.emit('wishlist-changed');
     }
 }
 

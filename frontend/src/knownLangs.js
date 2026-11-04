@@ -13,7 +13,10 @@ export async function loadKnownLangs() {
   try {
     const res = await fetch('/api/settings/known-langs');
     if (!res.ok) return;
-    langs = (await res.json()).langs || [];
+    const next = (await res.json()).langs || [];
+    // Тот же список — тот же массив: иначе useKnownLangs будит всех подписчиков (и окно игры) зря
+    if (JSON.stringify(next) === JSON.stringify(langs)) return;
+    langs = next;
     emit();
   } catch { /* нет связи — перевод предлагается как раньше */ }
 }

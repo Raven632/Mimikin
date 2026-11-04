@@ -58,6 +58,26 @@ let io = null;
 function setIo(instance) { io = instance; }
 function getIo() { return io; }
 
+// Службы шлют события через io.emit, а слышать их должен только владелец: «идёт проверка», «найдены данные», новости
+// списка — про его библиотеку. Обёртка шлёт emit в комнату owner (server.js, io.on('connection')), всё остальное отдаёт
+// сокет-серверу как есть. everyone — сам сервер: им пользуются «список игр изменился» и события для одного человека
+function ownerOnly(server) {
+    return new Proxy(server, {
+        get(target, prop) {
+            if (prop === 'emit') return (...args) => target.to('owner').emit(...args);
+            if (prop === 'everyone') return target;
+            const value = Reflect.get(target, prop);
+            return typeof value === 'function' ? value.bind(target) : value;
+        },
+    });
+}
+// Всем сразу (в тестах io — просто { emit })
+const everyone = () => io?.everyone || io;
+// Одному человеку, на всех его устройствах. Без настоящего сервера (тесты с { emit }) — никому
+function emitToPerson(userId, event, ...args) {
+    everyone()?.to?.(`user:${userId}`).emit(event, ...args);
+}
+
 // Список игр закэширован на 5 минут. Любое изменение библиотеки обязано сбросить кэш,
 // иначе изменение увидят с задержкой до 5 минут.
 async function invalidateGamesList() {
@@ -67,9 +87,7 @@ async function invalidateGamesList() {
         console.error('❌ [Redis] Не удалось сбросить кэш списка:', e.message);
     }
     // Рассылаем событие о том, что список игр изменился
-    if (io) {
-        io.emit('library-changed');
-    }
+    everyone()?.emit('library-changed');
 }
 
-module.exports = { memoryRedis, redisClient, invalidateGamesList, GAMES_LIST_KEY, setIo, getIo };
+module.exports = { memoryRedis, redisClient, invalidateGamesList, GAMES_LIST_KEY, setIo, getIo, ownerOnly, emitToPerson };

@@ -42,7 +42,7 @@ let games = await (await api.request.get(`${BASE_URL}/api/games`)).json();
 const GAME_URL = process.env.GAME_URL ?? 'http://rpg-library:3001';
 for (const game of games) {
     const play = await (await api.request.post(`${BASE_URL}/api/play/${encodeURIComponent(game.id)}`)).json().catch(() => ({}));
-    game.launch = play.mode === 'frame' ? `${GAME_URL}${play.path}` : `${BASE_URL}${play.path || game.url}`;
+    game.launch = play.mode === 'frame' ? `${GAME_URL}${play.path}?s=${play.session}` : `${BASE_URL}${play.path || game.url}`;
 }
 await api.close();
 if (ONLY) games = games.filter(g => new RegExp(ONLY, 'i').test(g.id));

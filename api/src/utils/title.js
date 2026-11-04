@@ -106,13 +106,17 @@ function shownTitle(row) {
         : presentTitle(row.title || row.id, { folder: row.id });
 }
 
+// «…Starfallver1.00» — «ver» прилип к слову, разделителя перед ним нет. Только в самом конце и только номер с точкой:
+// иначе «Silver», «Forever2» читались бы как версия. Хвост _a1b2c3 — у папки игры, загруженной человеком (services/uploads.js)
+const GLUED_VER = /\p{L}ver\.?(\d+(?:\.\d+)+[a-z]?)(?:_[0-9a-f]{6})?$/iu;
+
 // Версия для плашки: из названия, а если там нет — из имени папки. «v1» из названия
 // уступает «1.03» из папки: номер с точкой почти всегда точнее
 function extractVersion(title, folder) {
     // После «|» у переводов идёт своя версия («Версия перевода: 1.0») — это не версия игры
     const found = [String(title || '').split('|')[0], folder].map((s) => {
         const m = String(s || '').replace(/_/g, ' ').match(VERSION_AT);
-        return m ? (m[1] || m[2]) : '';
+        return m ? (m[1] || m[2]) : (String(s || '').match(GLUED_VER) || [])[1] || '';
     }).filter(Boolean);
     return found.find((v) => v.includes('.')) || found[0] || '';
 }

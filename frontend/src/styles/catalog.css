@@ -1,6 +1,6 @@
-/* Новинки игр: источники, фильтры, карточки, подробный просмотр, «Хочу поиграть» (Catalog) */
+/* «Найти»: режимы, фильтры, карточки, подробный просмотр, «Хочу поиграть» (Catalog) */
 
-/* Окно новинок: шире статистики, сетка карточек */
+/* Вкладка «Найти»: шире статистики, сетка карточек */
 .stats-content.catalog-content { width: min(1400px, calc(96 * var(--vw))); }
 
 .catalog-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; position: relative; z-index: 5; }
@@ -10,8 +10,12 @@
 
 .catalog-filters .picker { min-width: 150px; flex: 0 1 auto; }
 
-/* Списки фильтров на широком экране стоят в ряду как есть; на телефоне — под кнопкой (ниже) */
-.catalog-filter-list { display: contents; }
+/* Списки фильтров — под кнопкой «Фильтры» на любой ширине: закрыто — их нет, открыто — отдельным рядом под поиском.
+   Кнопка в «Найти» нужна всегда, а общее правило прячет её на широкой главной (toolbar.css) */
+.catalog-filters .filters-toggle { display: inline-flex; }
+.catalog-filter-list { display: none; }
+.catalog-filter-list.open { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex: 1 1 100%; }
+.catalog-filter-list .catalog-check { padding: 0 6px; }
 
 .catalog-chosen { margin-bottom: 14px; }
 
@@ -105,7 +109,7 @@
 
 .catalog-more { margin: 22px auto 0; }
 
-/* Подробный просмотр игры из новинок */
+/* Подробный просмотр игры с сайта */
 /* Тихая кнопка (controls.css) — текст вровень с краем окна */
 .catalog-back { margin-bottom: 14px; margin-left: -8px; }
 
@@ -160,7 +164,7 @@
 
 .catalog-detail-actions a.meta-status-btn { text-decoration: none; }
 
-/* Скрытие обложек касается и новинок */
+/* Скрытие обложек касается и игр с сайтов */
 .covers-hidden .catalog-cover img, .covers-hidden .catalog-detail-main, .covers-hidden .catalog-detail-fill {
   filter: blur(18px) brightness(0.55) saturate(0.7);
   transform: scale(1.1);
@@ -168,7 +172,7 @@
 
 .covers-hidden .catalog-thumb img { filter: blur(8px) brightness(0.55) saturate(0.7); }
 
-/* Заголовок новинок длинный — на телефоне не заходит под крестик закрытия */
+/* Заголовок вкладки длинный — на телефоне не заходит под крестик закрытия */
 .catalog-content .stats-title { padding-right: 36px; }
 
 .catalog-status.free { color: #7fc7a5; }
@@ -207,6 +211,13 @@
 
 .catalog-wish:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
 
+/* С мышью незаложенная звезда — под курсором и при фокусе с клавиатуры: шесть на ряд отвлекали от обложек. Заложенная видна всегда: это состояние */
+@media (hover: hover) and (pointer: fine) {
+  .catalog-wish { transition: color 0.2s, border-color 0.2s, transform 0.2s, opacity 0.15s; }
+  .catalog-wish:not(.on):not(:focus-visible) { opacity: 0; }
+  .catalog-card-box:hover .catalog-wish, .catalog-row-box:hover .catalog-wish { opacity: 1; }
+}
+
 @media (hover: hover) {
   .catalog-wish:hover { color: var(--gold-light); border-color: var(--gold); }
 }
@@ -224,7 +235,7 @@
   background: #7fc7a5;
 }
 
-/* «Новинки»: поиск, списки и «Фильтры» — тоже одной высоты (было 43–47 и 52) */
+/* «Найти»: поиск, списки и «Фильтры» — тоже одной высоты (было 43–47 и 52) */
 .catalog-filters .search-box input, .catalog-filters .picker-btn, .catalog-filters .filters-toggle {
   height: 42px;
   min-height: 42px;
@@ -237,7 +248,7 @@
   .catalog-back:hover { color: var(--gold-light); }
 }
 
-/* Название игры в подробном просмотре новинок — как в окне игры: читаемым шрифтом, без капса */
+/* Название игры в подробном просмотре «Найти» — как в окне игры: читаемым шрифтом, без капса */
 .stats-title.catalog-detail-title {
   font-family: var(--font-ui);
   font-weight: 700;
@@ -256,8 +267,7 @@
   /* Поиск и «Фильтры» — в одну строку, списки раскрываются под ними; у itch.io поиска нет —
      кнопка на всю строку */
   .catalog-filters .search-box { flex: 1 1 0; }
-  .catalog-filter-list { display: none; }
-  .catalog-filter-list.open { display: flex; flex-wrap: wrap; gap: 8px; flex: 1 1 100%; }
+  .catalog-filter-list.open { gap: 8px; }
   .catalog-filters > .filters-toggle:first-child { flex: 1 1 100%; justify-content: center; }
   .catalog-status,
 .catalog-owned{ font-size: 11px; }
@@ -265,7 +275,8 @@
 
 /* ---------- Шапка: название, источники вкладками, вид и «?» — одной строкой ---------- */
 .catalog-head { display: flex; align-items: flex-end; gap: 12px 28px; padding-right: 44px; margin-bottom: 16px; border-bottom: 1px solid rgba(201, 168, 76, 0.14); }
-.catalog-head .stats-title { margin: 0 0 12px; padding-right: 0; }
+/* Вкладка шапки уже называется «Найти»: заголовок только для читалок */
+.catalog-head .stats-title { position: absolute; width: 1px; height: 1px; margin: 0; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .filter-chips.catalog-sources { flex: 1; min-width: 0; margin: 0; gap: 22px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 .filter-chips.catalog-sources::-webkit-scrollbar { display: none; }
 .filter-chips.catalog-sources .chip {
@@ -273,7 +284,7 @@
   background: none; color: var(--text-dim); font-size: var(--fs-sm); letter-spacing: 0; white-space: nowrap;
 }
 .filter-chips.catalog-sources .chip.active { color: var(--gold-light); border-bottom-color: var(--gold); background: none; }
-.filter-chips.catalog-sources .chip.catalog-wish-tab { margin-left: auto; color: var(--gold-muted); }
+.filter-chips.catalog-sources .chip.catalog-wish-tab { color: var(--gold-muted); }
 .filter-chips.catalog-sources .chip.catalog-wish-tab.active { color: var(--gold-light); }
 @media (hover: hover) {
   .filter-chips.catalog-sources .chip:not(.active):hover { color: var(--gold); background: none; }
@@ -346,7 +357,6 @@
 @media (max-width: 900px) {
   .filter-chips.catalog-sources { flex-wrap: wrap; overflow-x: visible; row-gap: 2px; }
   .filter-chips.catalog-sources .chip { padding-top: 12px; }
-  .filter-chips.catalog-sources .chip.catalog-wish-tab { margin-left: 0; }
   .catalog-view button { width: 40px; height: 38px; }
   .catalog-detail-grid { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: "head" "media" "side" "text"; gap: 14px; }
   .catalog-detail-side { padding-top: 0; }
@@ -355,8 +365,7 @@
 @media (max-width: 700px) {
   /* Крестик закрытия — в правом верхнем углу окна: вид и «?» встают левее него */
   .catalog-head { flex-wrap: wrap; padding-right: 0; }
-  .catalog-head .stats-title { flex: 1 1 auto; }
-  .catalog-tools { order: 1; padding-bottom: 12px; margin-right: 44px; }
+  .catalog-tools { order: 1; padding-bottom: 12px; margin-right: 44px; margin-left: auto; }
   .filter-chips.catalog-sources { order: 2; flex: 1 1 100%; gap: 2px 18px; }
 }
 
@@ -425,7 +434,7 @@
 .jd-bar.import i{ animation: none; transition: none; }
 }
 
-/* «Новинки» страницей (вкладка в шапке): по ширине страницы, без рамки окна и места под крестик */
+/* «Найти» страницей (вкладка в шапке): по ширине страницы, без рамки окна и места под крестик */
 .catalog-page { max-width: var(--content-width); margin: 0 auto; padding: 10px 20px 64px; box-sizing: border-box; }
 .catalog-page .catalog-head { padding-right: 0; }
 @media (max-width: 700px) {
@@ -444,8 +453,6 @@
 
 .jd-target { margin: 10px 0 0; font-size: var(--fs-xs); color: var(--gold-muted); }
 
-/* Окно автора (AuthorView): имя автора ссылкой — в строке карточки, в «Ещё от …» и в окне игры */
-
 /* Окно «Загрузить в Mimikin?» от закладки: сведения слева, поля — во всю ширину */
 .jd-panel { text-align: left; }
 .jd-panel .confirm-title { text-align: center; }
@@ -456,3 +463,21 @@
 .jd-panel .confirm-text { text-align: left; font-size: var(--fs-sm); }
 .jd-panel .auth-error:empty { display: none; }
 .meta-status-btn.catalog-primary.jd-bookmark { width: auto; flex: none; padding-inline: 20px; cursor: grab; text-decoration: none; }
+
+/* Первая строка над выдачей: подпись, когда сервер без интернета */
+.find-line { margin: 0 0 22px; font-size: var(--fs-sm); color: var(--text-dim); }
+.find-offline-line { margin-bottom: 14px; }
+
+/* Выбор одной своей игры по обложкам (PickGame): кнопки рядом с поиском, обложки ниже */
+.req-pick { margin-top: 8px; display: flex; flex-direction: column; gap: 12px; }
+.req-pick .catalog-primary { width: auto; }
+.req-pick-game { width: 100%; padding: 0; background: none; border: 0; color: inherit; font: inherit; text-align: left; }
+
+@media (max-width: 700px) {
+  /* Название всегда одной высоты со значками вида: режимы не прыгают между вкладками, от шапки сайта есть воздух */
+  .catalog-head { row-gap: 0; }
+  /* Вкладки одной лентой: на самых узких экранах листается, а не уходит на вторую строку */
+  .filter-chips.catalog-sources { flex-wrap: nowrap; overflow-x: auto; gap: 2px 12px; }
+  .filter-chips.catalog-sources .chip { flex-shrink: 0; white-space: nowrap; }
+  .filter-chips.catalog-sources .chip.catalog-wish-tab .glyph { display: none; }
+}

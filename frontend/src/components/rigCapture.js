@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { writeSpineCover } from '../galleryView';
+import { isOwner } from '../me';
 
 // Обложки плиток наборов Spine и моделей Live2D. Сервер их не рисует, поэтому кадр снимает браузер: при первом просмотре
 // альбома (SpineView, Live2DView) или фоном, не дожидаясь просмотра (captureRig, useRigCovers). Снятое кладётся в браузер
@@ -31,6 +32,8 @@ export function snapshot(app) {
 // Обложку — в браузер и на сервер (первая присланная там остаётся: PUT повторно ничего не меняет, кроме почти пустой — её заменяет полная). Ошибка сети не страшна
 export function saveRigCover(gameId, key, dataUrl) {
   writeSpineCover(gameId, key, dataUrl);
+  // На сервер обложку кладёт только владелец: человеку PUT отвечает отказом, и в журнале копился бы шум
+  if (!isOwner()) return;
   try {
     const bin = atob(dataUrl.slice(dataUrl.indexOf(',') + 1));
     const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));

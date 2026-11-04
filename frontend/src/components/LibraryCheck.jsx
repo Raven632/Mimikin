@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { serverWords } from '../apiError';
 import { timeAgo } from '../formatAgo';
 import { formatDuration, checkEstimate } from '../checkSummary';
 import { IconCheck, IconClose } from './icons';
@@ -84,7 +85,7 @@ const LibraryCheck = ({ check, onStart, onCancel, games = [], t, lang, onOpenGam
       return out;
     }
     if (status === 'error' || status === 'stopped') {
-      return step.error ? [<div key="err" className="check-step-note bad">{t.check_error(step.error)}</div>] : [];
+      return step.error ? [<div key="err" className="check-step-note bad">{t.check_error(serverWords(t, step.error))}</div>] : [];
     }
     const out = r ? [<div key="result" className="check-step-note">{t.check_result[step.key](r)}</div>] : [];
     if (status === 'partial') out.push(<div key="partial" className="check-step-note warn">{t.check_partial[step.key]}</div>);

@@ -8,7 +8,7 @@ import { pageZoom } from '../pageZoom';
 import { flightFrom } from '../windowFly';
 import MetaLine from './MetaLine';
 import { useShelfHead } from '../shelfHead';
-import { IconChevronLeft, IconChevronRight, IconDice, IconHistory, IconNotStarted, IconChest, IconPlay } from './icons';
+import { IconLists, IconChevronLeft, IconChevronRight, IconDice, IconNotStarted, IconChest, IconPlay } from './icons';
 
 // Откуда лететь окну и «Играть»: обложка этой плитки (windowFly.js)
 const coverFrom = (card) => flightFrom(card.querySelector('.shelf-cover img'));
@@ -16,12 +16,13 @@ const coverFrom = (card) => flightFrom(card.querySelector('.shelf-cover img'));
 // На полке — шесть: на компьютере они встают в ряд целиком, без обрезанной седьмой у края;
 // остальное — по «Все» в библиотеке
 const PER_SHELF = 6;
-// «Добавленные» — сразу за «Недавно играли»: в новой библиотеке, где ещё ни во что не играли, первой
-// открывается она — только что загруженные игры, а не все подряд «не начатые» (issue #17)
-const TABS = ['played', 'added', 'unplayed'];
-const TAB_ICONS = { played: IconHistory, unplayed: IconNotStarted, added: IconChest };
+// «Не начаты» первыми: сыгранное — рядом, в сцене и списке над полкой. Но в новой библиотеке, где ещё ни во что не
+// играли, первой открывается «Добавленные» — только что загруженные игры, а не все подряд «не начатые» (issue #17)
+const TABS = ['unplayed', 'added'];
+const TABS_NEW = ['added', 'unplayed'];
+const TAB_ICONS = { unplayed: IconNotStarted, added: IconChest };
 
-// Какая подборка «Ваших игр» была открыта — с неё и в следующий раз
+// Какая подборка «Что дальше» была открыта — с неё и в следующий раз
 const savedTab = () => {
   try {
     return localStorage.getItem('rpg_shelf') || '';
@@ -31,12 +32,11 @@ const savedTab = () => {
 };
 
 // Полка — лента карточек с прокруткой вбок. На компьютере листают стрелками (они есть, только когда
-// лента не помещается), на телефоне пальцем. Над лентой — переключатель подборок, как у «Новинок»: у каждой
+// лента не помещается), на телефоне пальцем. Над лентой — переключатель подборок, как у «Найти»: у каждой
 // свой значок; на телефоне у невыбранных — только значок и число, чтобы все встали в ряд.
 // Карточка открывает окно игры, «Играть» при наведении — запускает сразу. «Все» — та же подборка
-// целиком, в библиотеке. extra — кнопка в шапке рядом со «Все»; sub — та же кнопка строкой под
-// переключателем, для телефона
-const Shelf = ({ title, tabs, active, onTab, hint, items, note, t, onOpen, onPlay, onShowAll, extra, sub, landed }) => {
+// целиком, в библиотеке. extra — кнопка в шапке рядом со «Все»
+const Shelf = ({ title, tabs, active, onTab, items, note, t, onOpen, onPlay, onShowAll, extra, landed }) => {
   const rowRef = useRef(null);
   const [overflow, setOverflow] = useState(false);
   useEffect(() => {
@@ -58,7 +58,7 @@ const Shelf = ({ title, tabs, active, onTab, hint, items, note, t, onOpen, onPla
           <h2 className="shelf-title">{title}</h2>
           <div className="shelf-tabs" role="group" aria-label={title} ref={chipsRef}>
             {tabs.map(({ key, label, count }) => {
-              const TabIcon = TAB_ICONS[key];
+              const TabIcon = TAB_ICONS[key] || IconLists;   // свои подборки — один значок на все
               return (
                 <button key={key} type="button"
                   className={`chip shelf-tab${key === active ? ' active' : ''}`}
@@ -82,8 +82,6 @@ const Shelf = ({ title, tabs, active, onTab, hint, items, note, t, onOpen, onPla
           <button type="button" className="shelf-all" onClick={onShowAll}>{t.shelf_see_all}</button>
         </div>
       </div>
-      {sub && <div className="shelf-sub">{sub}</div>}
-      {hint && <p className="hot-hint">{hint}</p>}
       <div className="shelf-row" ref={rowRef}>
         {items.map((game) => {
           const cover = getCoverUrl(game);
@@ -109,11 +107,11 @@ const Shelf = ({ title, tabs, active, onTab, hint, items, note, t, onOpen, onPla
   );
 };
 
-// «Ваши игры» на главной — одна полка с переключателем: недавно играли, не начатые,
-// недавно добавленные. Было четыре полки друг под другом — пять рядов обложек вместе с «Новинками»,
-// и глаза разбегались. Подборка без игр не показывается; выбранная запоминается. Последняя игра —
-// в «Продолжить» над полкой, в «Недавно играли» её нет
-const Shelves = ({ games: allGames, t, lang, skipId, onOpen, onPlay, onShowAll, onRandom }) => {
+// «Что дальше» на главной — одна полка с переключателем: не начатые, недавно добавленные, свои
+// подборки. Было четыре полки друг под другом — пять рядов обложек, и глаза разбегались.
+// Подборка без игр не показывается; выбранная запоминается. Сыгранное — над полкой: сцена и «Недавно играли»
+// (App.jsx). Запомненная когда-то вкладка 'played' теперь просто не находится — откроется первая
+const Shelves = ({ games: allGames, t, lang, onOpen, onPlay, onShowAll, onRandom }) => {
   const [chosen, setChosen] = useState(savedTab);
   const rootRef = useRef(null);
   // Игра из загрузки с плашкой встаёт на полку после финала плашки (landing.js): пока загрузка идёт, новые игры
@@ -172,11 +170,6 @@ const Shelves = ({ games: allGames, t, lang, skipId, onOpen, onPlay, onShowAll, 
   const unplayedAll = games.filter((g) => effectiveStatus(g) === 'new');
   const unplayed = [...unplayedAll].sort((a, b) => (b.addedAt || 0) - (a.addedAt || 0)).slice(0, PER_SHELF);
   const lists = {
-    played: {
-      label: t.tab_played,
-      items: games.filter((g) => g.lastPlayed && g.id !== skipId).sort((a, b) => b.lastPlayed - a.lastPlayed).slice(0, PER_SHELF),
-      note: (g) => formatPlaytime(g.playtime, t) || timeAgo(g.lastPlayed, lang),
-    },
     unplayed: {
       label: t.tab_unplayed, count: unplayedAll.length, items: unplayed,
       note: (g) => timeAgo(g.addedAt, lang),
@@ -187,28 +180,31 @@ const Shelves = ({ games: allGames, t, lang, skipId, onOpen, onPlay, onShowAll, 
       note: (g) => timeAgo(g.addedAt, lang),
     },
   };
-  const tabs = TABS.filter((key) => lists[key].items.length).map((key) => ({ key, label: lists[key].label, count: lists[key].count }));
+  // Свои подборки — такие же вкладки, после готовых
+  const recent = (a, b) => (b.lastPlayed || 0) - (a.lastPlayed || 0) || (b.addedAt || 0) - (a.addedAt || 0);
+  const own = [...new Set(games.flatMap((g) => g.lists || []))].sort((a, b) => a.localeCompare(b));
+  for (const name of own) {
+    const all = games.filter((g) => g.lists?.includes(name));
+    lists[`list:${name}`] = { label: name, count: all.length, items: [...all].sort(recent).slice(0, PER_SHELF), note: (g) => formatPlaytime(g.playtime, t) || timeAgo(g.addedAt, lang) };
+  }
+  const tabs = [...(games.some((g) => g.lastPlayed) ? TABS : TABS_NEW), ...own.map((x) => `list:${x}`)].filter((key) => lists[key].items.length).map((key) => ({ key, label: lists[key].label, count: lists[key].count }));
   if (!tabs.length) return null;
   const active = tabs.some((tab) => tab.key === chosen) ? chosen : tabs[0].key;
   const choose = (key) => {
     setChosen(key);
     try { localStorage.setItem('rpg_shelf', key); } catch { /* приватный режим — просто не запомним */ }
   };
-  const { items, note, hint } = lists[active];
-  // «Во что поиграть?» — у не начатых: из них кубик и выбирает
-  const random = active === 'unplayed' && onRandom;
+  const { items, note } = lists[active];
+  // «Во что поиграть?» — на любой вкладке: вопрос не зависит от того, какая подборка открыта. Сам выбор — из игр на диске.
+  // Кнопка — когда не начатых много и выбрать трудно (порог как в «Найти»); пункт меню есть, пока есть из чего выбирать
+  const random = unplayedAll.length >= 10 && onRandom;
   return (
     <div className="shelves" ref={rootRef}>
-      <Shelf title={t.shelf_yours} tabs={tabs} active={active} onTab={choose} hint={hint} items={items} note={note} landed={landing?.ids}
+      <Shelf title={t.shelf_next_up} tabs={tabs} active={active} onTab={choose} items={items} note={note} landed={landing?.ids}
         t={t} onOpen={onOpen} onPlay={onPlay} onShowAll={() => onShowAll(active)}
         extra={random && (
-          <button type="button" className="shelf-all shelf-random" onClick={onRandom} data-tip={t.menu_pick_hint}>
-            <IconDice />{t.shelf_random}
-          </button>
-        )}
-        sub={random && (
-          <button type="button" className="shelf-all shelf-random-line" onClick={onRandom}>
-            <IconDice />{t.shelf_random}
+          <button type="button" className="shelf-all shelf-random" onClick={onRandom} aria-label={t.shelf_random} data-tip={t.menu_pick_hint}>
+            <IconDice /><span className="shelf-random-text">{t.shelf_random}</span>
           </button>
         )} />
     </div>

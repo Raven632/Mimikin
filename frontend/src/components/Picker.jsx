@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { fitRows } from '../fitRows';
 
 // Выпадающий список в стиле библиотеки — для жанров, языков и сортировки.
 // Системный <select> у жанров раскрывался на весь экран (около сотни строк без
@@ -48,6 +49,10 @@ const Picker = ({
   useEffect(() => {
     if (open && !searchable) listRef.current?.focus();
   }, [open, searchable]);
+
+  useLayoutEffect(() => {
+    if (open) fitRows(listRef.current);
+  }, [open, shown]);
 
   // Строка под стрелками всегда в видимой части списка
   useEffect(() => {

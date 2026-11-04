@@ -16,11 +16,11 @@ test.describe('настройки на телефоне', () => {
     expect(win.width).toBe(view.width);
     expect(win.height).toBe(view.height);
     const tabs = page.locator('.settings-tab');
-    await expect(tabs.locator('.settings-tab-name')).toHaveText(['Общие', 'Аккаунт', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'Копии', 'Корзина', 'О программе']);
+    await expect(tabs.locator('.settings-tab-name')).toHaveText(['Общие', 'Мой профиль', 'Пользователи', 'Копии', 'Корзина', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'О программе']);
     await expect(tabs.nth(0).locator('.settings-tab-state')).toHaveText('Язык русский');
-    await expect(tabs.nth(8).locator('.settings-tab-state')).toHaveText('Вышла версия 7.1');
-    await expect(tabs.nth(8).locator('.settings-tab-new')).toBeVisible();
-    // Две колонки: первый и второй раздел — в одном ряду, третий — ниже
+    await expect(tabs.nth(9).locator('.settings-tab-state')).toHaveText('Вышла версия 7.1');
+    await expect(tabs.nth(9).locator('.settings-tab-new')).toBeVisible();
+    // Две колонки: первый и второй раздел — в одном ряду, третий — ниже, в следующей группе
     const [a, b, c] = await Promise.all([0, 1, 2].map((i) => tabs.nth(i).boundingBox()));
     expect(Math.abs(a.y - b.y)).toBeLessThan(2);
     expect(b.x).toBeGreaterThan(a.x + 100);
@@ -29,7 +29,7 @@ test.describe('настройки на телефоне', () => {
     await expect(tabs.nth(0)).toHaveClass(/active/);
     expect(await tabs.nth(0).evaluate((el) => getComputedStyle(el).borderLeftColor)).toBe('rgb(201, 168, 76)');
     // Раздел — под оглавлением, без «назад»
-    await tabs.nth(2).click();
+    await tabs.filter({ hasText: 'Источники' }).click();
     const nav = await page.locator('.settings-tabs').boundingBox();
     const panel = await page.locator('.settings-panel').boundingBox();
     expect(panel.y).toBeGreaterThanOrEqual(nav.y + nav.height);
@@ -60,6 +60,11 @@ test.describe('настройки на телефоне', () => {
   });
 
   test('закладка «В Mimikin» на сенсорном экране не показывается — остаётся подсказка про Telegram-бот', async ({ page }) => {
+    await page.route(/\/api\/settings$/, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: { ...(await res.json()), myjd: { set: true } } });
+    });
     await openLibrary(page);
     await openSettings(page);
     await page.locator('.settings-tab', { hasText: 'Загрузки' }).tap();
@@ -92,6 +97,11 @@ test.describe('настройки на телефоне', () => {
   });
 
   test('«Загрузки»: группа JDownloader, строка Telegram-бота без закладки', async ({ page }) => {
+    await page.route(/\/api\/settings$/, async (route) => {
+      if (route.request().method() !== 'GET') return route.continue();
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: { ...(await res.json()), myjd: { set: true } } });
+    });
     await openLibrary(page);
     await openSettings(page);
     await page.locator('.settings-tab', { hasText: 'Загрузки' }).tap();

@@ -1,4 +1,4 @@
-import { test, expect, openLibrary } from '../fixtures.js';
+import { test, expect, openHome, openLibrary } from '../fixtures.js';
 
 // Очередь загрузок: сервер подменён — распаковка «идёт», пока тест её не отпустит
 test('очередь загрузок: архивы по одному, по порядку; лишний убрать из очереди; не архив — отказ', async ({ page }) => {
@@ -226,4 +226,95 @@ test('ошибка JDownloader — одна короткая строка, бе�
   await page.locator('.tb .tb-row').click();
   const state = page.locator('.tb.open .tb-jd-state');
   await expect(state).toHaveText('По ссылке нет файлов — выберите файл в JDownloader');
+});
+
+// Место на сервере проверяется до загрузки: архив и распакованная игра. Сервер подменён
+const GB = 1024 ** 3;
+const spaceRoutes = async (page, refuse) => {
+  const starts = [];
+  await page.route(/\/api\/games\/upload\/start$/, (route) => {
+    const body = route.request().postDataJSON();
+    starts.push(body);
+    const answer = refuse(body, starts.length);
+    if (answer) return route.fulfill({ status: 507, json: { error: 'Не хватает места на диске: нужно около 9,4 ГБ, свободно 7,1 ГБ', reason: 'space', ...answer } });
+    return route.fulfill({ json: { id: body.name, state: 'processing', received: body.size, size: body.size } });
+  });
+  await page.route(/\/api\/games\/upload\/status\?/, (route) => {
+    const id = new URL(route.request().url()).searchParams.get('id');
+    return route.fulfill({ json: { id, state: 'done', folder: id, received: 1, size: 1 } });
+  });
+  await page.route(/\/api\/games\/upload\/(list|trace)/, (route) => route.fulfill({ json: [] }));
+  return starts;
+};
+const archive = (name) => ({ name, mimeType: 'application/octet-stream', buffer: Buffer.from(`${name} bytes`) });
+
+test('места может не хватить: окно с «Загрузить всё равно» — и загрузка идёт с force', async ({ page }) => {
+  const starts = await spaceRoutes(page, (body) => (body.force ? null : { need: 9.4 * GB, free: 7.1 * GB, hard: false }));
+  await openLibrary(page);
+  await page.locator('.controls-zone input[type=file]').setInputFiles([archive('Big.zip')]);
+  const dialog = page.locator('.confirm-box');
+  await expect(dialog.locator('.confirm-title')).toHaveText('Места может не хватить');
+  await expect(dialog.locator('.confirm-text')).toContainText('займут около 9,4 ГБ, а свободно 7,1 ГБ');
+  await dialog.getByRole('button', { name: 'Загрузить всё равно' }).click();
+  await expect(page.locator('.tb .tb-sub')).toContainText('Игра');
+  expect(starts.map((s) => !!s.force)).toEqual([false, true]);
+});
+
+test('не влезет и архив: без вопроса, тост с «Открыть «Место»» ведёт во вкладку «Место»', async ({ page }) => {
+  const starts = await spaceRoutes(page, () => ({ need: 9.2 * GB, free: 7.1 * GB, hard: true }));
+  await openLibrary(page);
+  await page.locator('.controls-zone input[type=file]').setInputFiles([archive('Huge.zip')]);
+  const toast = page.locator('.toast.show');
+  await expect(toast).toContainText('Не хватает места даже для архива: нужно 9,2 ГБ, свободно 7,1 ГБ');
+  await expect(page.locator('.confirm-box')).toHaveCount(0);
+  await toast.getByRole('button', { name: 'Открыть «Место»' }).click();
+  await expect(page.locator('.library-tab.active')).toHaveText('Место');
+  expect(starts).toHaveLength(1);
+});
+
+test('по-английски отказ из-за места — своими словами, а не «Server error»', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('rpg_lang', 'en'));
+  await spaceRoutes(page, () => ({ need: 9.2 * GB, free: 7.1 * GB, hard: true }));
+  // Главная: загрузка живёт и там, а вкладка «Библиотека» по-английски называется иначе
+  await openHome(page);
+  await page.locator('.controls-zone input[type=file]').setInputFiles([archive('Huge.zip')]);
+  await expect(page.locator('.toast.show')).toContainText('Not enough space even for the archive');
+  await expect(page.locator('.toast.show')).not.toContainText('Server error');
+});
+
+test('JDownloader: мало места — в плашке причина, «Скачать всё равно» повторяет с force', async ({ page }) => {
+  const jobs = [{ key: 'link:7', title: 'Summer Memories', stage: 'error', error: 'space', need: 26 * GB, free: 12 * GB, hard: false, retry: true }];
+  await page.route(/\/api\/downloads$/, (route) => route.fulfill({ json: jobs }));
+  const retried = [];
+  await page.route(/\/api\/downloads\/link%3A7\/retry$/, (route) => { retried.push(route.request().postDataJSON()); return route.fulfill({ json: { started: true } }); });
+  await openLibrary(page);
+  const bar = page.locator('.tb');
+  await expect(bar.locator('.tb-sub')).toContainText('Мало места на диске');
+  await bar.locator('.tb-row').click();
+  const panel = page.locator('.tb.open');
+  await expect(panel.locator('.tb-jd-state')).toContainText('Мало места на диске');
+  await panel.getByRole('button', { name: 'Скачать всё равно' }).click();
+  await expect.poll(() => retried).toEqual([{ force: true }]);
+  await panel.getByRole('button', { name: 'Повторить' }).click();
+  await expect.poll(() => retried).toEqual([{ force: true }, {}]);
+});
+
+test('не хватило места на распаковку: архив ждёт — «Повторить» и «Открыть «Место»» в панели', async ({ page }) => {
+  let list = [{ id: 'a'.repeat(32), name: 'Wait.zip', size: 3 * GB, received: 3 * GB, state: 'space', error: 'Не хватает места для распаковки', need: 3.1 * GB, free: 2 * GB, target: '', mode: '', busy: false, queued: false, updatedAt: 1 }];
+  await page.route(/\/api\/games\/upload\/list/, (route) => route.fulfill({ json: list }));
+  const retried = [];
+  await page.route(/\/api\/games\/upload\/retry\?/, (route) => {
+    retried.push(new URL(route.request().url()).searchParams.get('id'));
+    list = [{ ...list[0], state: 'processing', need: undefined, free: undefined }];
+    return route.fulfill({ json: { id: list[0].id, state: 'processing' } });
+  });
+  await openLibrary(page);
+  const bar = page.locator('.tb');
+  await expect(bar.locator('.tb-sub')).toContainText('Не хватает места для распаковки: нужно 3,1 ГБ, свободно 2 ГБ. Архив сохранён');
+  await bar.locator('.tb-row').click();
+  const panel = page.locator('.tb.open');
+  await expect(panel.getByRole('button', { name: 'Открыть «Место»' })).toBeVisible();
+  await panel.getByRole('button', { name: 'Повторить' }).click();
+  await expect.poll(() => retried).toEqual(['a'.repeat(32)]);
+  await expect(panel.locator('.tb-nums')).toContainText('Распаковка');
 });

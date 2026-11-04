@@ -2,6 +2,60 @@
 
 All notable changes to this project are documented here.
 
+## [7.1] — 2026-11-04
+
+**Upgrading from 7.0:** nothing to do by hand. The database gets its new columns and tables on the first
+start and your games, saves and settings stay as they are. A backup first is still cheap: "⋯ → Settings →
+Backups". The first load rebuilds the gallery indexes once.
+
+### Added
+
+- **More than one person in a library.** The owner adds people in Settings, "Users": a name and a temporary
+  password; at the first sign-in the person picks their own. Everyone sees the same games, and each person has
+  their own saves, moments, path, play time, rating, status, notes, lists and saved games. Only the owner adds,
+  edits, deletes or shelves games and changes settings. People get a name and a picture, their sign-in can be
+  closed and opened again, and a person can be removed and brought back. Backups carry people and their saves but
+  not their passwords. `node scripts/reset-password.js <name>` resets one person.
+- **Library, much further.** A "View" row (details, large, list, wall, with a size), groups by status, list or
+  date added, series ("Part 2 of 3", corrected by hand if the guess is wrong), select several games and set status,
+  rating or a list at once, a letter column, sortable list columns, typing a letter to search, arrow keys between
+  cards, a quick preview of screenshots on hover.
+- **Your own lists and notes** on every game, shown as a filter and on the Home shelf.
+- **Home.** A "Recently played" shelf and a "What's next" shelf.
+- **"What to play?"** now picks among the games you own and have not started.
+- **My playing days.** The statistics page shows a year of play as a calendar. Seconds per person, game and
+  day are recorded from this version on and cannot be recovered for earlier play.
+- **Find** has two modes: itch.io, and "Saved" for games you marked. Filters sit behind one "Filters" button.
+- **Picture tags and picture feed.** Every analysed picture gets tags from one fixed list, shown in your language.
+  Filter the library by what is drawn, browse all pictures as a feed, search by a picture of your own. A
+  child-safety filter keeps unsuitable tags out.
+- **Scenes.** A line bar under the scene player, the cast of a scene, a search through the dialogue lines
+  of a game, and a "Scenes" window for the whole library.
+- **Shelf.** "Put on the shelf" frees the disk space of a game but keeps its card with play time, notes, saves and
+  moments; uploading its archive puts it back. Two copies of the same game can be merged into one.
+- **Open on a phone:** a QR code of the library's address in the "⋯" menu.
+- **Problem report and server journal.** Settings, About shows recent server warnings and a "Copy problem report"
+  button; keys, cookies, paths and game titles are removed on the server.
+- **Upload checks** for free disk space before an upload starts.
+
+### Changed
+
+- Less on screen until it is useful: status chips only for statuses you have, filters and view options folded,
+  the eye and "Add game" kept in the header, an empty note folded to "+ Note".
+- One word per job across the interface ("Saved", "Statistics", "Done", "Look for an update").
+- The game window opens the Path and Moments tabs after the first launch, and the rating on a cover is a small
+  number instead of five stars.
+- Settings tabs are grouped, and rarely used rows appear only when they apply.
+
+### Fixed
+
+- A fresh install starts without a `.env`, without Redis in `docker run`, and with a games folder it does not own
+  (a page explains a database that will not open).
+- Several flaky API and interface tests are steadier: per-test timeout, a rerun of the API job with a warning,
+  a nightly job that repeats the suite to find the rest.
+- `GET /api/avatars` and the image address refuse `_trash`, `_old`, `_inbox` and `_tmp_uploads` to anyone but
+  the owner.
+
 ## [7.0] — 2026-10-26
 
 **Upgrading from 6.0:** the interface, the data lookup and the downloads were reworked, so read this

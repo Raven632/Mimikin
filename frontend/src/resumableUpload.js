@@ -83,13 +83,16 @@ function request(method, url, { json, signal } = {}) {
       let data = null;
       try { data = JSON.parse(xhr.responseText); } catch { /* не JSON */ }
       if (xhr.status < 300 && data) finish(resolve, data);
-      else finish(reject, new UploadError('server', data?.error || '', { status: xhr.status, body: data }));
+      else finish(reject, new UploadError('server', data?.error || '', { status: xhr.status, body: data, reason: data?.reason || '', params: data?.params || null }));
     });
     xhr.addEventListener('error', () => finish(reject, new UploadError('server')));
     xhr.addEventListener('abort', () => finish(reject, signal?.aborted ? cancelled() : new UploadError('server', '', { stalled })));
     xhr.send(json ? JSON.stringify(json) : null);
   });
 }
+
+// Перед отправкой: не новая ли это версия игры из библиотеки. { match: { id, title, cover, why } | null }
+export const matchUpload = (name) => request('POST', '/api/games/upload-match', { json: { name } });
 
 // Кусок — файлом, а не байтами из памяти: браузер читает его с диска прямо во время отправки.
 // До конца ответа на кусок не ждём. Айфон (iOS 27, и Safari, и Chrome) отправляет кусок, получает
@@ -282,8 +285,10 @@ const nextChunk = (bytes, ms, seconds) => Math.min(MAX_CHUNK, Math.max(MIN_CHUNK
 // Загрузка по шагам: start — узнать у сервера, сколько он уже получил; upload — слать кусок с этого
 // места; resync — после сбоя спросить, сколько дошло (оборванный кусок записан частично);
 // processing — ждать распаковку; password — архив под паролем, спросить его через askPassword.
+// Места на сервере может не хватить (507, reason space) — спросить askSpace({ need, free }): «всё равно» — начать снова с force.
+// Не влезет и сам архив (hard) — не спрашиваем
 // onState({ phase, id, received, size, resumed, step, retryIn, wrong })
-async function run(file, { onState, signal, trace, askPassword, target, mode }) {
+async function run(file, { onState, signal, trace, askPassword, askSpace, target, mode }) {
   const { size } = file;
   let phase = 'start';
   let id = null;
@@ -292,13 +297,14 @@ async function run(file, { onState, signal, trace, askPassword, target, mode }) 
   let restarts = 0;
   let print = null;
   let chunk = MIN_CHUNK;
+  let force = false;
   for (;;) {
     if (signal?.aborted) throw cancelled();
     try {
       if (phase === 'start') {
         const t = Date.now();
         print = print || await fingerprint(file);
-        const s = await request('POST', `${API}/start`, { json: { name: file.name, size, fingerprint: print, target, mode }, signal });
+        const s = await request('POST', `${API}/start`, { json: { name: file.name, size, fingerprint: print, target, mode, ...(force ? { force } : {}) }, signal });
         ({ id, received } = s);
         trace.id = id;
         trace.note(`начало: ${mb(received)} из ${mb(size)} МБ уже на сервере (${Date.now() - t} мс)`);
@@ -330,7 +336,9 @@ async function run(file, { onState, signal, trace, askPassword, target, mode }) 
         const st = await request('GET', `${API}/status?id=${id}`, { signal });
         failures = 0;
         if (st.state === 'done') return st;
-        if (st.state === 'error') throw new UploadError('server', st.error, { processed: true });
+        if (st.state === 'error') throw new UploadError('server', st.error, { processed: true, reason: st.reason || '', params: st.params || null });
+        // Не хватило места на распаковку — архив ждёт на сервере («Повторить» в списке загрузок), здесь ждать нечего
+        if (st.state === 'space') throw new UploadError('server', st.error, { processed: true, space: true, body: st });
         if (st.state === 'uploading') {
           phase = 'upload';
           received = st.received;
@@ -356,6 +364,13 @@ async function run(file, { onState, signal, trace, askPassword, target, mode }) 
       if (e.kind === 'cancelled' || e.kind === 'parked' || e.processed) throw e;
       if (e.kind === 'read') throw Object.assign(e, { received });
       const { status, body } = e;
+      // Места может не хватить: оценка, а не точный счёт — человек решает, грузить ли всё равно
+      if (status === 507 && phase === 'start' && body?.reason === 'space' && !body.hard && !force && askSpace) {
+        trace.note(`места может не хватить: нужно ${mb(body.need)} МБ, свободно ${mb(body.free)} МБ`);
+        if (await askSpace({ need: body.need, free: body.free })) { force = true; continue; }
+        throw Object.assign(e, { space: true, received });
+      }
+      if (status === 507 && body?.reason === 'space') e.space = true;
       // Не с того места (ответ на прошлый кусок потерялся) — сервер сказал, с какого
       if (status === 409 && typeof body?.received === 'number') { received = body.received; phase = 'upload'; continue; }
       // Файл уже получен целиком (дослали с другого устройства) — ждём распаковку
@@ -395,7 +410,7 @@ async function run(file, { onState, signal, trace, askPassword, target, mode }) 
 // Загрузить архив. Вернёт { folder } готовой игры или бросит UploadError. target — папка игры из
 // библиотеки, которую архив обновляет: новая версия встанет на её место. mode: 'patch' — архив не
 // новая версия, а патч или мод: ляжет поверх игры target
-export async function uploadArchive(file, { onState, signal, askPassword, target, mode }) {
+export async function uploadArchive(file, { onState, signal, askPassword, askSpace, target, mode }) {
   const trace = makeTrace(file);
   // Уход страницы в фон и пропажа сети — тоже в журнал: айфон усыпляет скрытую страницу
   const onVisibility = () => trace.note(document.hidden ? 'страница скрыта' : 'страница снова видна');
@@ -407,7 +422,7 @@ export async function uploadArchive(file, { onState, signal, askPassword, target
   const release = await keepAwake();
   const t0 = Date.now();
   try {
-    const result = await run(file, { onState, signal, trace, askPassword, target, mode });
+    const result = await run(file, { onState, signal, trace, askPassword, askSpace, target, mode });
     trace.note(`готово за ${Math.round((Date.now() - t0) / 1000)} с`);
     trace.send('готово');
     return result;
@@ -436,3 +451,6 @@ export const cancelUpload = (id) => request('POST', `${API}/cancel?id=${id}`);
 
 // Пароль к архиву, который его ждёт (из карточки «не догружено» — загрузку на этой странице уже закрыли)
 export const sendPassword = (id, password) => request('POST', `${API}/password?id=${id}`, { json: { password } });
+
+// Распаковать снова архив, которому не хватило места (место освободили)
+export const retryUpload = (id) => request('POST', `${API}/retry?id=${id}`);

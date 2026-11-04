@@ -3,9 +3,8 @@
 .modal-overlay {
   position: fixed;
   inset: 0;
+  /* Без размытия, как под окном игры: под 0.85 чёрного его почти не видно, а перерисовывает оно всю страницу */
   background: rgba(0,0,0,0.85);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   z-index: 2000;
   display: flex;
   align-items: center;
@@ -18,9 +17,8 @@
 
 .modal-overlay.active { opacity: 1; pointer-events: all; }
 
-/* Окно игры: подложку и рамку ведёт windowFly.js (прозрачность и transform) — без размытия и своего transition.
-   Размытие на каждом кадре полёта перерисовывало бы всю страницу под окном */
-.modal-overlay.game-overlay { backdrop-filter: none; -webkit-backdrop-filter: none; transition: none; }
+/* Окно игры: подложку и рамку ведёт windowFly.js (прозрачность и transform) — без своего transition */
+.modal-overlay.game-overlay { transition: none; }
 
 /* Правый верхний угол окна: крестик */
 .modal-actions-top {
@@ -79,6 +77,7 @@
   width: min(440px, 100%);
   max-height: 100%;
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -90,7 +89,8 @@
   box-shadow: 0 25px 60px rgba(0,0,0,0.9);
 }
 
-.confirm-cover { width: 100%; max-height: 190px; object-fit: cover; border-radius: var(--radius-sm); }
+/* Вся обложка, а не полоса из середины: название на ней обычно вверху, и окно обрезало бы его */
+.confirm-cover { align-self: center; max-width: 100%; max-height: 190px; border-radius: var(--radius-sm); }
 
 .confirm-title { margin: 0; font-family: var(--font-ui); font-size: var(--fs-lg); color: var(--gold-light); }
 
@@ -102,6 +102,20 @@
 
 .confirm-actions button { flex: 1; }
 
+/* Третий ответ — своей строкой: три подписи в ряд на телефоне не помещаются */
+.confirm-actions.with-other { flex-wrap: wrap; }
+.confirm-actions .confirm-other { flex-basis: 100%; }
+
+/* Окно склейки копий (MergeCopies.jsx): выбор копии и что будет — по левому краю, это чтение, а не вопрос */
+.confirm-box.merge-box { width: min(560px, 100%); text-align: left; }
+.merge-choice { flex-direction: column; flex-wrap: nowrap; }
+.merge-choice .set-choice-btn { display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; text-align: left; border-radius: var(--radius-sm); }
+.merge-copy-title { overflow-wrap: anywhere; }
+.merge-copy-facts { font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.merge-plan { display: flex; flex-direction: column; gap: 8px; }
+.merge-plan p { margin: 0; color: var(--text); font-size: var(--fs-md); line-height: 1.5; }
+.merge-plan .merge-warn { color: var(--gold-light); border-left: 2px solid var(--gold); padding-left: 10px; }
+
 .confirm-actions button:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
 
 .stats-content {
@@ -112,6 +126,7 @@
   width: min(760px, calc(92 * var(--vw)));
   max-height: calc(88 * var(--vh));
   overflow-y: auto;
+  overscroll-behavior-y: contain;
   padding: 36px 40px 40px;
   box-shadow: 0 25px 60px rgba(0,0,0,0.9);
 }
@@ -171,30 +186,143 @@
 
 .tg-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 
-/* «Во что поиграть?» (PlayPicker.jsx) */
-.picker-content { display: flex; flex-direction: column; gap: 14px; max-width: 640px; }
+/* «Во что поиграть?» (PlayPicker.jsx): одна игра в фокусе. Запоминается одно — сцена с краем обложки в крупных клетках, остальное молчит */
+.stats-content.play-pick { width: min(1040px, calc(94 * var(--vw))); padding: 0; display: flex; flex-direction: column; --pick-cover: 512px; }
+/* Окно прижато к верху: иначе при смене игры оно центровалось бы заново, и «Другую» уезжала из-под курсора (телефон — во весь экран, ниже) */
+.modal-overlay.pick-overlay { align-items: flex-start; padding-top: calc(max(20px, 6vh) + var(--safe-top)); }
+/* Части окна не сжимаются под высоту экрана: сцена с overflow: hidden иначе схлопывалась бы в полоску, листается всё окно */
+.play-pick > * { flex: none; }
 
-.picker-content h2 { margin: 0; }
+/* Шапка: заголовок и длина в одну строку */
+.play-pick .modal-actions-top { top: 10px; right: 14px; }
+.pick-head { display: flex; align-items: center; gap: 12px 28px; padding: 16px 72px 16px 32px; flex-wrap: wrap; }
+.pick-title { margin: 0; font: 400 32px/1 var(--font-head); color: var(--gold-light); }
 
-.picker-lengths { display: flex; flex-wrap: wrap; gap: 8px; }
+/* Сцена. Обложка не обрезается и не тянется: узкая встаёт по центру своего места на тёмном фоне */
+.pick-stage { position: relative; isolation: isolate; display: grid; grid-template-columns: var(--pick-cover) minmax(0, 1fr); min-height: 320px; overflow: hidden; background: #0b090c; border-block: 1px solid var(--line-window); }
+/* Край обложки осыпается вправо крупными клетками (drawMosaic): холст в несколько точек, растянутый без сглаживания. Не градиент: цвета у каждой игры свои, ступени видны */
+.pick-mosaic { position: absolute; z-index: -1; display: block; image-rendering: pixelated; }
+.pick-mosaic.across { top: 0; bottom: 0; left: var(--pick-cover); height: 100%; aspect-ratio: 14 / 8; }
+.pick-mosaic.down { display: none; }
+.pick-cover { align-self: center; display: flex; justify-content: center; align-items: center; height: 320px; overflow: hidden; }
+.pick-cover img { display: block; height: 100%; width: 100%; object-fit: contain; }
+/* Пока картинка не пришла, она прозрачна, как на полках: иначе RetryImg почти минуту показывал бы значок битой картинки */
+.pick-cover img:not(.loaded), .pick-thumb img:not(.loaded), .pick-proof:not(.loaded) { opacity: 0; }
 
-.picker-game { display: flex; gap: 18px; align-items: flex-start; }
+.pick-focus { display: flex; flex-direction: column; min-width: 0; padding: 18px 32px 20px 64px; }
+.pick-name { margin: 0; font: 700 2rem/1.15 var(--font-ui); letter-spacing: -0.01em; color: var(--gold-light); overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; line-clamp: 3; overflow: hidden; }
+.pick-facts { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-top: 6px; color: rgba(232,223,200,0.82); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+.pick-facts .lang-set { min-height: 24px; font-size: var(--fs-2xs); }
+.pick-loading { margin: auto 0; color: var(--text-dim); font-size: var(--fs-sm); }
 
-.picker-cover {
-  width: 150px;
-  aspect-ratio: 3 / 4;
-  object-fit: cover;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(201,168,76,0.25);
-  flex-shrink: 0;
+/* Причины — не список, а счёт: слева утверждение, справа его доказательство, между строками волосяная черта */
+.pick-reasons { margin-top: 12px; }
+.pick-reason { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 40px; padding: 7px 0; border-top: 1px solid rgba(232,223,200,0.14); font-size: var(--fs-sm); line-height: 1.35; color: var(--text); }
+.pick-reason p { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.pick-reason b { font-weight: 600; color: var(--gold-light); }
+/* Главная причина крупнее: сначала читается она, остальные — подтверждение */
+.pick-reason .pick-lead { font-size: var(--fs-md); line-height: 1.3; }
+/* Теги не ломаются посреди слова: не хватило места рядом с текстом — уходят под него */
+.pick-reason:has(> .pick-tags) { flex-wrap: wrap; gap: 6px 16px; }
+.pick-tags { flex: 0 1 auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; min-width: 0; }
+.pick-tags span { max-width: 100%; padding: 2px 9px; font-size: var(--fs-xs); line-height: 1.5; color: var(--gold-light); background: rgba(232,223,200,0.09); border-radius: var(--radius-sm); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-proof { flex: none; width: 72px; height: 45px; object-fit: contain; background: #000; border-radius: 3px; }
+
+.pick-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; }
+.pick-play.save-btn { flex: 0 0 auto; min-width: 120px; min-height: var(--btn-h-lg); font-size: var(--fs-md); }
+.pick-actions .meta-status-btn { min-height: var(--btn-h-lg); padding: 0 12px; }
+.pick-skip.catalog-back { margin: 0 0 0 auto; min-height: var(--btn-h-lg); padding: 0 0 0 2px; font-weight: 500; cursor: pointer; }
+
+/* Пустая сцена: подбору нечего сказать или он не ответил */
+.pick-stage-empty { display: block; min-height: 0; padding: 24px 32px; }
+.pick-more-fail { padding: 12px 32px 0; }
+
+/* Лента других предложений */
+.pick-label { margin: 0; font: 400 24px/1.1 var(--font-head); color: var(--text); }
+.pick-more { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0 14px; padding: 10px 32px 12px; }
+.pick-more-col:first-child { grid-column: span 5; }
+.pick-more.only .pick-more-col { grid-column: 1 / -1; }
+.pick-more-col { min-width: 0; }
+.pick-more-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.pick-more-switch.catalog-back { margin: 2px 0 0; padding: 0; min-height: 0; font-size: var(--fs-2xs); font-weight: 500; cursor: pointer; color: var(--gold-muted); }
+.pick-strip { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 14px; margin-top: 8px; }
+.pick-strip.wide { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.pick-back { position: relative; }
+/* Черта стоит в промежутке между колонками: миниатюра «Вернуться» того же размера, что остальные */
+.pick-back::before { content: ''; position: absolute; top: 0; bottom: 0; left: -8px; width: 1px; background: rgba(232,223,200,0.1); }
+.pick-back .pick-tile { margin-top: 8px; }
+
+.pick-tile { display: flex; flex-direction: column; width: 100%; text-align: left; background: none; border: 0; padding: 0; color: inherit; font-family: inherit; cursor: pointer; min-width: 0; }
+.pick-thumb { display: block; aspect-ratio: 16 / 10; background: #000; border: 1px solid rgba(232,223,200,0.12); border-radius: var(--radius-sm); overflow: hidden; }
+.pick-thumb img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.pick-empty { display: flex; height: 100%; width: 100%; align-items: center; justify-content: center; color: var(--gold-dim); font-size: var(--fs-xs); }
+.pick-tile-name { display: block; margin-top: 6px; font-size: var(--fs-xs); font-weight: 600; line-height: 1.3; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pick-tile-meta { display: flex; flex-wrap: wrap; gap: 0 8px; font-size: var(--fs-2xs); line-height: 1.35; color: var(--text-dim); min-width: 0; overflow-wrap: anywhere; }
+.pick-why { display: block; margin-top: 2px; font-size: var(--fs-2xs); line-height: 1.3; color: var(--gold); overflow-wrap: anywhere; }
+.pick-tile:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+/* В ленте у всех плиток одна высота письма: длинные автор и причина не раздувают окно, полный текст в data-tip. На телефоне лента строками, там места хватает */
+@media (min-width: 701px) {
+  .pick-tile-meta { flex-wrap: nowrap; }
+  .pick-tile-dev { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pick-why { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; }
+}
+@media (hover: hover) {
+  .pick-tile:hover .pick-thumb { border-color: var(--gold); }
+  .pick-tile:hover .pick-tile-name { color: var(--gold-light); }
 }
 
-.picker-info { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+/* Пока подбор думает: тихие плашки ровно на тех местах, где будут игры, без мерцания */
+.pick-ghost { background: rgba(232,223,200,0.05); }
+.pick-ghost-lines { display: flex; flex-direction: column; gap: 6px; min-height: 64px; margin-top: 8px; flex: 1; min-width: 0; }
+.pick-ghost-lines i { display: block; height: 10px; width: 70%; background: rgba(232,223,200,0.05); }
+.pick-ghost-lines i + i { width: 45%; }
 
-.picker-info h3 { margin: 0; color: var(--gold-light); }
+/* «Скрыть обложки» (H): размыто всё, а край обложки не рисуем вовсе — клетки выдают её цвета и даже размытыми похожи на картинку */
+.covers-hidden .pick-cover img, .covers-hidden .pick-thumb img, .covers-hidden .pick-proof { filter: blur(12px) brightness(0.55) saturate(0.7); }
+.covers-hidden .pick-mosaic { visibility: hidden; }
 
-/* «Скрыть обложки» касается и этого окна */
-.covers-hidden .picker-cover { filter: blur(12px) brightness(0.55) saturate(0.7); }
+/* Узкое окно: обложке столько, сколько останется от текста */
+@media (max-width: 980px) {
+  .stats-content.play-pick { --pick-cover: 44%; }
+  .pick-cover { height: auto; aspect-ratio: 16 / 10; }
+  .pick-focus { padding: 16px 20px 18px 24px; }
+  .pick-mosaic.across { min-width: 56%; }
+}
+
+/* Телефон: окно во весь экран, как «Настройки»; всё в один столбец, листается только вниз */
+@media (max-width: 700px) {
+  .modal-overlay.pick-overlay { padding: 0; align-items: stretch; }
+  .stats-content.play-pick { width: 100%; max-height: none; height: 100%; border: 0; border-radius: 0; padding-top: var(--safe-top); padding-bottom: var(--safe-bottom); box-shadow: none; }
+  .pick-head { padding: 10px 14px 12px; gap: 8px; }
+  .pick-title { padding-right: 44px; line-height: 44px; }
+  .play-pick .modal-actions-top { top: calc(10px + var(--safe-top)); right: 6px; }
+
+  .pick-stage { grid-template-columns: minmax(0, 1fr); min-height: 0; }
+  /* На телефоне обложка осыпается вниз, под название */
+  .pick-mosaic.across { display: none; }
+  .pick-mosaic.down { display: block; top: calc(100 * var(--vw) * 10 / 16); left: 0; width: 100%; aspect-ratio: 10 / 14; }
+  .pick-cover { aspect-ratio: 16 / 10; }
+  .pick-focus { padding: 14px 14px 16px; }
+  .pick-name { font-size: 1.5rem; }
+  .pick-actions { margin-top: 12px; padding-top: 0; }
+  .pick-play.save-btn { flex: 1 0 100%; }
+  .pick-actions .meta-status-btn { flex: 1 1 0; min-height: var(--btn-h); }
+  .pick-skip.catalog-back { flex: 1 1 0; margin-left: 0; min-height: var(--btn-h); padding: 0 4px; }
+  .pick-stage-empty { padding: 16px 14px; }
+  .pick-more-fail { padding: 12px 14px 0; }
+
+  /* Лента — строками: миниатюра слева, текст справа */
+  .pick-more { grid-template-columns: minmax(0, 1fr); padding: 14px 14px 16px; gap: 16px; }
+  .pick-strip, .pick-strip.wide { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .pick-more-col:first-child { grid-column: auto; }
+  .pick-back { padding-top: 14px; border-top: 1px solid rgba(232,223,200,0.1); }
+  .pick-back::before { display: none; }
+  .pick-tile { display: grid; grid-template-columns: 104px minmax(0, 1fr); column-gap: 12px; align-items: start; }
+  .pick-tile .pick-thumb { grid-row: 1 / span 4; }
+  .pick-tile .pick-ghost-lines { margin-top: 0; }
+  .pick-tile-name { margin-top: 0; font-size: var(--fs-sm); }
+  .pick-why { font-size: var(--fs-xs); }
+}
 
 .modal-overlay.pop { animation: overlay-in 0.15s ease-out; }
 
@@ -209,7 +337,10 @@
 
 .settings-body { display: grid; grid-template-columns: 190px 1fr; gap: 28px; align-items: start; }
 
-.settings-tabs { display: flex; flex-direction: column; gap: 2px; position: sticky; top: 0; }
+.settings-tabs { display: flex; flex-direction: column; gap: 14px; position: sticky; top: 0; }
+.settings-tab-list { display: flex; flex-direction: column; gap: 2px; }
+/* Тихая подпись группы: вкладки важнее заголовка над ними */
+.settings-group-title { margin: 0 0 4px; padding-left: 12px; font-size: var(--fs-xs); color: var(--gold-muted); }
 
 .settings-tab {
   text-align: left;
@@ -294,6 +425,9 @@
   line-height: 1.5;
 }
 
+ul.set-list { list-style-type: square; }
+.set-list li::marker { color: var(--gold); }
+
 .set-form { display: flex; flex-direction: column; gap: 14px; max-width: 420px; }
 
 .set-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
@@ -344,7 +478,7 @@
 
 .set-label { color: var(--text); font-size: var(--fs-md); }
 
-/* Переключатель вместо галочки — как в настройках телефона; тот же — «Скрыть мои» в «Новинках» */
+/* Переключатель вместо галочки — как в настройках телефона; тот же — «Скрыть мои» в «Найти» */
 .set-toggle input, .catalog-check input {
   appearance: none;
   flex-shrink: 0;
@@ -484,6 +618,31 @@ input.sq-check:focus-visible { outline: 2px solid var(--gold); outline-offset: 2
 
 .set-result details { margin-top: 6px; color: var(--text-dim); font-size: var(--fs-sm); }
 
+/* Окно «Открыть на телефоне» (PhoneLink.jsx). Код в две колонки с подсказками: столбиком на ноутбуке окно не влезло бы
+   без прокрутки. Сам код тёмный на светлом, хоть окно и тёмное: обратный камеры читают хуже */
+.stats-content.phone-link-content { width: min(720px, calc(92 * var(--vw))); }
+
+.phone-link-body { display: grid; grid-template-columns: 240px 1fr; gap: 28px; align-items: start; }
+
+.phone-link-side { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+
+.phone-link-code { display: block; width: 100%; height: auto; background: #f6f1e3; border-radius: var(--radius-sm); }
+
+.phone-link-code path { fill: #0b0a08; }
+
+.phone-link-address { margin: 0; color: var(--gold-light); font-size: var(--fs-md); text-align: center; overflow-wrap: anywhere; user-select: text; }
+
+.phone-link-hints { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+
+.phone-link-hints .set-section { gap: 4px; }
+
+.phone-link-hints .set-section + .set-section { padding-top: 0; border-top: 0; }
+
+@media (max-width: 700px) {
+  .phone-link-body { grid-template-columns: 1fr; }
+  .phone-link-side { width: min(240px, 100%); align-self: center; justify-self: center; }
+}
+
 /* Окно «Клавиши» (ShortcutsHelp.jsx) */
 .stats-content.keys-content { width: min(520px, calc(92 * var(--vw))); }
 
@@ -564,9 +723,10 @@ input.sq-check:focus-visible { outline: 2px solid var(--gold); outline-offset: 2
   .settings-main .settings-title { display: flex; align-items: center; height: 60px; margin: 0; }
   .settings-main .settings-body { display: block; }
   .settings-main .settings-tabs {
-    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 14px; position: static; overflow: visible;
+    display: flex; flex-direction: column; gap: 12px; position: static; overflow: visible;
     margin: 0 -16px; padding: 2px 16px 16px; border-bottom: 1px solid rgba(201,168,76,0.45);
   }
+  .settings-main .settings-tab-list { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 4px 14px; }
   .settings-main .settings-tab { min-width: 0; padding: 5px 0 5px 12px; border-left: 2px solid transparent; border-bottom: 0; border-radius: 0; background: none; font-size: var(--fs-md); }
   .settings-main .settings-tab.active { border-left-color: var(--gold); border-bottom-color: transparent; background: none; }
   .settings-tab-name { font-weight: 600; line-height: 20px; color: var(--text); }
@@ -602,11 +762,6 @@ input.sq-check:focus-visible { outline: 2px solid var(--gold); outline-offset: 2
   .trash-days { grid-column: 2 / 4; grid-row: 2; display: flex; align-items: center; gap: 10px; }
   .trash-gauge { margin-top: 0; width: 60px; }
   .trash-actions { grid-column: 1 / 4; grid-row: 3; }
-}
-
-@media (max-width: 560px) {
-  .picker-cover { width: 96px; }
-  .picker-info h3 { font-size: var(--fs-md); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -685,11 +840,150 @@ input.sq-check:focus-visible { outline: 2px solid var(--gold); outline-offset: 2
 .set-hint.set-error { color: #d08a7a; }
 
 /* «Что задаётся только на сервере»: имя параметра, значение, зачем — списком под раскрывашкой */
+/* Журнал сервера в «О программе» (ServerJournal): строки длинные и со стеком — перенос как в тексте, а не прокрутка вбок */
+.set-journal {
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  padding: 8px 10px;
+  background: var(--bg-deep);
+  border-left: 2px solid rgba(201,168,76,0.35);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.set-journal:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.set-journal-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.set-journal-line + .set-journal-line { margin-top: 4px; }
+.set-journal-line time { margin-right: 8px; color: #e0b070; }
+.set-journal-line.error time { color: #e8a0a0; }
+
+/* Окно отчёта о проблеме: шире окна-вопроса, текст отчёта читают глазами перед тем, как отдать */
+.confirm-box.report-box { width: min(720px, 100%); text-align: left; }
+.report-box .confirm-title { text-align: left; }
+.report-text {
+  width: 100%;
+  height: min(42vh, 380px);
+  flex: none;
+  box-sizing: border-box;
+  padding: 10px;
+  resize: vertical;
+  background: var(--bg-deep);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.report-text:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
 .set-server-list { display: flex; flex-direction: column; gap: 12px; margin: 10px 0 0; }
 .set-server-list dt { display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; color: var(--text); font-size: var(--fs-sm); }
 .set-server-list dt code { color: var(--gold); font-size: var(--fs-xs); }
 .set-server-list dd { margin: 3px 0 0; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.45; }
 .set-option .set-status { margin: 0; }
+
+/* Подборки «Следить» в «Уведомлениях» */
+.set-watch-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; border-top: 1px solid rgba(201,168,76,0.12); }
+.set-watch-list li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px solid rgba(201,168,76,0.12); font-size: var(--fs-sm); }
+.set-watch-list small { color: var(--text-dim); }
+
+/* «Пользователи»: плитки людей, у плитки своя страница. Знак человека — квадрат со срезанными пиксельными углами, как у
+   знака-мимика: картинка или первая буква имени на тёмной плите в золотой рамке; у главного администратора сверху корона */
+.pmark-wrap { position: relative; flex: none; display: inline-block; line-height: 0; }
+.pmark-wrap.fill { display: block; width: 100%; }
+.pmark {
+  --c: 3px;
+  position: relative; display: grid; place-items: center; width: 100%; height: 100%;
+  background: #000; color: var(--gold-light); font-family: var(--font-head); line-height: 1;
+  clip-path: polygon(var(--c) 0, calc(100% - var(--c)) 0, calc(100% - var(--c)) var(--c), 100% var(--c), 100% calc(100% - var(--c)), calc(100% - var(--c)) calc(100% - var(--c)), calc(100% - var(--c)) 100%, var(--c) 100%, var(--c) calc(100% - var(--c)), 0 calc(100% - var(--c)), 0 var(--c), var(--c) var(--c));
+}
+.pmark:not(.pic) { background: var(--gold-dim); }
+.pmark:not(.pic)::before { content: ''; position: absolute; inset: 2px; background: #121016; clip-path: inherit; }
+.pmark-letter { position: relative; }
+.pmark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.pmark-wrap.fill .pmark { aspect-ratio: 1; height: auto; --c: 6px; font-size: 64px; }
+.pmark-wrap.fill .pmark:not(.pic)::before { inset: 3px; }
+.pmark-crown { position: absolute; right: -10%; top: -14%; width: 42%; height: auto; aspect-ratio: 8 / 6; image-rendering: pixelated; }
+.pmark-wrap.fill .pmark-crown { width: 32px; right: -7px; top: -11px; }
+
+.people-tiles { list-style: none; margin: 18px 0 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 26px 18px; align-items: start; }
+.people-tile { display: block; width: 100%; padding: 0; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.people-tile:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+.people-name { display: block; margin-top: 10px; line-height: 1.3; font-weight: 600; font-size: var(--fs-md); color: var(--text); overflow-wrap: anywhere; }
+.people-role { display: block; margin-top: 3px; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.35; }
+.people-role.adm { color: var(--gold-light); font-weight: 600; }
+.people-state { display: block; margin-top: 3px; color: var(--text-dim); font-size: var(--fs-sm); line-height: 1.35; }
+.people-state:empty { display: none; }
+.people-state.bad { color: #e8a0a0; }
+.people-tile.off .pmark-wrap, .people-tile.off .people-name, .people-tile.off .people-role { opacity: 0.5; }
+.people-add-box { display: grid; place-items: center; aspect-ratio: 1; border: 1px dashed var(--gold-dim); color: var(--gold-muted); font-weight: 600; font-size: var(--fs-sm); }
+@media (hover: hover) {
+  .people-tile:hover .people-name { color: var(--gold-light); }
+  .people-add:hover .people-add-box { border-color: var(--gold); color: var(--gold-light); }
+}
+.people-removed { margin-top: 32px; display: flex; flex-direction: column; gap: 8px; }
+.people-removed .set-hint { margin: 0; }
+.people-removed-who { display: flex; align-items: center; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+
+.people-back { align-self: flex-start; padding: 4px 0; background: none; border: 0; color: var(--gold-muted); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.people-back:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (hover: hover) { .people-back:hover { color: var(--gold-light); text-decoration: underline; } }
+.person-head { display: flex; align-items: center; gap: 16px; }
+.person-head .set-title { margin: 0 0 4px; overflow-wrap: anywhere; }
+.person-page > .set-section { margin-top: 26px; }
+.person-tabs { display: flex; gap: 22px; border-bottom: 1px solid rgba(232,223,200,0.16); }
+.person-tab { margin-bottom: -1px; padding: 0 2px 9px; background: none; border: 0; border-bottom: 2px solid transparent; color: var(--text-dim); font: inherit; font-size: var(--fs-sm); font-weight: 600; cursor: pointer; }
+.person-tab.active { color: var(--gold); border-bottom-color: var(--gold); }
+.person-tab:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+@media (hover: hover) { .person-tab:not(.active):hover { color: var(--gold-light); } }
+
+/* «Игры» человека: переключатель, поиск и обложки с отметкой. Отмеченная обложка в золотой рамке, закрытая — серая и тусклая;
+   отметка — настоящий input.sq-check поверх обложки, поэтому работает с клавиатуры и на телефоне */
+.person-games { display: flex; flex-direction: column; gap: 16px; }
+.games-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.games-search { flex: 1 1 180px; min-width: 0; height: 36px; padding: 0 2px; background: none; border: 0; border-bottom: 1px solid rgba(232,223,200,0.22); border-radius: 0; color: var(--text); font: inherit; font-size: var(--fs-sm); }
+.games-search:focus { outline: none; border-bottom-color: var(--gold); }
+.games-search::placeholder { color: var(--text-dim); }
+.games-chip { height: 30px; padding: 0 12px; background: none; border: 1px solid rgba(232,223,200,0.16); border-radius: var(--radius-pill); color: var(--text-dim); font: inherit; font-size: var(--fs-sm); cursor: pointer; }
+.games-chip[aria-pressed="true"] { border-color: var(--gold); color: var(--gold-light); }
+.games-chip:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.games-warn { color: #e8a0a0; margin: 0; }
+.games-covers { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px 12px; }
+.games-cover { position: relative; display: block; cursor: pointer; }
+.games-cover-pic { display: block; aspect-ratio: 16 / 10; border-radius: 3px; overflow: hidden; background: #1c1a21; border: 1px solid transparent; }
+.games-cover-pic img, .games-cover-none { display: block; width: 100%; height: 100%; object-fit: cover; }
+.games-cover:not(.on) .games-cover-pic img { filter: grayscale(1) brightness(0.42); }
+.games-cover.on .games-cover-pic { outline: 2px solid var(--gold); outline-offset: 1px; }
+.games-cover .sq-check { position: absolute; left: 6px; top: 6px; width: 20px; height: 20px; background: rgba(0,0,0,0.55); }
+.games-cover-name { display: block; margin-top: 5px; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.games-cover.on .games-cover-name { color: var(--text); }
+.games-cover:has(.sq-check:focus-visible) .games-cover-pic { outline: 2px solid var(--gold-light); outline-offset: 3px; }
+.games-save { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.games-save .set-hint { margin: 0; }
+@media (max-width: 700px) {
+  .games-covers { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+.meta-status-btn.danger { color: #e8a0a0; border-color: rgba(232,160,160,0.35); }
+@media (hover: hover) { .meta-status-btn.danger:hover { color: #f0b8b8; border-color: rgba(232,160,160,0.6); } }
+
+/* «Мой профиль» и страница человека: картинка слева, кнопки и пояснение справа */
+.profile-avatar-row { display: flex; align-items: flex-start; gap: 18px; }
+.profile-avatar-side { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 10px; }
+.profile-avatar-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.profile-avatar-side .set-hint { margin: 0; }
+.profile-avatar .auth-error { text-align: left; }
+@media (max-width: 700px) {
+  .people-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 22px 14px; }
+  .pmark-wrap.fill .pmark { font-size: 48px; --c: 5px; }
+  .person-tabs { gap: 26px; }
+  .person-tab { padding-bottom: 12px; }
+}
+.set-subtitle { margin: 0; font-size: var(--fs-md); font-weight: 600; color: var(--gold-light); }
 
 /* Окно «Настроек» на компьютере без мягкой тени: граница и так отделяет его от затемнённой страницы */
 .stats-content.settings-content { box-shadow: none; }

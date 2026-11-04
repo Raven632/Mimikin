@@ -11,6 +11,14 @@ cd "$(dirname "$0")"
 unset COMPOSE_PROJECT_NAME
 mkdir -p report
 
+# Журнал сервера и остановка контейнеров — при любом выходе, и при сбое запуска (сборка, демо-библиотека,
+# ожидание сервера): иначе от упавшего запуска не остаётся ни строчки лога
+finish() {
+  docker compose logs --no-color mimikin > report/app.log 2>&1 || true
+  docker compose down -v --remove-orphans >/dev/null 2>&1 || true
+}
+trap finish EXIT
+
 docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 [ -n "${E2E_NO_BUILD:-}" ] || docker compose build
 # Снимкам экрана — один и тот же «сегодня» (fixtures.js, DEMO_NOW): даты игр демо считаются от него
@@ -22,6 +30,4 @@ docker compose run --rm runner npx playwright test -c e2e/playwright.config.js "
 status=$?
 set -e
 
-docker compose logs --no-color mimikin > report/app.log 2>&1 || true
-docker compose down -v --remove-orphans >/dev/null 2>&1 || true
 exit $status

@@ -28,7 +28,7 @@ Server (`api/package.json`):
 | dotenv | BSD-2-Clause |
 | onnxruntime-node, ssh2 | MIT |
 
-Interface (`frontend/package.json`): react, react-dom, socket.io-client, pixi.js, pixi-live2d-display, @pixi-spine/* — MIT.
+Interface (`frontend/package.json`): react, react-dom, socket.io-client, pixi.js, pixi-live2d-display, lean-qr (the QR code of the library address), @pixi-spine/* — MIT.
 `@pixi-spine/*` (the Spine animation player in the gallery) is MIT-licensed code that plays Spine skeletons
 which are subject to the [Spine Runtimes License](http://esotericsoftware.com/spine-runtimes-license): the
 skeletons and atlases belong to the games and are only played, never created or edited here. The Live2D

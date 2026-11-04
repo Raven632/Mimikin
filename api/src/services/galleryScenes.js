@@ -16,6 +16,8 @@
 // Сцена — то, где идут картинки во весь экран (CG и слои), не портреты в разговоре: портрет повторяется во многих
 // событиях, CG — в одном-двух
 
+const { notName } = require('./sceneCast.js');
+
 const MAX_DEPTH = 3;
 const MAX_FRAMES = 200;
 const MAX_STEPS = 8000;      // команд на сцену: общие события зовут друг друга, лишнее не крутим
@@ -2577,11 +2579,12 @@ function clipsOf(frames) {
 }
 
 // Первая строка реплики без кодов («\C[2]», «\N[1]»)
-// «\n<Имя>» / «\n» — окно имени говорящего (плагины сообщений): имя тоже убираем, оно не название сцены
+// «\n<Имя>» / «\n» — окно имени говорящего (плагины сообщений), «\nc<…>», «\nr<…>» — оно же по центру и справа (YEP):
+// имя тоже убираем, оно не название сцены
 // Односимвольные коды окна («\.» пауза, «\!» ждать клавишу, «\{» крупнее, «\G») и чужие плагинные вроде «\-»: буква или знак
 // пунктуации ASCII после обратной косой — не текст. Скобки и сама косая не входят: «\\[» не код, «\\\\» — буква косой
 const CODE1 = '\\\\[A-Za-z\\x21-\\x2f\\x3a-\\x40\\x5e-\\x60\\x7b-\\x7e]';
-const cleanLine = (s) => String(s || '').replace(/\\n<[^>]*>/gi, '').replace(new RegExp('\\\\[A-Za-z]+\\[[^\\]]*\\]|' + CODE1 + '|[<>【】「」『』]', 'g'), '').trim();
+const cleanLine = (s) => String(s || '').replace(/\\n[lcr]?<[^>]*>/gi, '').replace(new RegExp('\\\\[A-Za-z]+\\[[^\\]]*\\]|' + CODE1 + '|[<>【】「」『』]', 'g'), '').trim();
 function firstText(list) {
     for (const c of list || []) {
         if (c && c.code === 401) { const t = cleanLine(c.parameters && c.parameters[0]); if (/[\p{L}\p{N}]{2,}/u.test(t)) return t.slice(0, 60); }
@@ -2590,8 +2593,13 @@ function firstText(list) {
 }
 
 // Реплика для плеера галереи: { who, text } из строк окна сообщения (как в игре, с кодами). Говорящего даёт окно имени
-// (MZ, name), иначе первая строка: «\n<Имя>», «【Имя】» или одно «Имя:» над текстом. Коды (цвет, значки, скорость) убираем,
+// (MZ, name), иначе первая строка: «\n<Имя>» (и «\nc<…>», «\nr<…>»), «【Имя】» или одно «Имя:» над текстом. Коды (цвет, значки, скорость) убираем,
 // слова оставляем; «\V[n]» — значение переменной, которое событие успело поставить (vars), «\N[n]» — имя героя (actors); «\P[n]» — участник отряда, номер зависит от состава, код просто убираем
+// Имя одно в первой строке, а реплика в кавычках — во второй («Fumika Ichijo» + «"Ah…"»): это тоже говорящий, иначе склейка
+// латинских строк приклеила бы имя к реплике. Только короткая строка без знаков предложения, слова с заглавной — так
+// «Suddenly, the door.» и «Recall the memories of» остаются текстом (замер по сценам prod: имя нашлось в 86 % строк вместо 77 %)
+const NAME_ROW = /[.,!?…。、！？，:：「『"“（(♡♥~～*]/;
+const QUOTE_ROW = /^\s*[「『"“(（[]/;
 function speech(lines, name = '', vars = {}, actors = []) {
     // Как convertEscapeCharacters игры: значение переменной само может нести коды («\x1bN[14]» — ESC вместо косой, его ставит
     // скрипт события), поэтому ESC приводим к косой и подставляем \V[n] повторно, пока они появляются (предел — от самоссылки)
@@ -2604,11 +2612,18 @@ function speech(lines, name = '', vars = {}, actors = []) {
     const plain = (t) => t.replace(new RegExp('\\\\[A-Za-z]+\\[[^\\]]*\\]|' + CODE1, 'g'), '').trim();
     const rows = lines.flatMap((l) => fill(l).split(/\r?\n/));
     let who = plain(fill(name));
-    if (!who && rows.length) {
+    // Окно имени — всегда из текста, даже пустое («\nc<>») или при имени из MZ: иначе в реплике остаётся «c<>»
+    const box = rows.length ? /^\s*(?:\\[A-Za-z]+\[\d+\]\s*)*\\n[lcr]?<([^>]*)>/i.exec(rows[0]) : null;
+    if (box) { if (!who) who = plain(box[1]); rows[0] = rows[0].slice(box[0].length); }
+    if (!who && !box && rows.length) {
         let m;
-        if ((m = /^\s*(?:\\[A-Za-z]+\[\d+\]\s*)*\\n<([^>]*)>/i.exec(rows[0]))) { who = plain(m[1]); rows[0] = rows[0].slice(m[0].length); }
-        else if ((m = /^【([^】]{1,30})】\s*([\s\S]*)$/.exec(plain(rows[0])))) { who = m[1].trim(); rows[0] = m[2]; }
-        else if (rows.length > 1 && (m = /^([^\s:：「『"“（(]{1,24})[:：]$/.exec(plain(rows[0])))) { who = m[1]; rows.shift(); }
+        const r0 = plain(rows[0]);
+        const lead = r0.replace(/^[◆■●▼★☆◇□]+\s*/, '');
+        // Концовка или заголовок над текстом («BAD END 4», «【TIPS】») — не говорящий, строка остаётся в реплике (sceneCast.notName)
+        if ((m = /^【([^】]{1,30})】\s*([\s\S]*)$/.exec(r0)) && !notName(m[1])) { who = m[1].trim(); rows[0] = m[2]; }
+        else if (rows.length > 1 && (m = /^([^\s:：「『"“（(]{1,24})[:：]$/.exec(r0)) && !notName(m[1])) { who = m[1]; rows.shift(); }
+        else if (rows.length > 1 && lead && Array.from(lead).length <= 24 && lead.split(/\s+/).length <= 4 && !NAME_ROW.test(lead) && !notName(lead)
+            && /\p{L}/u.test(lead) && !/(?:^|\s)\p{Ll}/u.test(lead) && QUOTE_ROW.test(plain(rows[1]))) { who = lead; rows.shift(); }
     }
     // Строка окна кончилась посреди латинской фразы — продолжение той же фразы (окно игры узкое, плеер широкий)
     const text = rows.map(plain).reduce((out, row, i) => out + (i ? (/[A-Za-z0-9,;:'-]$/.test(out) && /^[A-Za-z0-9'"(]/.test(row) ? ' ' : '\n') : '') + row, '').replace(/^\n+|\n+$/g, '');

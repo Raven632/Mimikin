@@ -1,4 +1,4 @@
-import { test, expect, openLibrary, openGame, menu, apiGames } from '../fixtures.js';
+import { test, expect, openLibrary, openGame, menu, apiGames, emptyTrash } from '../fixtures.js';
 
 const has = async (page, title) => (await apiGames(page)).some((g) => g.title === title);
 
@@ -18,6 +18,9 @@ async function openTrash(page) {
 }
 
 test.describe('корзина', () => {
+  // Каждый тест начинает с пустой корзины: игра, застрявшая там после сбоя, ломала повтор и «Корзина пуста»
+  test.beforeEach(async ({ page }) => { await emptyTrash(page); });
+
   test('удалённую игру возвращает «Отменить» в тосте', async ({ page }) => {
     await openLibrary(page);
     await deleteGame(page, 'Dragon Post Office');
@@ -43,11 +46,15 @@ test.describe('корзина', () => {
 
   test('«Стереть» удаляет навсегда, корзина пустеет', async ({ page }) => {
     await openLibrary(page);
-    await deleteGame(page, 'Seven Keys');
+    // Повтор после сбоя: игру уже стёрли навсегда, удалять нечего — остаётся проверить, что корзина пуста
+    const erased = !(await has(page, 'Seven Keys'));
+    if (!erased) await deleteGame(page, 'Seven Keys');
     await openTrash(page);
-    await page.locator('.trash-item', { hasText: 'Seven Keys' }).locator('button', { hasText: 'Стереть' }).click();
-    await expect(page.locator('.confirm-title')).toHaveText('Стереть навсегда?');
-    await page.locator('.confirm-ok').click();
+    if (!erased) {
+      await page.locator('.trash-item', { hasText: 'Seven Keys' }).locator('button', { hasText: 'Стереть' }).click();
+      await expect(page.locator('.confirm-title')).toHaveText('Стереть навсегда?');
+      await page.locator('.confirm-ok').click();
+    }
     await expect(page.locator('.settings-panel .state-empty')).toContainText('Корзина пуста');
     expect(await has(page, 'Seven Keys')).toBe(false);
   });

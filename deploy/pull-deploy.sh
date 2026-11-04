@@ -14,6 +14,10 @@ BRANCH=${DEPLOY_BRANCH:-deploy}
 
 # Где помним коммит, который не поднялся и был откачен: его больше не выкатываем, следующий — да
 STATE_DIR=${STATE_DIR:-/var/lib/rpg-deploy}
+# Сборка с нуля занимает около 12 ГБ: меньше этого запаса — не начинаем, иначе заполним диск вместе с работающим сайтом
+MIN_FREE_GB=${DEPLOY_MIN_FREE_GB:-15}
+# Столько раз пробуем собрать один коммит, если сборку убивают (таймаут службы, перезагрузка)
+MAX_ATTEMPTS=3
 
 env_value() { grep -E "^$1=" .env 2>/dev/null | tail -n1 | cut -d= -f2- | tr -d "\"' \r" || true; }
 
@@ -52,7 +56,14 @@ main() {
     local_sha=$(git rev-parse HEAD)
     remote_sha=$(git rev-parse "origin/$BRANCH")
 
-    if [ "$local_sha" = "$remote_sha" ]; then
+    # Прошлый запуск убит посреди сборки: код уже новый, а контейнер старый. Сравнение коммитов этого не видит —
+    # помним сами: что собирали, куда откатываться и которая это попытка
+    local building=$STATE_DIR/building pending='' previous='' attempt=0
+    if [ -f "$building" ]; then read -r pending previous attempt < "$building" || true; fi
+    # Запись оборвана или коммита уже нет — откатываться некуда, считаем обычным запуском
+    if ! git cat-file -e "${previous:-none}^{commit}" 2>/dev/null; then pending=''; previous=''; attempt=0; fi
+
+    if [ "$local_sha" = "$remote_sha" ] && [ "$pending" != "$remote_sha" ]; then
         return 0
     fi
     if [ "$(cat "$STATE_DIR/failed" 2>/dev/null)" = "$remote_sha" ]; then
@@ -66,31 +77,59 @@ main() {
         return 0
     fi
 
+    # Места мало — код не трогаем и сборку не начинаем. Таймер срабатывает каждую минуту, сообщение — одно на коммит.
+    # Сборку, которую убили, продолжаем при любом месте: код уже новый, кэш от неё занят и сам не освободится
+    local free_gb docker_root
+    docker_root=$(docker info --format '{{.DockerRootDir}}' 2>/dev/null || true)
+    free_gb=$(df --output=avail -BG "${docker_root:-$REPO_DIR}" | tail -n1 | tr -dc 0-9)
+    if [ "$pending" != "$remote_sha" ] && [ "$free_gb" -lt "$MIN_FREE_GB" ]; then
+        echo "Свободно ${free_gb} ГБ, нужно ${MIN_FREE_GB}: деплой ждёт места"
+        if [ "$(cat "$STATE_DIR/low-disk" 2>/dev/null)" != "$remote_sha" ]; then
+            mkdir -p "$STATE_DIR"
+            echo "$remote_sha" > "$STATE_DIR/low-disk"
+            notify_telegram "⚠️ Обновление библиотеки до ${remote_sha:0:7} ждёт места: свободно ${free_gb} ГБ, нужно ${MIN_FREE_GB}. Сайт работает на прежней версии, обновится сам, когда место появится"
+        fi
+        return 0
+    fi
+
     # 4. Обновляемся ровно до проверенного коммита и пересобираем контейнеры. Нынешний образ — в
-    #    запас (тег :previous): не соберётся или не ответит новая версия — вернёмся на него
-    echo "Деплой ${local_sha:0:7} -> ${remote_sha:0:7}"
+    #    запас (тег :previous): не соберётся или не ответит новая версия — вернёмся на него.
+    #    После убитой сборки работает всё ещё прежний образ: откат — к нему, и запас не перезаписываем
+    local back_sha=$local_sha
+    if [ -n "$pending" ]; then back_sha=$previous; fi
+    if [ "$pending" = "$remote_sha" ]; then attempt=$((attempt + 1)); else attempt=1; fi
+    echo "Деплой ${back_sha:0:7} -> ${remote_sha:0:7} (попытка $attempt)"
     local image
     image=$(docker compose config --images | grep -- '-rpg-library$' | head -n1)
-    docker image tag "$image:latest" "$image:previous" 2>/dev/null || true
+    if [ -z "$pending" ]; then docker image tag "$image:latest" "$image:previous" 2>/dev/null || true; fi
 
     rollback() {
         local why=$1
-        echo "Откат на ${local_sha:0:7}: $why" >&2
-        mkdir -p "$STATE_DIR"
-        echo "$remote_sha" > "$STATE_DIR/failed"
-        git reset --hard --quiet "$local_sha"
+        echo "Откат на ${back_sha:0:7}: $why" >&2
+        git reset --hard --quiet "$back_sha"
         if docker image inspect "$image:previous" >/dev/null 2>&1; then
             docker image tag "$image:previous" "$image:latest"
             docker compose up -d --no-build --remove-orphans || true
         else
             docker compose up -d --build --remove-orphans || true
         fi
+        # Пометки — только теперь: убьют посреди отката, и следующий запуск его не потеряет
+        mkdir -p "$STATE_DIR"
+        echo "$remote_sha" > "$STATE_DIR/failed"
+        rm -f "$building"
         if healthy; then
-            notify_telegram "⚠️ Обновление библиотеки до ${remote_sha:0:7} $why — вернул прежнюю версию ${local_sha:0:7}, сайт работает. Следующий коммит выкатится как обычно"
+            notify_telegram "⚠️ Обновление библиотеки до ${remote_sha:0:7} $why — вернул прежнюю версию ${back_sha:0:7}, сайт работает. Следующий коммит выкатится как обычно"
         else
-            notify_telegram "🚨 Обновление до ${remote_sha:0:7} $why, и прежняя версия ${local_sha:0:7} тоже не отвечает — нужна помощь: docker logs ${image}-1"
+            notify_telegram "🚨 Обновление до ${remote_sha:0:7} $why, и прежняя версия ${back_sha:0:7} тоже не отвечает — нужна помощь: docker logs ${image}-1"
         fi
     }
+
+    if [ "$attempt" -gt "$MAX_ATTEMPTS" ]; then
+        rollback "не собралось за $MAX_ATTEMPTS попытки: сборку убивало"
+        return 0
+    fi
+    mkdir -p "$STATE_DIR"
+    echo "$remote_sha $back_sha $attempt" > "$building"
 
     git merge --ff-only --quiet "$remote_sha"
     if ! docker compose up -d --build --remove-orphans; then
@@ -101,10 +140,11 @@ main() {
         rollback "не ответило за две минуты"
         return 0
     fi
-    rm -f "$STATE_DIR/failed"
-    # Убираем за собой: без этого старые образы и кэш сборки растут бесконечно (:previous остаётся)
+    rm -f "$STATE_DIR/failed" "$STATE_DIR/low-disk" "$building"
+    # Убираем за собой: без этого старые образы и кэш сборки растут бесконечно (:previous остаётся). Кэш оставляем с запасом:
+    # при 2 ГБ вытеснялись слои зависимостей, и каждая выкладка собиралась с нуля — полчаса и 12 ГБ
     docker image prune -f >/dev/null
-    docker builder prune -f --max-used-space 2GB >/dev/null
+    docker builder prune -f --max-used-space "${BUILD_CACHE_KEEP:-20GB}" >/dev/null
     echo "Готово"
 }
 

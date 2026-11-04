@@ -9,12 +9,13 @@ const LANGUAGES = [['ru', 'Русский'], ['en', 'English'], ['de', 'Deutsch'
 // «Главная» и «Библиотека», меню «⋯» справа. Раньше над названием был девиз, по бокам — линии и ромбы:
 // около 80px украшения на каждом экране, а под шапкой ещё прилипает панель поиска. Место отдаём играм.
 // Язык, место на диске и «Выйти» — мелкой строкой внизу меню «⋯»: нужны редко
-// side — что стоит в шапке перед меню «⋯» (значок загрузок JDownloader)
-// newsCount — новости «Хочу поиграть» (новая версия, скидка): точкой с числом у вкладки «Новинки»
+// side — что стоит в шапке перед меню (значок загрузок JDownloader); toolsRef — место для глаза и «Добавить игру» от 1100 точек (Toolbar)
+// newsCount — новости «Хочу поиграть» (новая версия, скидка): точкой с числом у вкладки «Найти»
+// person — кто вошёл ({ id, name, avatar, isOwner }): его знак — кнопка меню. onPerson — открыть «Мой профиль»
 // onSecret — пятый щелчок по знаку за 2 с (см. mimicMood.click): App выплёвывает обложку и открывает «Во что поиграть?»
 // Мимик живой (mimicMood.js): мышь на знаке 160 мс — крышка вверх, над шапкой — глаза к курсору; фокус с клавиатуры
 // и палец — сразу. Сторону считаем от середины места знака (.brand-slot), а не от svg с запасом клеток
-const Header = ({ currentLang, onLangChange, t, menuItems, onLogout, view, onView, onSecret, libraryCount = 0, newsCount = 0, side, children }) => {
+const Header = ({ currentLang, onLangChange, t, menuItems, onMenuOpen, onLogout, person = null, onPerson, view, onView, onSecret, newsCount = 0, side, toolsRef, children }) => {
   const slot = useRef(null);
   const mouse = (e) => e.pointerType === 'mouse';
   return (
@@ -55,7 +56,6 @@ const Header = ({ currentLang, onLangChange, t, menuItems, onLogout, view, onVie
                 onClick={() => onView(key)}
               >
                 {label}
-                {key === 'library' && libraryCount > 0 && <span className="nav-count">{libraryCount}</span>}
                 {key === 'new' && newsCount > 0 && <span className="nav-count nav-news" data-tip={t.nav_new_news(newsCount)}>{newsCount}</span>}
               </button>
             ))}
@@ -63,8 +63,9 @@ const Header = ({ currentLang, onLangChange, t, menuItems, onLogout, view, onVie
         )}
 
         <div className="header-side">
+          <div className="header-tools" ref={toolsRef} />
           {side}
-          <HeaderMenu items={menuItems} label={t.menu_more}>
+          <HeaderMenu items={menuItems} label={t.menu_more} person={person} onPerson={onPerson} onOpen={onMenuOpen} t={t}>
             {children}
             <div className="menu-footer-row">
               <div className="menu-langs" role="group" aria-label={t.menu_language}>

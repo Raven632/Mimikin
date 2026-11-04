@@ -9,6 +9,7 @@ const { OFFLINE } = require('../config/index.js');
 const { redisClient, invalidateGamesList } = require('../utils/cache.js');
 const { stripRelease, searchNames, bestSimilarity, normTitle } = require('../utils/title.js');
 const { itchGameUrl, parseItchPage } = require('../utils/itch.js');
+const { jpegSize } = require('../utils/jpegSize.js');
 const { splitLinks, linkKey, parseRemoved } = require('../utils/links.js');
 
 // Не латиница: японский, китайский, корейский. Такие названия Steam не ищем — его выдача
@@ -124,6 +125,8 @@ class ScraperService {
 
     // Очередь для окна «Поиск данных»: что ищется сейчас (с шагами), что дальше, на паузе ли
     async queueState(limit = 30) {
+        // OFFLINE=1 — поиска нет: «ждут» значило бы, что он когда-нибудь дойдёт до них
+        if (OFFLINE) return { paused: false, current: null, left: 0, next: [] };
         const now = Date.now();
         const rows = await this.dbService.get().all(
             `SELECT id, title FROM games WHERE ready = 1 AND meta_retry_at IS NOT NULL AND meta_retry_at <= ?
@@ -138,6 +141,7 @@ class ScraperService {
     }
 
     async countDue() {
+        if (OFFLINE) return 0;
         // (на паузе — то же число: игры ждут, просто поиск стоит)
         const row = await this.dbService.get().get(
             'SELECT COUNT(*) AS n FROM games WHERE ready = 1 AND meta_retry_at IS NOT NULL AND meta_retry_at <= ?',
@@ -520,7 +524,7 @@ class ScraperService {
 
     // Страница игры на itch.io. Сервер туда напрямую не пускают (Cloudflare просит
     // JavaScript), поэтому только через ScraperAPI — кредит за страницу. Нет ключа — без itch.io.
-    // Разобранное храним сутки: окно новинок и поиск для библиотеки открывают одни и те же игры
+    // Разобранное храним сутки: вкладка «Найти» и поиск для библиотеки открывают одни и те же игры
     async fetchItchMetadata(rawUrl) {
         const url = itchGameUrl(rawUrl);
         if (!url) return null;
@@ -567,19 +571,10 @@ class ScraperService {
         }
     }
 
-    // Размер кадра читаем прямо из заголовка JPEG (маркер SOF), без лишнего процесса.
-    // Нужен, чтобы отличить настоящий скриншот от превью 400×250 и от значка под темой.
+    // Размер кадра читаем из заголовка JPEG (utils/jpegSize.js). Нужен, чтобы отличить настоящий скриншот от превью
+    // 400×250 и от значка под темой.
     jpegSize(buf) {
-        for (let i = 2; i + 9 < buf.length;) {
-            if (buf[i] !== 0xff) { i += 1; continue; }
-            const marker = buf[i + 1];
-            if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
-            const len = buf.readUInt16BE(i + 2);
-            const isSOF = marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker);
-            if (isSOF) return { height: buf.readUInt16BE(i + 5), width: buf.readUInt16BE(i + 7) };
-            i += 2 + len;
-        }
-        return { width: 0, height: 0 };
+        return jpegSize(buf);
     }
 
     // Грубый отпечаток картинки: уменьшаем до 16×16 в оттенках серого и сравниваем

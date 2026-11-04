@@ -25,11 +25,12 @@ const ConfirmDialog = ({ request, t }) => {
         <h2 id="confirm-title" className="confirm-title">{request.title}</h2>
         {request.name && <div className="confirm-name">{request.name}</div>}
         {request.text && <p id="confirm-text" className="confirm-text">{request.text}</p>}
-        <div className="confirm-actions">
+        <div className={`confirm-actions${request.otherLabel ? ' with-other' : ''}`}>
           <button type="button" className="confirm-cancel" onClick={cancel}>{request.cancelLabel || t.cancel}</button>
           <button type="button" className={`confirm-ok${request.danger ? ' danger' : ''}`} onClick={() => answer(true)}>
             {request.confirmLabel || t.confirm_ok}
           </button>
+          {request.otherLabel && <button type="button" className="confirm-other" onClick={() => answer('other')}>{request.otherLabel}</button>}
         </div>
       </div>
     </div>

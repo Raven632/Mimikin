@@ -77,6 +77,12 @@ ENV REDIS_URL=memory
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Разбор картинок для поиска и ленты — по умолчанию включён, как в docker-compose.yml: это основная часть библиотеки, а без
+# него и поиск, и лента пусты. Выключается в «Настройках», и это главнее (services/galleryModels.js). Модели закрываются
+# после простоя; порог mmap — чтобы их память уходила системе: с обычным glibc держит крупные куски у себя, и после
+# закрытия процесс занимает 600-850 МБ вместо 150-280 (замерено на всех трёх моделях)
+ENV PICTURE_PASS=1 MALLOC_MMAP_THRESHOLD_=131072
+
 # 3000 — библиотека, 3001 — игры на своём адресе (api/src/routes/play.js)
 EXPOSE 3000 3001
 VOLUME ["/games"]

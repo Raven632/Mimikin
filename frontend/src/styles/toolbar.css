@@ -125,6 +125,11 @@
 /* Списки панели — жанры, языки, сортировка: кнопка в стиле поля, окошко со строками.
    У жанров сверху поиск, у коротких списков его нет */
 .picker { position: relative; flex: 1; min-width: 180px; display: flex; }
+/* От 1100 сортировка стоит в панели рядом с «Фильтры», а списки под ней — по ширине названий, не на всю строку */
+@media (min-width: 1100px) {
+  .controls-zone > .sort-order { flex: 0 1 240px; }
+  .toolbar-filters .picker { flex: 0 1 220px; min-width: 160px; }
+}
 
 .picker .picker-btn {
   width: 100%;
@@ -135,7 +140,10 @@
   overflow: hidden;
 }
 
+.picker .picker-btn:disabled { opacity: 0.5; cursor: default; }
 .picker-btn.has-value { border-bottom-color: var(--gold); color: var(--gold-light); }
+.pic-tags-tool .picker-btn { display: inline-flex; align-items: center; gap: 8px; }
+.pic-tags-tool svg { width: 15px; height: 15px; flex-shrink: 0; }
 
 .picker-pop {
   position: absolute;
@@ -148,13 +156,13 @@
   display: flex;
   flex-direction: column;
   background: var(--bg-card);
-  border: 1px solid var(--line-window);
+  border: 1px solid rgba(201,168,76,0.6);
   border-radius: var(--radius-lg);
-  box-shadow: 0 18px 40px rgba(0,0,0,0.75);
   overflow: hidden;
 }
 
 .picker-search {
+  min-width: 0;
   margin: 8px;
   padding: 10px 12px;
   border-radius: var(--radius-sm);
@@ -171,6 +179,10 @@
 .picker-search::placeholder { color: var(--text-dim); }
 
 .picker-pop.right { left: auto; right: 0; }
+
+/* В ряду списков окошко — ровно под своей кнопкой и той же ширины: длинная строка переносится, а не сдвигает его */
+.controls-zone .picker-pop, .catalog-filters .picker-pop { left: 0; right: 0; width: auto; min-width: 0; max-width: none; }
+.controls-zone .picker-list, .catalog-filters .picker-list { max-height: 400px; }
 
 .picker-backdrop { position: fixed; inset: 0; z-index: 29; }
 
@@ -272,11 +284,49 @@
   white-space: nowrap;
 }
 
-/* «Фильтры» — только на телефоне (см. ниже). На широком экране обёртка списков невидима:
-   display: contents ставит их в общий ряд с поиском, как и раньше */
+/* «Фильтры» в панели библиотеки — на любой ширине; у «Найти» (Catalog) своя, на любой ширине (catalog.css).
+   Обёртка списков там, где кнопки нет (главная), невидима: display: contents ставит содержимое в общий ряд с поиском */
 .filters-toggle { display: none; }
+.controls-zone .filters-toggle { display: inline-flex; }
 
 .toolbar-filters { display: contents; }
+/* Списки раскрываются отдельным рядом под поиском и «Фильтры»; закрыто — их нет, и панель в один ряд */
+.controls-zone:not(.compact) .toolbar-filters { display: none; }
+.controls-zone.filters-open .toolbar-filters { display: flex; flex-wrap: wrap; gap: 10px; flex: 1 1 100%; }
+
+/* Вид кнопки «Фильтры»: ниже — в одну строку с полем поиска, одна нижняя черта, как у поля: плашка спорила с ним за внимание */
+.filters-toggle {
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+  padding: 0 14px;
+  min-height: 52px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--line-field);
+  border-radius: 0;
+  color: var(--text-dim);
+  font-family: var(--font-ui);
+  font-size: var(--fs-xs);
+  letter-spacing: 0;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s;
+}
+.filters-toggle svg { width: 18px; height: 18px; flex-shrink: 0; color: var(--gold-dim); transition: color 0.2s; }
+.filters-toggle.open, .filters-toggle.active { border-bottom-color: var(--gold); color: var(--gold-light); }
+.filters-toggle.open svg, .filters-toggle.active svg { color: var(--gold); }
+.filters-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
+.filters-count {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--gold);
+  color: var(--bg-deep);
+  font-size: var(--fs-xs);
+  line-height: 18px;
+  text-align: center;
+}
 
 .cover-toggle.active { background: rgba(201, 168, 76, 0.12); border-color: var(--gold); color: var(--gold-light); }
 
@@ -296,13 +346,6 @@
 }
 
 .upload-btn svg { width: 18px; height: 18px; flex-shrink: 0; }
-
-.progress-bar {
-  height: 6px;
-  background: var(--gold);
-  width: 0%;
-  transition: width 0.3s ease;
-}
 
 /* Оверлей перетаскивания: архив можно бросить в любое место страницы.
    pointer-events: none — оверлей только показывает, события достаются странице
@@ -386,13 +429,7 @@
 
 .search-clear svg { width: 16px; height: 16px; }
 
-@media (min-width: 701px) and (max-width: 1200px) {
-  /* Ноутбук: «Добавить игру» — значком, как «глаз», и весь ряд влезает в одну строку */
-  .controls-zone .upload-btn { min-width: 52px; flex: 0 0 52px; padding: 0; }
-  .upload-btn-text { display: none; }
-}
-
-@media (max-width: 1100px) {
+@media (max-width: 1099.98px) {
   /* Планшет и узкое окно (до 1100px): панель — как на телефоне. В ряд списки не помещались, и панель
      разваливалась на две строки, где сортировка растягивалась на 660px. Поиск и «Фильтры» — одна строка,
      списки и «глаз» раскрываются под ней; «Добавить игру» — в меню «⋯» */
@@ -400,39 +437,8 @@
   .upload-btn { display: none; }
   /* Поиск и «Фильтры» — одна строка; списки и «глаз» раскрываются под ней */
   .search-box { min-width: 0; flex: 1 1 0; }
-  .filters-toggle {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    flex: 0 0 auto;
-    padding: 0 14px;
-    min-height: 52px;
-    background: var(--surface-btn);
-    border: 1px solid transparent;
-    border-radius: var(--radius-sm);
-    color: var(--text-dim);
-    font-family: var(--font-ui);
-    font-size: var(--fs-xs);
-    letter-spacing: 0;
-    cursor: pointer;
-  }
-  .filters-toggle svg { width: 18px; height: 18px; flex-shrink: 0; }
-  .filters-toggle.open, .filters-toggle.active { border-color: var(--gold); color: var(--gold-light); }
-  .filters-toggle.open { background: rgba(201, 168, 76, 0.12); }
-  .filters-toggle:focus-visible { outline: 2px solid var(--gold); outline-offset: 3px; }
-  .filters-count {
-    min-width: 18px;
-    height: 18px;
-    padding: 0 5px;
-    border-radius: var(--radius-pill);
-    background: var(--gold);
-    color: var(--bg-deep);
-    font-size: var(--fs-xs);
-    line-height: 18px;
-    text-align: center;
-  }
+  .filters-toggle { display: inline-flex; }
   .toolbar-filters { display: none; }
-  .controls-zone.filters-open .toolbar-filters { display: flex; flex-wrap: wrap; gap: 10px; flex: 1 1 100%; }
   /* Глаз стал иконкой и больше не требует своей строки: делит ряд с кнопкой добавления */
   .cover-toggle { min-width: 52px; flex: 0 0 52px; }
   .controls-zone.filters-open .picker { flex: 1 1 0; min-width: 0; }
@@ -446,21 +452,69 @@
   .sort-box, .picker, .controls-zone.filters-open .picker { min-width: calc(50% - 5px); flex: 1 1 calc(50% - 5px); }
   /* Сортировка делит ряд с «глазом» и забирает всё, что осталось */
   .picker.sort-order, .controls-zone.filters-open .picker.sort-order { min-width: 0; flex: 1 1 0; }
+  /* «Теги картинок» — своим рядом: иначе сортировка и «глаз» оставались бы рядом с ними без места */
+  .controls-zone.filters-open .picker.pic-tags-tool { flex: 1 1 100%; }
   .controls-zone { gap: 10px; }
 }
 
-/* Главная: в панели только поиск, справа «глаз» и «Добавить игру» — жанры, языки и сортировка
+/* Главная: в панели только поиск — жанры, языки и сортировка
    в библиотеке. Поле не растягивается на весь экран */
 @media (min-width: 1101px) {
   .controls-zone.compact .search-box { flex: 0 1 560px; }
-  .controls-zone.compact .cover-toggle { margin-left: auto; }
 }
 
+
+/* Главная на компьютере: поиск — в строке шапки, отдельной строки над сценой нет. Тот же узел,
+   только вынут из потока (Toolbar, inHeader): поиск уводит в библиотеку, и поле не должно терять фокус и набранное.
+   Края считает Toolbar: слева кончаются разделы, справа начинаются значок загрузок и «⋯». Слой — как у шапки и позже
+   неё в документе: панель над шапкой, а всё, что закрывает шапку (окна, «Во что поиграть?»), закрывает и её.
+   «Глаз» и «Добавить игру» от этой ширины стоят в самой шапке, на всех вкладках (Toolbar, портал в .header-tools): в библиотеке
+   они отнимали 250 точек у сортировки, а в «Найти» глаза не было совсем */
+@media (min-width: 1100px) {
+  .controls-zone.in-header {
+    position: fixed;
+    top: calc(10px + var(--safe-top));
+    left: calc(var(--header-left, 40%) + 16px);
+    right: calc(var(--header-right, 70px) + 8px);
+    z-index: 100;
+    height: 40px;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: nowrap;
+    gap: 8px;
+  }
+  .controls-zone.in-header::before { content: none; }
+  .controls-zone.in-header .toolbar-filters { display: contents; }
+  /* Поле уступает первым: ниже этой ширины подпись в нём уже не читается */
+  .controls-zone.in-header .search-box { flex: 0 1 340px; min-width: 120px; }
+  .controls-zone.in-header .search-box input,
+  .header-tools .cover-toggle,
+  .header-tools .upload-btn { height: 40px; min-height: 40px; }
+  .controls-zone.in-header .search-box input { padding: 0 8px 0 32px; font-size: var(--fs-sm); }
+  .controls-zone.in-header .search-box.has-value input { padding-right: 36px; }
+  .controls-zone.in-header .search-icon { left: 8px; width: 16px; height: 16px; }
+  .controls-zone.in-header .search-clear { right: 2px; width: 32px; height: 32px; }
+  .header-tools { display: flex; align-items: center; gap: 8px; }
+  .header-tools .cover-toggle { flex: 0 0 40px; min-width: 40px; margin-left: 0; padding: 0; }
+  .header-tools .upload-btn { display: flex; flex: 0 0 auto; min-width: 0; padding: 0 14px; gap: 8px; border-color: var(--gold-dim); font-size: var(--fs-xs); }
+  .header-tools .upload-btn svg { width: 16px; height: 16px; }
+  /* Панель в шапке места в потоке не занимает: воздух над сценой — у самой страницы */
+  .content.view-home { padding-top: 20px; }
+}
+
+/* На ширине ноутбука — значком, как «глаз»: шапка и так тесная */
+@media (min-width: 1100px) and (max-width: 1200px) {
+  .header-tools .upload-btn { flex-basis: 40px; padding: 0; }
+  .upload-btn-text { display: none; }
+}
 
 @keyframes drop-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* Стрелка покачивается вверх-вниз: сразу видно, что страница ждёт файл */
 @keyframes drop-bob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
 
-/* На странице «Новинки» строки поиска нет (у «Новинок» свой поиск); сама панель — с загрузкой — на месте */
+/* На странице «Найти» строки поиска нет (у «Найти» свой поиск); сама панель — с загрузкой — на месте */
 .controls-zone.bar-hidden { display: none; }

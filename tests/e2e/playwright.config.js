@@ -10,6 +10,8 @@ export default defineConfig({
   expect: { timeout: 7_000 },
   workers: 1,
   fullyParallel: false,
+  // test.only, забытый в коммите, молча отключил бы остальные тесты — на CI это ошибка
+  forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: [['list'], ['html', { outputFolder: './report/html', open: 'never' }]],
   use: {

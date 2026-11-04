@@ -10,7 +10,11 @@ const scenes = require('./galleryScenes.js');
 const advScenes = require('./galleryAdv.js');
 const extern = require('./galleryExtern.js');
 const sceneLangs = require('./sceneLangs.js');
+const sceneCast = require('./sceneCast.js');
 const vision = require('./galleryVision.js');
+const tags = require('./galleryTags.js');
+const { analysisOn, turnedOff, tooSmall, modelsOnDisk, modelsFailed, stopDownloads, clearFailure, FrameTurns } = require('./galleryModels.js');
+const { option } = require('../utils/options.js');
 const { readGameJson, readGameText, mediaKey, forgetGame } = require('../utils/gameData.js');
 const { dhash: imagePrint } = require('../utils/imagehash.js');
 
@@ -118,6 +122,9 @@ const OPAQUE_LAYER = 0.35;
 const OPAQUE_BASE = 0.9;
 const NARROW = 0.4;   // доля столбцов с рисунком: у персонажа в рост — полоса посередине (28 %), у позы сцены — 47 % и шире
 const THUMB_WIDTH = 360;
+const FEED_FRAMES = 4;       // рисунков игры в ленте подряд
+const FEED_TRY = 6;          // запасных кадров альбома, если у первых скрытые теги
+const FEED_BLOCKED = 0.1;    // от такой доли кадров с тегами про детей игры в ленте нет
 const LANG_MEMO = 8;        // игр, у которых таблица языков сцен держится в памяти
 const LANG_WAIT = 4000;     // мс: дольше сцена таблицу не ждёт, показывает оригинал, а таблица достроится для следующей
 const THUMB_TIMEOUT_MS = 30 * 1000;
@@ -281,8 +288,19 @@ const inBackground = (fn) => background.run(true, fn);
 // кадр уходит 0,7 КБ вместо 4 КБ. Числа единичного вектора малы (до ~0,4), поэтому масштаб 200, а не 127
 const EMBED_SCALE = 200;
 const EMBED_SIZE = 512;
-// Сколько игр держит поиск в памяти (вектора одной игры — до нескольких МБ)
-const SEARCH_GAMES = 40;
+// Сколько игр держит поиск в памяти: векторы всех кадров игры — до нескольких МБ, вся библиотека — десятки
+const SEARCH_GAMES = 200;
+// Сколько поиск не спрашивали, когда эти векторы отпускаем: около 0,7 КБ на кадр, на большой библиотеке — сотня МБ, почти
+// столько же, сколько сам сервер на простое. Прочитать файлы заново — секунды на первый запрос
+const SEARCH_IDLE_MS = 30 * 60 * 1000;
+// Тег считается у игры от стольких кадров: на одном кадре это чаще ошибка разметчика
+const TAG_MIN_FRAMES = 2;
+const INSIDE_TAGS = 12;
+// Картинок одной игры в начале выдачи, дальше — после остальных игр: иначе одна игра с сотней похожих кадров занимает
+// всю страницу
+const SEARCH_CAP = 4;
+// Разбор кадров для поиска (picturePass) пишет файл раз в столько кадров: перезапуск сервера продолжит с места
+const PASS_SAVE = 50;
 const packEmbed = (e) => Buffer.from(Int8Array.from(e, (x) => Math.max(-127, Math.min(127, Math.round(x * EMBED_SCALE))))).toString('base64');
 const unpackEmbed = (b64) => new Int8Array(Buffer.from(b64, 'base64'));
 const cosine = (a, b) => { let d = 0; for (let i = 0; i < a.length; i++) d += a[i] * b[i]; return d / (EMBED_SCALE * EMBED_SCALE); };
@@ -910,22 +928,31 @@ class GalleryService {
         this.langMemo = new Map();     // игра → { dir, table } — языки сцен (sceneLangs()), не больше LANG_MEMO игр
         this.langPending = new Map();  // `${игра}|${папка сценариев}` → сборка таблицы, которая идёт
         this.langWait = LANG_WAIT;     // сколько сцена ждёт таблицу языков, мс
+        this.castMemo = new Map();     // игра → { dir, table } — кто в сценах (cast()), не больше LANG_MEMO игр
+        this.castPending = new Map();  // `${игра}|${папка сценариев}` → расчёт, который идёт
         this.thumbLane = lane(3);
         this.viewWaitMax = VIEW_WAIT_MAX;    // оригинал крупнее — человек не ждёт копию
         this.viewDirMax = VIEW_DIR_MAX;     // потолок view/ одной игры
         this.viewMinFree = VIEW_MIN_FREE;   // свободного места, ниже которого копий для просмотра не пишем
         this.sceneLane = lane(Math.max(2, Math.min(4, os.cpus().length)));
         this.vision = vision;
+        this.tags = tags;
         this.forgotten = new Map();     // игра → сколько раз оглавление сбрасывали (фоновый проход по старой — не в счёт)
+        this.frameTurns = new FrameTurns();
     }
 
     setDependencies({ gamesDir, mediaDir }) {
         this.gamesDir = gamesDir;
         this.mediaDir = mediaDir || path.join(gamesDir, '_media');
         this.vision.setDependencies?.({ mediaDir: this.mediaDir });
+        this.tags.setDependencies?.({ mediaDir: this.mediaDir });
     }
 
     visionPath(id) { return path.join(this.mediaDir, id, 'gallery-vision.json'); }
+    // Разбор всех кадров для поиска по картинкам (picturePass): векторы CLIP и теги разметчика — каждый в своём файле,
+    // их пишут две очереди, которые идут каждая сама по себе
+    picturesPath(id) { return path.join(this.mediaDir, id, 'gallery-pictures.json'); }
+    tagsPath(id) { return path.join(this.mediaDir, id, 'gallery-tags.json'); }
     cloudPath(id) { return path.join(this.mediaDir, id, 'gallery-cloud.json'); }
 
     // Ответы распознавания по кадрам; от других подписей или модели — не в счёт
@@ -961,11 +988,14 @@ class GalleryService {
     // Фоном, по одной картинке: распознать кадры альбомов CG, у которых ответа ещё нет, и пересобрать оглавление
     // (остальное у пересборки — из кэшей, секунды). На игру — один проход за раз; новых ответов нет — без пересборки,
     // так что кадр, который не распознать (миниатюра не вышла), не гоняет сборку по кругу
-    visionPass(id) {
+    // progress — очередь разбора, которая начала проход (runPictures). Фоновый проход считает кадры по очереди с разбором
+    // (pictureTurn); начатый открытием галереи — сразу: его ответов ждёт человек
+    visionPass(id, progress = null) {
         this.visionRuns = this.visionRuns || new Map();
         if (this.visionRuns.has(id)) return this.visionRuns.get(id);
-        if (!this.vision.available) return Promise.resolve();
+        if (!this.vision.available || turnedOff()) return Promise.resolve();
         const gen = this.forgotten.get(id) || 0;
+        const turn = progress || background.getStore() ? (fn) => this.pictureTurn(fn) : (fn) => fn();
         const run = inBackground(async () => {
             const index = await this.cached(id);
             if (!index) return;
@@ -988,10 +1018,17 @@ class GalleryService {
                 if (known[key] !== undefined && (embeds[key] || known[key] === VISION_FAILED)) return known[key];
                 const had = known[key];
                 let score = VISION_FAILED;
-                const thumb = await this.thumb(id, rel).catch(() => null);
+                let thumb = null;
+                const seen = {};
+                const went = await turn(async () => {
+                    if (progress?.stopped || turnedOff()) return false;
+                    thumb = await this.thumb(id, rel).catch(() => null);
+                    if (thumb) { try { score = await this.vision.score(thumb, seen); } catch { score = VISION_FAILED; } }
+                    return true;
+                });
+                // Разбор выключили, пока кадр ждал очереди: как будто модели нет — готовое сохраняем, дальше не считаем
+                if (!went) return undefined;
                 if (thumb) {
-                    const seen = {};
-                    try { score = await this.vision.score(thumb, seen); } catch { score = VISION_FAILED; }
                     if (seen.embed) { embeds[key] = packEmbed(seen.embed); if (had !== undefined) filled++; }
                     if (score === null || score === undefined) return had === undefined ? undefined : had;
                 }
@@ -1006,6 +1043,7 @@ class GalleryService {
                 ...(index.visionProbe || []).map((files) => ({ files, enough: VISION_PROMOTE, probe: true }))];
             let stop = false;
             for (const { files, enough, probe } of lists) {
+                if (turnedOff()) break;
                 for (const rel of files) {
                     const x = await judge(rel);
                     // Распознать нечем (нет модели) — дальше не пробуем, но уже распознанное сохраняем
@@ -1035,74 +1073,649 @@ class GalleryService {
         return run;
     }
 
-    // Поиск по картинкам: кадры игр, у которых есть вектор (visionPass), по близости к вектору запроса. Только по
-    // переданным играм; игры без ответов распознавания в поиске просто не участвуют. Файл ответов читаем, только
-    // если он изменился (по времени записи): в нём тысячи векторов. В памяти на игру — один сплошной массив
-    // (не тысяча мелких) и не больше SEARCH_GAMES игр сразу; из результатов держим только лучшие, а не все кадры
-    async searchPictures(query, ids, limit = 60) {
+    // Файл разбора кадров: { model, items: { ключ кадра (visionKey): строка } }; от другой модели — пусто. Пустая строка —
+    // кадр не прочитать, второй раз не пробуем. broken — файл есть, но не читается
+    async passLoad(file, model) {
+        let text;
+        try { text = await fsp.readFile(file, 'utf8'); } catch { return { items: {} }; }
+        try {
+            const c = JSON.parse(text);
+            return { items: c && c.model === model && c.items ? c.items : {} };
+        } catch { return { items: {}, broken: true }; }
+    }
+
+    // Кадры для поиска по картинкам: все кадры альбомов CG, у анимации — первый (остальные — тот же рисунок в движении). У
+    // других альбомов со сценой (ролики-сцены) — обложка и первый кадр каждой сцены: иначе фильтр по тегам в «Сценах» их не
+    // видел бы. Наборы Spine и Live2D — без кадров: у них файлы не картинки
+    pictureFrames(index) {
+        const out = new Set();
+        for (const a of index.albums) {
+            if (a.kind === 'cg' && !a.panel) for (const f of a.anim ? a.files.slice(0, 1) : a.files) out.add(f);
+            else if (a.script && a.kind !== 'dialogue' && !a.spine && !a.live2d) {
+                for (const f of [a.cover || a.files[0], ...(a.scenes || []).map((g) => a.files[g.f?.[0]])]) if (f) out.add(f);
+            }
+        }
+        return [...out];
+    }
+
+    // Фоном, по кадру: вектор CLIP (kind 'embeds') или теги разметчика ('tags') для каждого кадра поиска, у которого их
+    // ещё нет. Распознавание (visionPass) смотрит 1–3 кадра альбома, а поиску нужны все: вариант сцены, где появилось
+    // нужное, — отдельный кадр. Готовые векторы распознавания берём, а не считаем заново. Файл — каждые PASS_SAVE кадров
+    // (перезапуск сервера продолжит с места) и в конце, уже без кадров, которых в оглавлении больше нет
+    // progress — очередь, которая начала проход (runPictures): запомнена до первого await. Искать её здесь нельзя: пока читаются
+    // файлы игры, разбор могут выключить, и проход не увидел бы, что его остановили (и дошёл бы до конца с открытой моделью)
+    async picturePass(id, kind, progress = null) {
+        const tagging = kind === 'tags';
+        const model = tagging ? this.tags.version : this.vision.embedModel;
+        const index = await this.cached(id);
+        if (!index) return;
+        const gen = this.forgotten.get(id) || 0;
+        // Игры уже нет на диске (корзина, полка) — ничего не пишем
+        const home = path.join(this.gamesDir, id);
+        const here = () => fsp.access(home).then(() => true, () => false);
+        if (!(await here())) return;
+        const root = (await this.contentRoot(id)) || home;
+        const out = tagging ? this.tagsPath(id) : this.picturesPath(id);
+        const { items } = await this.passLoad(out, model);
+        const ready = tagging ? {} : (await this.visionLoad(id)).embeds;
+        const all = await this.scenesOf(id);
+        const keep = new Set();
+        let fresh = 0;
+        let done = true;
+        const save = async (prune) => {
+            const kept = prune ? Object.fromEntries(Object.entries(items).filter(([k]) => keep.has(k))) : items;
+            try {
+                await fsp.writeFile(`${out}.tmp`, JSON.stringify({ model, items: kept }));
+                await fsp.rename(`${out}.tmp`, out);
+            } catch (e) { console.warn(`[Галерея] ${id}: разбор картинок не записан: ${e.message}`); }
+        };
+        for (const rel of this.pictureFrames(index)) {
+            // Игру обновили или убрали, пока шёл проход, — кадры уже другие
+            if ((this.forgotten.get(id) || 0) !== gen) return;
+            // Разбор выключили: готовое сохраняем (ниже), как будто модели не стало
+            if (progress?.stopped) { done = false; break; }
+            const layers = rel.startsWith(CG_PREFIX) ? all[rel.slice(CG_PREFIX.length)] : null;
+            const size = layers ? 0 : await fsp.stat(path.join(root, realFile(rel))).then((st) => st.size, () => 0);
+            const key = this.visionKey(rel, size, layers);
+            keep.add(key);
+            if (progress) progress.done++;
+            if (items[key] !== undefined) continue;
+            if (ready[key]) items[key] = ready[key];
+            else {
+                // Миниатюры нет — файл не прочитать (пустая строка, второй раз не пробуем); миниатюра не вышла (ffmpeg не
+                // успел на загруженном сервере) или модель ошиблась — не записываем: попробуем в следующий проход
+                let thumb;
+                let value;
+                const went = await this.pictureTurn(async () => {
+                    // Пока кадр ждал очереди, разбор могли выключить, а игру — обновить: считать уже незачем
+                    if (progress?.stopped || (this.forgotten.get(id) || 0) !== gen) return false;
+                    thumb = await this.thumb(id, rel).catch(() => undefined);
+                    if (!thumb) return true;
+                    if (tagging) value = await this.tags.tag(thumb).catch(() => undefined);
+                    else {
+                        const seen = {};
+                        const score = await this.vision.score(thumb, seen).catch(() => undefined);
+                        value = score === null ? null : seen.embed ? packEmbed(seen.embed) : undefined;
+                    }
+                    return true;
+                });
+                if (!went) { done = false; break; }
+                if (thumb === null) {
+                    // Папку игры убрали (корзина, полка), пока шёл проход, — кадры не «нечитаемые», а просто не здесь
+                    if (!(await here())) return;
+                    value = '';
+                }
+                // Модели нет (не скачалась, выключена) — дальше не пробуем, но готовое сохраняем
+                if (value === null) { done = false; break; }
+                if (value === undefined) { done = false; continue; }
+                items[key] = value;
+            }
+            if (++fresh % PASS_SAVE === 0) await save(false);
+        }
+        if ((this.forgotten.get(id) || 0) !== gen) return;
+        if (fresh || (done && Object.keys(items).length !== keep.size)) await save(done);
+    }
+
+    // Один кадр фонового разбора. Тихо (picture_speed) — один на всю машину, с миниатюрой: две очереди сразу плюс потоки
+    // разметчика держали ноутбук горячим часами. Настройка читается на каждый кадр: новая действует со следующего. Сюда —
+    // только фон: всё, что просил человек (галерея, поиск, «Похожие»), зовёт модели напрямую и этой очереди не ждёт.
+    // Первое скачивание модели идёт внутри хода, и это нарочно: файлы качаются по одному, а счётчик кадров — меньшее из двух
+    // очередей — всё равно стоит, пока модели нет хотя бы у одной из них
+    pictureTurn(fn) {
+        return option('picture_speed') === 'fast' ? fn() : this.frameTurns.run(fn);
+    }
+
+    // Галерея готова к первому открытию: игру добавили или обновили — оглавление и миниатюры делаются сразу, фоном, а человек
+    // не ждёт сборку, когда нажмёт «Галерея». Если он успел раньше, state() подхватит ту же сборку. Игра с готовым оглавлением
+    // пропускается (обход всей библиотеки при старте — только чтение). По одной; first — новую или обновлённую игру следующей.
+    // Включается вместе с разбором кадров (galleryModels, analysisOn): на dev и в тестах сборка идёт по открытию, как раньше
+    prepare(ids, { first = false } = {}) {
+        if (!analysisOn()) return;
+        const rest = (this.prepareIds || []).filter((id) => !ids.includes(id));
+        this.prepareIds = first ? [...ids, ...rest] : [...rest, ...ids];
+        if (!this.preparing) this.runPrepare();
+    }
+
+    // Папку положили мимо приложения (копируют руками, вотчер увидел её сразу): галерея из недокопированной папки осталась бы
+    // неполной навсегда. Ждём, пока число файлов и их размер перестанут меняться; час не дождались — соберётся при открытии
+    async prepareWhenQuiet(id) {
+        if (!analysisOn()) return;
+        let last = null;
+        for (let i = 0; i < 120; i++) {
+            const now = await this.folderPrint(id);
+            if (now && now === last) { this.prepare([id], { first: true }); return; }
+            last = now;
+            await new Promise((resolve) => setTimeout(resolve, this.quietMs ?? 30 * 1000));
+        }
+    }
+
+    // Отпечаток папки игры: файлов и байт. null — папки или картинок в ней ещё нет
+    async folderPrint(id) {
+        if (!(await this.contentRoot(id))) return null;
+        const home = path.join(this.gamesDir, id);
+        const list = await fsp.readdir(home, { recursive: true, withFileTypes: true }).catch(() => null);
+        if (!list) return null;
+        let files = 0;
+        let bytes = 0;
+        for (const e of list) {
+            if (!e.isFile()) continue;
+            files++;
+            bytes += await fsp.stat(path.join(e.parentPath, e.name)).then((st) => st.size, () => 0);
+        }
+        return `${files}:${bytes}`;
+    }
+
+    async runPrepare() {
+        this.preparing = true;
+        try {
+            while (this.prepareIds.length) {
+                const id = this.prepareIds.shift();
+                await inBackground(async () => {
+                    // Сборка, начатая до обновления игры, индекс не запишет (runBuild) — дождаться её и собрать заново
+                    await this.building.get(id)?.promise;
+                    if (await this.cached(id)) return;
+                    // Папки нет (убрали в корзину, пока ждала очереди) или в ней нечего смотреть: пустое оглавление осталось бы навсегда
+                    if (!(await this.contentRoot(id))) return;
+                    await this.build(id).promise;
+                    const index = await this.cached(id);
+                    if (!index) return;
+                    this.prewarm(id, index);
+                    if (index.scripts) await this.sceneLangs(id, index).catch(() => {});
+                    if (index.scripts) await this.cast(id, index).catch(() => {});
+                }).catch((e) => console.warn(`[Галерея] ${id}: подготовка: ${e.message}`));
+            }
+        } finally {
+            this.preparing = false;
+        }
+    }
+
+    // Разбор кадров библиотеки (picturePass) — две очереди, векторы и теги, каждая сама по себе: векторы быстрые (~0,35 с
+    // на кадр с миниатюрой) и проходят библиотеку за часы, теги (~1,2 с) — за сутки-двое. Игры — по порядку ids
+    // (недавние первыми); first — новую или пересобранную игру взять следующей. Включается переключателем в «Настройках»,
+    // а не трогали его — PICTURE_PASS (образ и docker-compose.yml): на dev и в тестах — нет, разбор всей библиотеки надолго
+    // занимает ядра машины: одно в тихом режиме, до трёх в быстром (picture_speed, pictureTurn)
+    queuePictures(ids, { first = false } = {}) {
+        if (!analysisOn() || !this.vision.available) return;
+        this.pictureQueue = this.pictureQueue || { embeds: { ids: [], done: 0, total: 0 }, tags: { ids: [], done: 0, total: 0 } };
+        for (const kind of ['embeds', 'tags']) {
+            const q = this.pictureQueue[kind];
+            // Пересобранную игру — вперёд, даже если она уже в очереди или идёт сейчас: кадры у неё теперь другие. Кадры
+            // считаем у каждого нового прохода: та, что идёт сейчас, пройдёт ещё раз
+            const add = ids.filter((id) => !q.ids.includes(id) && (first || id !== q.game));
+            q.ids = first ? [...ids, ...q.ids.filter((id) => !ids.includes(id))] : [...q.ids, ...add];
+            q.counting = (q.counting || Promise.resolve()).then(async () => {
+                for (const id of add) { const index = await this.cached(id).catch(() => null); q.total += index ? this.pictureFrames(index).length : 0; }
+            });
+            if (!q.running) this.runPictures(kind);
+        }
+    }
+
+    async runPictures(kind) {
+        const q = this.pictureQueue[kind];
+        q.running = true;
+        try {
+            // Пока ждали подсчёт, могли добавить игру — тогда дальше
+            do {
+                while (q.ids.length) {
+                    q.game = q.ids.shift();
+                    // Галерею могли собрать при выключенном разборе: тогда её кадры ещё не распознаны, а пересборки не будет
+                    // (оглавление уже есть) — меню и экраны так и лежали бы в CG. Уже распознанное judge отдаёт сразу
+                    if (kind === 'embeds') await this.visionPass(q.game, q);
+                    await inBackground(() => this.picturePass(q.game, kind, q)).catch((e) => console.warn(`[Галерея] ${q.game}: разбор картинок: ${e.message}`));
+                }
+                q.game = null;
+                await q.counting;
+            } while (q.ids.length);
+            if (!q.stopped) console.log(`[Галерея] разбор картинок (${kind === 'tags' ? 'теги' : 'векторы'}) закончен: ${q.done} кадров`);
+        } finally {
+            q.running = false;
+            q.game = null;
+            // Кадр, начатый в миг выключения, мог открыть модель заново — закрыть и её, а не ждать простоя
+            if (q.stopped && !analysisOn()) (kind === 'tags' ? this.tags : this.vision).hold?.unload();
+        }
+    }
+
+    // Разбор выключили: очереди пусты, идущий проход сохраняет готовое и выходит на следующем кадре, скачивание обрывается,
+    // модели закрываются, как только досчитают текущий кадр. Счётчики — с нуля: включат — кадры считаем заново
+    stopPictures() {
+        for (const q of Object.values(this.pictureQueue || {})) { q.stopped = true; q.ids = []; }
+        this.pictureQueue = null;
+        this.prepareIds = [];
+        stopDownloads();
+        this.vision.hold?.unload();
+        this.tags.hold?.unload();
+    }
+
+    // Сменили скорость разбора: число потоков разметчика задано при открытии сессии. Кадр на ходу досчитает, следующий откроет
+    // её с новым числом; у CLIP поток всегда один
+    pictureSpeedChanged() {
+        this.tags.hold?.unload();
+    }
+
+    // Включили снова: прежняя неудача не считается, человек просит попробовать ещё раз
+    retryPictures() {
+        clearFailure();
+        this.vision.failedAt = 0;
+        this.tags.failedAt = 0;
+    }
+
+    // Строка «Разбор картинок» в «Настройках»: on, state и что к нему относится. Порядок важен: идущее скачивание честнее
+    // разбора, который ждёт модель, а неудача с моделью — честнее «всё разобрано»
+    async analysisStatus() {
+        const on = analysisOn();
+        const pass = this.pictureStatus();
+        const { have, total, downloading } = await modelsOnDisk(this.mediaDir);
+        const out = { on };
+        if (!this.vision.available) out.state = 'unavailable';
+        else if (!on) out.state = 'off';
+        else if (downloading) out.state = 'downloading';
+        else if (modelsFailed()) out.state = 'failed';
+        else if (pass) out.state = 'analysing';
+        else out.state = have ? 'done' : 'waiting';
+        if (tooSmall()) out.small = true;
+        if (on && this.vision.available) out.speed = option('picture_speed');
+        if (downloading) out.download = { done: have, total };
+        if (pass) out.frames = { done: Math.min(pass.embeds.done, pass.tags.done), total: Math.max(pass.embeds.total, pass.tags.total) };
+        return out;
+    }
+
+    // Сколько кадров библиотеки уже разобрано: { embeds: { done, total }, tags: { done, total } } — пока очередь идёт; null — не идёт
+    pictureStatus() {
+        const q = this.pictureQueue;
+        if (!q || (!q.embeds.running && !q.tags.running)) return null;
+        const part = (x) => ({ done: Math.min(x.done, x.total), total: x.total, running: !!x.running });
+        return { embeds: part(q.embeds), tags: part(q.tags) };
+    }
+
+    // Векторы и теги игры для поиска: векторы — из ответов распознавания (1–3 кадра альбома) и из разбора всех кадров,
+    // одним сплошным массивом (не тысяча мелких); теги — по тегу список кадров и уверенностей. Кадров, которых в
+    // оглавлении больше нет (пересобрали после ответа), здесь уже нет: сверка — раз на сборку, а не на каждый поиск
+    // (оглавлений в памяти — двадцать, игр в поиске — сотня). Файлы перечитываем, только если они или оглавление
+    // изменились (по времени записи): в них тысячи векторов. Недописанный файл не запоминаем
+    async searchData(id) {
         this.searchMemo = this.searchMemo || new Map();
-        // С запасом на повторы и пропавшие из оглавления кадры, которые отсеются ниже
-        const pool = Math.min(limit * 4, 600);
-        const best = [];
+        clearTimeout(this.searchIdle);
+        this.searchIdle = setTimeout(() => this.searchMemo.clear(), this.searchIdleMs ?? SEARCH_IDLE_MS);
+        this.searchIdle.unref?.();
+        const stamp = (f) => fsp.stat(f).then((st) => st.mtimeMs, () => 0);
+        const own = `${await stamp(this.visionPath(id))},${await stamp(this.picturesPath(id))},${await stamp(this.tagsPath(id))}`;
+        if (own === '0,0,0') return null;
+        const at = `${own},${await stamp(this.indexPath(id))}`;
+        let mine = this.searchMemo.get(id);
+        if (!mine || mine.at !== at || mine.version !== this.vision.version) {
+            const seen = await this.visionLoad(id);
+            const pass = await this.passLoad(this.picturesPath(id), this.vision.embedModel);
+            const tagged = await this.passLoad(this.tagsPath(id), this.tags.version);
+            // Кадр — одной строкой: ключ из разбора (он по нынешнему файлу), а ответ распознавания — только если разбора у
+            // кадра нет. Прежний ключ того же кадра (файл заменили — другой размер) иначе стал бы второй строкой без тегов
+            const embeds = {};
+            const have = new Set();
+            for (const [k, v] of Object.entries(pass.items)) if (v) { embeds[k] = v; have.add(k.split('\n')[0]); }
+            for (const [k, v] of Object.entries(seen.embeds)) if (v && !have.has(k.split('\n')[0])) { embeds[k] = v; have.add(k.split('\n')[0]); }
+            // Оглавления нет (собирается) — сверять не с чем, показываем как есть
+            const known = (await this.cached(id).catch(() => null)) ? this.memo.get(id)?.files : null;
+            const keys = Object.keys(embeds).filter((k) => embeds[k]);
+            const mat = new Int8Array(keys.length * EMBED_SIZE);
+            const names = [];
+            const byTag = new Map();
+            for (const key of keys) {
+                const v = unpackEmbed(embeds[key]);
+                const name = key.split('\n')[0];
+                if (v.length !== EMBED_SIZE || (known && !known.has(name))) continue;
+                const row = names.length;
+                mat.set(v, row * EMBED_SIZE);
+                names.push(name);
+                const pairs = tagged.items[key] ? tags.unpack(tagged.items[key]) : [];
+                for (let k = 0; k < pairs.length; k += 2) {
+                    let list = byTag.get(pairs[k]);
+                    if (!list) byTag.set(pairs[k], (list = { rows: [], ps: [] }));
+                    list.rows.push(row);
+                    list.ps.push(pairs[k + 1]);
+                }
+            }
+            // Списки по тегу — сплошными массивами: на всю библиотеку их миллионы
+            for (const [k, list] of byTag) byTag.set(k, { rows: Int32Array.from(list.rows), ps: Uint8Array.from(list.ps) });
+            mine = { at, version: this.vision.version, names, mat: mat.subarray(0, names.length * EMBED_SIZE), byTag };
+            this.searchMemo.delete(id);
+            if (!seen.broken && !pass.broken && !tagged.broken) this.searchMemo.set(id, mine);
+        } else {
+            // Недавно использованная — в конец очереди
+            this.searchMemo.delete(id);
+            this.searchMemo.set(id, mine);
+        }
+        if (this.searchMemo.size > SEARCH_GAMES) this.searchMemo.delete(this.searchMemo.keys().next().value);
+        return mine;
+    }
+
+    // Поиск по картинкам: кадры игр по близости к вектору запроса. groups — понятия запроса тегами разметчика
+    // (galleryTags.concepts): к близости прибавляется средняя по понятиям уверенность тегов кадра (0…1), так что кадр с
+    // нужными тегами встаёт выше, а CLIP решает среди равных и там, где разметчик ещё не прошёл. Только по переданным
+    // играм; игры без векторов просто не участвуют. Порядок: сначала до SEARCH_CAP лучших картинок каждой игры, по очкам,
+    // потом остальные, тоже по очкам, — так одна игра с сотней похожих кадров не занимает страницу. У каждой игры — свой
+    // список лучших (не общий пул: его одна игра заняла бы целиком), длиной с запасом на копии: тогда первые from + limit
+    // мест одни и те же при любом from, и «Ещё» не повторяет картинок. from — с какой картинки; exclude — { game, file }:
+    // сама картинка в «Похожих» (и её копии в той же игре); hide — имена тегов: кадры с ними не показываем (скрытые теги,
+    // server.js). → { rows, games, more }
+    async searchPictures(query, ids, limit = 60, { from = 0, groups = [], exclude = null, hide = [] } = {}) {
+        const want = from + limit;
+        const sure = Math.ceil(tags.SURE * 255);
+        const tagNames = hide.length ? await this.tags.list().catch(() => null) : null;
+        const hidden = tagNames ? hide.map((n) => tagNames.indexOf(n)).filter((t) => t >= 0) : [];
+        const keep = want * 2 + SEARCH_CAP;
+        const lists = [];
         let covered = 0;
         for (const id of ids) {
-            let mtime = 0;
-            try { mtime = (await fsp.stat(this.visionPath(id))).mtimeMs; } catch { continue; }
-            let mine = this.searchMemo.get(id);
-            if (!mine || mine.mtime !== mtime || mine.version !== this.vision.version) {
-                const { embeds, broken } = await this.visionLoad(id);
-                const keys = Object.keys(embeds);
-                const mat = new Int8Array(keys.length * EMBED_SIZE);
-                const names = [];
-                for (const key of keys) {
-                    const v = unpackEmbed(embeds[key]);
-                    if (v.length !== EMBED_SIZE) continue;
-                    mat.set(v, names.length * EMBED_SIZE);
-                    names.push(key.split('\n')[0]);
-                }
-                mine = { mtime, version: this.vision.version, names, mat: mat.subarray(0, names.length * EMBED_SIZE) };
-                // Недописанный файл не запоминаем: следующий поиск прочтёт его заново
-                this.searchMemo.delete(id);
-                if (!broken) this.searchMemo.set(id, mine);
-            } else {
-                // Недавно использованная — в конец очереди
-                this.searchMemo.delete(id);
-                this.searchMemo.set(id, mine);
-            }
-            if (this.searchMemo.size > SEARCH_GAMES) this.searchMemo.delete(this.searchMemo.keys().next().value);
-            if (!mine.names.length) continue;
+            const mine = await this.searchData(id);
+            if (!mine || !mine.names.length) continue;
             covered++;
-            const { names, mat } = mine;
+            const { names, mat, byTag } = mine;
+            // Теги: на кадр — сумма по понятиям лучшей уверенности тегов понятия (0…255 на понятие)
+            let boost = null;
+            if (groups.length && byTag.size) {
+                boost = new Uint16Array(names.length);
+                const top = new Uint8Array(names.length);
+                for (const g of groups) {
+                    top.fill(0);
+                    for (const t of g) {
+                        const list = byTag.get(t);
+                        if (list) for (let k = 0; k < list.rows.length; k++) if (list.ps[k] > top[list.rows[k]]) top[list.rows[k]] = list.ps[k];
+                    }
+                    for (let r = 0; r < names.length; r++) boost[r] += top[r];
+                }
+            }
+            const skip = new Set();
+            for (const t of hidden) {
+                const list = byTag.get(t);
+                if (list) for (let k = 0; k < list.rows.length; k++) if (list.ps[k] >= sure) skip.add(list.rows[k]);
+            }
+            const score = new Float32Array(names.length).fill(-Infinity);
             for (let r = 0; r < names.length; r++) {
+                if (skip.has(r)) continue;
                 const o = r * EMBED_SIZE;
                 let dot = 0;
                 for (let i = 0; i < EMBED_SIZE; i++) dot += query[i] * mat[o + i];
-                const score = dot / EMBED_SCALE;
-                if (best.length >= pool && score <= best[best.length - 1].score) continue;
-                // Список по убыванию, не длиннее pool: вставка на своё место
-                let at = best.length;
-                while (at > 0 && best[at - 1].score < score) at--;
-                best.splice(at, 0, { game: id, file: names[r], v: mat.subarray(o, o + EMBED_SIZE), score });
-                if (best.length > pool) best.pop();
+                const near = dot / EMBED_SCALE;
+                if (exclude && exclude.game === id && (names[r] === exclude.file || near > 0.97)) continue;
+                score[r] = near + (boost ? boost[r] / 255 / groups.length : 0);
             }
+            const rows = Array.from(names.keys()).filter((r) => score[r] > -Infinity).sort((a, b) => score[b] - score[a]).slice(0, keep);
+            lists.push({ id, at: 0, accepted: [], rows: rows.map((r) => ({ game: id, file: names[r], v: mat.subarray(r * EMBED_SIZE, (r + 1) * EMBED_SIZE), score: score[r] })) });
             // Игр сотня, векторов тысячи: между играми отдаём цикл событий другим запросам
             await new Promise((resolve) => setImmediate(resolve));
         }
-        // Кадр мог пропасть из оглавления после пересборки (ответы живут дольше) — такой не показываем
-        const seen = new Set();
-        const rows = [];
-        for (const r of best) {
-            if (rows.length >= limit) break;
-            const k = `${r.game}\n${r.file}`;
-            if (seen.has(k)) continue;
-            seen.add(k);
-            if (await this.knows(r.game, r.file) === false) continue;
-            // Один и тот же рисунок в игре лежит под разными именами (вариант без текста, склейка и исходник) — одним
-            // результатом: вектора почти совпали (косинус > 0,97)
-            if (rows.some((x) => x.game === r.game && cosine(x.v, r.v) > 0.97)) continue;
-            rows.push({ game: r.game, file: r.file, v: r.v, score: Math.round(r.score * 1000) / 1000 });
+        // Следующий кадр игры, не копия уже взятых: один и тот же рисунок лежит под разными именами (вариант без текста,
+        // склейка и исходник) — одним результатом: вектора почти совпали (косинус > 0,97)
+        const next = (g) => {
+            while (g.at < g.rows.length) {
+                const r = g.rows[g.at++];
+                if (g.accepted.some((x) => cosine(x.v, r.v) > 0.97)) continue;
+                g.accepted.push(r);
+                return r;
+            }
+            return null;
+        };
+        const order = [];
+        for (const g of lists) for (let k = 0; k < SEARCH_CAP; k++) { const r = next(g); if (!r) break; order.push(r); }
+        order.sort((a, b) => b.score - a.score);
+        if (order.length <= want) {
+            // Остальные кадры игр — по очкам: берём лучший из голов списков, пока не набрали страницу и ещё один (more)
+            const later = [];
+            const heads = new Map();
+            for (const g of lists) { const r = next(g); if (r) heads.set(g, r); }
+            while (order.length + later.length <= want && heads.size) {
+                let best = null;
+                for (const [g, r] of heads) if (!best || r.score > best[1].score) best = [g, r];
+                later.push(best[1]);
+                const r = next(best[0]);
+                if (r) heads.set(best[0], r); else heads.delete(best[0]);
+            }
+            order.push(...later);
         }
-        return { rows: rows.map(({ v, ...r }) => r), games: covered };
+        return { rows: order.slice(from, want).map(({ v, score, ...r }) => ({ ...r, score: Math.round(score * 1000) / 1000 })), games: covered, more: order.length > want };
+    }
+
+    // Теги для показа — из тех же данных, что и поиск: только уверенные (tags.SURE) и говорящие о картинке (tags.shown).
+    // Теги кадра (просмотр, кнопка «Теги»): [{ tag, p }], самые уверенные первыми
+    async frameTags(id, file) {
+        const names = await this.tags.list();
+        const mine = names ? await this.searchData(id) : null;
+        const row = mine ? mine.names.indexOf(file) : -1;
+        const sure = Math.ceil(tags.SURE * 255);
+        const out = [];
+        if (row < 0) return out;
+        for (const [t, list] of mine.byTag) {
+            if (!this.tags.shown(names[t])) continue;
+            // Номера кадров в списке тега идут по порядку — ищем делением пополам
+            let lo = 0;
+            let hi = list.rows.length;
+            while (lo < hi) { const mid = (lo + hi) >> 1; if (list.rows[mid] < row) lo = mid + 1; else hi = mid; }
+            if (list.rows[lo] === row && list.ps[lo] >= sure) out.push({ tag: names[t], p: Math.round((list.ps[lo] / 255) * 100) / 100 });
+        }
+        return out.sort((a, b) => b.p - a.p || (a.tag < b.tag ? -1 : 1));
+    }
+
+    // Теги всей игры (фильтр галереи): { files, tags: [{ tag, f: [номера в files] }] }. Отбор и числа считает окно: они
+    // зависят от вкладки и уже выбранных тегов, и запрос на каждое нажатие тут ни к чему
+    async gameTags(id) {
+        const names = await this.tags.list();
+        const mine = names ? await this.searchData(id) : null;
+        if (!mine?.byTag.size) return { files: [], tags: [] };
+        const sure = Math.ceil(tags.SURE * 255);
+        const out = [];
+        for (const [t, list] of mine.byTag) {
+            if (!this.tags.shown(names[t])) continue;
+            const f = [];
+            for (let k = 0; k < list.rows.length; k++) if (list.ps[k] >= sure) f.push(list.rows[k]);
+            if (f.length) out.push({ tag: names[t], f });
+        }
+        return { files: mine.names, tags: out };
+    }
+
+    // Сводка тегов игры: тег → сколько кадров с ним (только уверенные и показываемые), frames — сколько кадров размечено.
+    // Читает один файл тегов, без векторов: нужна сразу всей библиотеке (libraryTags), а векторы всех игр — сотни мегабайт.
+    // Заново — когда разбор дописал файл. null — игра ещё не размечена
+    async tagSummary(id) {
+        this.tagMemo = this.tagMemo || new Map();
+        const at = await fsp.stat(this.tagsPath(id)).then((st) => st.mtimeMs, () => 0);
+        if (!at) { this.tagMemo.delete(id); return null; }
+        const hit = this.tagMemo.get(id);
+        if (hit?.at === at) return hit.frames ? hit : null;
+        const names = await this.tags.list();
+        if (!names) return null;
+        const { items, broken } = await this.passLoad(this.tagsPath(id), this.tags.version);
+        const sure = Math.ceil(tags.SURE * 255);
+        const counts = new Map();
+        let frames = 0;
+        for (const value of Object.values(items)) {
+            if (!value) continue;
+            frames++;
+            const pairs = tags.unpack(value);
+            for (let k = 0; k < pairs.length; k += 2) if (pairs[k + 1] >= sure) counts.set(pairs[k], (counts.get(pairs[k]) || 0) + 1);
+        }
+        const mine = { at, frames, tags: new Map([...counts].filter(([t]) => this.tags.shown(names[t])).map(([t, n]) => [names[t], n])) };
+        // Недописанный файл не запоминаем
+        if (broken) this.tagMemo.delete(id); else this.tagMemo.set(id, mine);
+        return frames ? mine : null;
+    }
+
+    // Есть ли среди этих игр хоть одна с файлом тегов: для вопроса «показывать ли фильтр» сами теги читать незачем
+    async anyTagged(ids) {
+        for (const id of ids) {
+            if (await fsp.stat(this.tagsPath(id)).then(() => true, () => false)) return true;
+        }
+        return false;
+    }
+
+    // Теги кадров всей библиотеки для фильтра игр (Библиотека, «Теги картинок»): имена — один раз, у игры — пары номер имени
+    // и число кадров: так ответ в разы меньше. Тег на одном кадре не считаем: чаще это ошибка разметчика, а не то, что в игре
+    // есть. hide — скрытые теги (Настройки): фильтру они не нужны. → { covered, tags, games: { id: [номер, кадров, …] } }
+    async libraryTags(ids, { hide = [] } = {}) {
+        const names = new Map();
+        const games = {};
+        for (const id of ids) {
+            const mine = await this.tagSummary(id).catch(() => null);
+            if (!mine) continue;
+            const row = [];
+            for (const [tag, n] of mine.tags) {
+                if (n < TAG_MIN_FRAMES || hide.includes(tag)) continue;
+                if (!names.has(tag)) names.set(tag, names.size);
+                row.push(names.get(tag), n);
+            }
+            games[id] = row;
+            // Игр сотня, файлы большие: между играми отдаём цикл событий другим запросам
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        return { covered: Object.keys(games).length, tags: [...names.keys()], games };
+    }
+
+    // Альбомы игры для ленты: по альбому CG — кадры, которые можно показать, сначала обложка. Варианты одного рисунка лежат в
+    // одном альбоме, поэтому он даёт ленте один кадр (у «россыпи» каждый файл — свой рисунок). Только кадры, которые разметчик
+    // видел: лента показывает сама, без запроса, и должна знать, что в кадре. Не берём фон без людей и кадры с тегами про детей;
+    // у такого кадра не берём и весь альбом (варианты того же рисунка разметчик мог пропустить), а если их много среди кадров
+    // CG с людьми — остальные про тех же героев, и игры в ленте нет совсем. Анимации — нет:
+    // это другой вид показа. t — теги кадра, для скрытых (они — в настройках и меняются без файла). Заново, когда разбор
+    // дописал файл или игру пересобрали. null — игра ещё не размечена
+    async feedAlbums(id) {
+        this.feedMemo = this.feedMemo || new Map();
+        const stamp = (f) => fsp.stat(f).then((st) => st.mtimeMs, () => 0);
+        const own = await stamp(this.tagsPath(id));
+        if (!own) { this.feedMemo.delete(id); return null; }
+        const at = `${own},${await stamp(this.indexPath(id))}`;
+        const hit = this.feedMemo.get(id);
+        if (hit?.at === at) return hit.albums;
+        const names = await this.tags.list();
+        const index = names ? await this.cached(id).catch(() => null) : null;
+        if (!index) return null;
+        const { items, broken } = await this.passLoad(this.tagsPath(id), this.tags.version);
+        const sure = Math.ceil(tags.SURE * 255);
+        const good = new Map();
+        const bad = new Set();
+        for (const [key, value] of Object.entries(items)) {
+            if (!value) continue;
+            const pairs = tags.unpack(value);
+            const t = [];
+            for (let k = 0; k < pairs.length; k += 2) if (pairs[k + 1] >= sure) t.push(pairs[k]);
+            const name = key.split('\n')[0];
+            if (t.some((x) => this.tags.blocked(names[x]))) bad.add(name);
+            else if (!t.some((x) => names[x] === 'no_humans')) good.set(name, Uint16Array.from(t));
+        }
+        const cg = index.albums.filter((a) => a.kind === 'cg' && !a.panel);
+        const people = new Set(cg.flatMap((a) => a.files).filter((f) => good.has(f) || bad.has(f))).size;
+        const albums = [];
+        if (bad.size < people * FEED_BLOCKED) {
+            for (const a of cg) {
+                if (a.anim || (!a.loose && a.files.some((f) => bad.has(f)))) continue;
+                const list = [...new Set([a.cover, ...a.files])].filter((f) => good.has(f) && !bad.has(f)).map((file) => ({ file, t: good.get(file) }));
+                const size = { w: a.w || 0, h: a.h || 0 };
+                if (a.loose) for (const f of list) albums.push({ ...size, frames: [f] });
+                else if (list.length) albums.push({ ...size, frames: list.slice(0, FEED_TRY) });
+            }
+        }
+        // Недописанный файл не запоминаем
+        if (broken) this.feedMemo.delete(id); else this.feedMemo.set(id, { at, albums });
+        return albums;
+    }
+
+    // Лента картинок: у каждой размеченной игры — до per разных рисунков, равномерно по игре, каждый раз с другого места. Игра
+    // с одним рисунком в ленту не идёт: главе нечего показать. hide — скрытые теги. → [{ id, frames: [{ file, w, h }] }]
+    async feedGames(ids, { hide = [], per = FEED_FRAMES } = {}) {
+        const names = hide.length ? await this.tags.list().catch(() => null) : null;
+        const hidden = new Set(names ? hide.map((n) => names.indexOf(n)).filter((t) => t >= 0) : []);
+        const out = [];
+        for (const id of ids) {
+            const albums = await this.feedAlbums(id).catch(() => null);
+            const list = [];
+            const taken = new Set();   // один файл бывает в двух альбомах
+            for (const a of albums || []) {
+                const f = a.frames.find((x) => !taken.has(x.file) && !x.t.some((t) => hidden.has(t)));
+                if (f) { taken.add(f.file); list.push({ file: f.file, w: a.w, h: a.h }); }
+            }
+            if (list.length >= 2) {
+                const n = Math.min(per, list.length);
+                const step = list.length / n;
+                const shift = Math.random() * step;
+                out.push({ id, frames: Array.from({ length: n }, (_, k) => list[Math.min(list.length - 1, Math.floor(k * step + shift))]) });
+            }
+            // Игр сотня: между играми отдаём цикл событий другим запросам
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        return out;
+    }
+
+    // «Что на картинках» (окно игры): теги, которые отличают эту игру. Просто самые частые у всех одни и те же (грудь, нагота),
+    // поэтому доля кадров игры умножается на редкость тега в библиотеке. hide — скрытые теги: человек просил их не показывать.
+    // → { frames, tags: [{ tag, n }] }, тегов до INSIDE_TAGS
+    async gameInside(id, ids, { hide = [] } = {}) {
+        const mine = await this.tagSummary(id);
+        if (!mine) return { frames: 0, tags: [] };
+        const seen = new Map();
+        let covered = 0;
+        for (const other of ids) {
+            const s = await this.tagSummary(other).catch(() => null);
+            if (!s) continue;
+            covered++;
+            for (const [tag, n] of s.tags) if (n >= TAG_MIN_FRAMES) seen.set(tag, (seen.get(tag) || 0) + 1);
+            await new Promise((resolve) => setImmediate(resolve));
+        }
+        const score = (tag, n) => (n / mine.frames) * Math.log((covered + 1) / (seen.get(tag) || 1));
+        const top = [...mine.tags].filter(([tag, n]) => n >= TAG_MIN_FRAMES && !hide.includes(tag)).sort((a, b) => score(b[0], b[1]) - score(a[0], a[1]) || (a[0] < b[0] ? -1 : 1));
+        return { frames: mine.frames, tags: top.slice(0, INSIDE_TAGS).map(([tag, n]) => ({ tag, n })) };
+    }
+
+    // Поиск по своей картинке: вектор присланного файла. Файл — во временной папке и только на время подсчёта; ffmpeg выбирает
+    // разбор по содержимому, поэтому тип проверен заранее (server.js). → packEmbed: окно шлёт его обратно за каждой страницей
+    // (uploadedVector), и серверу нечего помнить. null — считать нечем (модель выключена); не читается — исключение
+    async imageVector(data) {
+        const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'mimikin-picture-'));
+        try {
+            const file = path.join(dir, 'picture');
+            await fsp.writeFile(file, data);
+            const seen = {};
+            await this.vision.score(file, seen);
+            return seen.embed ? packEmbed(seen.embed) : null;
+        } finally {
+            await fsp.rm(dir, { recursive: true, force: true });
+        }
+    }
+
+    // Вектор из запроса «Ещё картинки»: только нужной длины, иначе null
+    uploadedVector(packed) {
+        const v = typeof packed === 'string' && packed.length <= 1000 ? unpackEmbed(packed) : null;
+        return v?.length === EMBED_SIZE ? Float32Array.from(v, (x) => x / EMBED_SCALE) : null;
+    }
+
+    // Вектор кадра для «Похожих»: из разобранного, а нет — посчитать сразу (миниатюра и CLIP — доли секунды). null — кадра
+    // нет в оглавлении или его не прочитать
+    async frameVector(id, rel) {
+        if (await this.knows(id, rel) === false) return null;
+        const mine = await this.searchData(id);
+        const r = mine ? mine.names.indexOf(rel) : -1;
+        if (r >= 0) return Float32Array.from(mine.mat.subarray(r * EMBED_SIZE, (r + 1) * EMBED_SIZE), (x) => x / EMBED_SCALE);
+        const thumb = await this.thumb(id, rel).catch(() => null);
+        if (!thumb) return null;
+        const seen = {};
+        await this.vision.score(thumb, seen).catch(() => null);
+        return seen.embed ? Float32Array.from(seen.embed) : null;
     }
 
     // ffprobe — отдельным методом: в тестах его подменяют
@@ -1600,11 +2213,13 @@ class GalleryService {
     // Игру обновили, поставили патч или вернули прежнюю версию — оглавление устарело
     async forget(id) {
         this.forgotten.set(id, (this.forgotten.get(id) || 0) + 1);
+        this.onForget?.(id);
         const root = await this.contentRoot(id).catch(() => null);
         if (root) forgetGame(root);
         this.memo.delete(id);
         this.soundMemo.delete(id);
         this.langMemo.delete(id);
+        this.castMemo.delete(id);
         this.sceneMemo?.delete(id);
         this.searchMemo?.delete(id);
         await fsp.rm(this.indexPath(id), { force: true });
@@ -1663,6 +2278,7 @@ class GalleryService {
         if (index) {
             this.prewarm(id, index);
             if (index.scripts) this.sceneLangs(id, index).catch(() => {});
+            if (index.scripts) this.cast(id, index).catch(() => {});
             return { state: 'ready', ...(await this.withRigCovers(id, index)) };
         }
         const job = this.build(id);
@@ -1680,6 +2296,7 @@ class GalleryService {
     }
 
     async runBuild(id, job) {
+        const gen = this.forgotten.get(id) || 0;
         const root = await this.contentRoot(id);
         const index = { v: INDEX_VERSION, builtAt: Date.now(), screen: { w: 816, h: 624 }, counts: {}, albums: [] };
         if (root) {
@@ -3140,6 +3757,8 @@ class GalleryService {
                 console.warn(`[Галерея] ${id}: ffprobe не ответил про ${probeFailed} роликов — они пока «Видео», соберу заново через час`);
             }
         }
+        // Игру обновили, пока шла сборка: это оглавление уже про старые файлы, его не пишем
+        if ((this.forgotten.get(id) || 0) !== gen) return null;
         const visionPending = !!index.visionMissing;
         delete index.visionMissing;
         await fsp.mkdir(path.dirname(this.indexPath(id)), { recursive: true });
@@ -3147,6 +3766,8 @@ class GalleryService {
         await fsp.writeFile(tmp, JSON.stringify(index));
         await fsp.rename(tmp, this.indexPath(id));
         this.memo.delete(id);
+        // Поиск по репликам (sceneLines.js) — по новым сценариям; сам поиск про галерею не знает
+        if (this.onBuilt) setImmediate(() => this.onBuilt(id));
         // Склейки названы по слоям: пересборка меняет часть имён, и первое открытие такого кадра склеивалось на лету (≈1 с чёрного
         // экрана). Прогрев делается раз за запуск сервера, поэтому игру, которую уже открывали, греем снова — фоном, сборку не держит
         if (this.warmed && this.warmed.delete(id)) setImmediate(() => this.prewarm(id, index));
@@ -3736,6 +4357,60 @@ class GalleryService {
         return wanted;
     }
 
+    // Кто в сценах (services/sceneCast.js): ряд имён над «Сценами» и «Диалогами» и кто в каждой плитке. Как sceneLangs:
+    // лежит рядом со сценариями (cast.json), новая сборка галереи — новая таблица; другая CAST_VERSION — считаем заново.
+    // Говорящих даёт тот же speech(), что и плеер, — подпись плитки и ряд не расходятся с тем, что видно в сцене. Нет сценариев — null
+    async cast(id, index = null) {
+        index = index || await this.cached(id);
+        if (!index || !index.scripts) return null;
+        const dir = index.scripts;
+        const hit = this.castMemo.get(id);
+        if (hit && hit.dir === dir) return hit.table;
+        const tag = `${id}|${dir}`;
+        if (this.castPending.has(tag)) return this.castPending.get(tag);
+        const job = (async () => {
+            const file = path.join(this.mediaDir, id, dir, 'cast.json');
+            let table = await this.readJson(file);
+            if (!table || table.v !== sceneCast.CAST_VERSION) {
+                const tabs = { scenes: [], dialogue: [] };
+                for (const a of index.albums) {
+                    if (!a.script) continue;
+                    // Сцены-гости альбома — в файлах «ключ\nn»; ключ строки — как у плитки (SceneList): «ключ\nn» и у первой
+                    for (let n = 0; n < (Array.isArray(a.scenes) && a.scenes.length ? a.scenes.length : 1); n++) {
+                        const data = await this.readJson(this.scriptPath(id, dir, n ? `${a.key}\n${n}` : a.key));
+                        const says = [];
+                        for (const x of Array.isArray(data?.steps) ? data.steps : []) {
+                            if (x.k !== 'say') continue;
+                            // Имена героев, которые сцена задала сама, — поверх Actors.json, как в плеере
+                            const actors = x.a ? Object.assign([...(data.actors || [])], x.a) : data.actors || [];
+                            let sp = null;
+                            try { sp = scenes.speech(x.l || [], x.n || '', x.v || {}, actors); } catch { /* строка без разбора — не считаем */ }
+                            if (sp && sp.text) says.push(sp.who);
+                        }
+                        tabs[a.kind === 'dialogue' ? 'dialogue' : 'scenes'].push({ key: `${a.key}\n${n}`, says });
+                    }
+                }
+                // Первый в отряде в начале игры — кандидат в главные герои (sceneCast прячет его, если он в половине сцен)
+                const root = await this.contentRoot(id);
+                let leader = '';
+                if (root) {
+                    const lead = (await this.system(root).catch(() => ({}))).partyMembers?.[0];
+                    const actors = lead ? await readGameJson(root, path.join(root, 'data', 'Actors.json')).catch(() => null) : null;
+                    leader = (Array.isArray(actors) && actors[lead]?.name) || '';
+                }
+                table = sceneCast.build(tabs, leader);
+                // Без mkdir: галерею тем временем пересобрали, папки нет — заново её создавать незачем
+                await fsp.writeFile(file, JSON.stringify(table)).catch(() => {});
+            }
+            if (this.castMemo.size >= LANG_MEMO) this.castMemo.delete(this.castMemo.keys().next().value);
+            this.castMemo.set(id, { dir, table });
+            return table;
+        })().catch((e) => { console.warn(`[Галерея] ${id}: кто в сценах — не посчиталось: ${e.message}`); return null; })
+            .finally(() => this.castPending.delete(tag));
+        this.castPending.set(tag, job);
+        return job;
+    }
+
     // Сцена для плеера: { files, steps } — файлы альбома и шаги с готовым текстом (реплика { who, text } без кодов).
     // translate(строки) → Map(оригинал → перевод), если игру переводит Mimikin: реплики идут в перевод, как в игре.
     // opts (want, ui, known, mt, client — server.js) включает выбор языка: переводы из игры и Mimikin, язык по цепочке
@@ -4105,3 +4780,4 @@ module.exports.videoAlpha = videoAlpha;
 module.exports.videoType = videoType;
 module.exports.decrypt = decrypt;
 module.exports.inBackground = inBackground;
+module.exports.SEARCH_GAMES = SEARCH_GAMES;

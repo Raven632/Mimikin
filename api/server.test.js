@@ -1,15 +1,25 @@
+// Текст в stdout тестового файла ломает запускатель: Node разбирает этот поток как свои сообщения, и строка с кириллицей или
+// эмодзи, пришедшая одним куском с сообщением, даёт «Unable to deserialize cloned data» и срывает весь файл (то в CI, то нет,
+// как повезёт с кусками). Журнал приложения поэтому идёт в stderr. Ставим до загрузки приложения
+console.log = console.info = console.debug = console.error;
+
 const test = require('node:test');
+
 const assert = require('node:assert');
+
 // Настоящий fetch — до всех подмен в тестах (MyJDownloader ходит на свой поддельный сервер)
 const nativeFetch = globalThis.fetch;
 
 // 1. Правильный импорт мидлвары (она обычная функция)
 const { requireAuth } = require('./src/routes/auth.js');
+
 const dbService = require('./src/db/database.js');
+
 const { isSafeSegment } = require('./src/utils/validate.js');
 
 // 2. Правильный импорт скрапера (это ЭКЗЕМПЛЯР КЛАССА, импортируем целиком)
 const scraperService = require('./src/services/scraper.js');
+
 // Имя куки задаётся через .env (в dev оно своё — auth_token_dev),
 // поэтому тест обязан спрашивать его там же, где код, а не писать строку руками
 const COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'auth_token';
@@ -17,96 +27,132 @@ const COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'auth_token';
 // Тесты не тратят кредиты ScraperAPI и не трогают его дневной счётчик: ключ из окружения
 // (в контейнере dev он настоящий) убираем. Тесты, которым он нужен, ставят свой и подменяют fetch
 delete process.env.SCRAPER_API_KEY;
+
+// Входы по устройствам (utils/sessions.js) — во временной базе в памяти, настоящую не трогаем
+async function withSessionsDb(t) {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE users (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '');
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);`);
+  const prev = { db: dbService.db, legacyUntil: dbService.legacyUntil, token: dbService.sessionToken };
+  dbService.db = db;
+  dbService.legacyUntil = 0;
+  t.after(async () => { Object.assign(dbService, { db: prev.db, legacyUntil: prev.legacyUntil, sessionToken: prev.token }); await db.close(); });
+  return db;
+}
+
+// Один проход requireAuth с подделанными req/res: чем ответил и что выставил
+async function passAuth(cookies, method = 'GET') {
+  const req = { method, cookies };
+  const res = { cookies: [], code: null, status(code) { this.code = code; return { json() {} }; }, cookie(...args) { this.cookies.push(args); } };
+  let nextCalled = false;
+  await requireAuth(req, res, () => { nextCalled = true; });
+  return { req, res, nextCalled };
+}
+
 // И не качают модель распознавания картинок галереи (85 МБ): тест распознавания подменяет её сам
 process.env.GALLERY_VISION = '0';
 
-// ============================================================================
-// requireAuth tests (Проверка авторизации)
-// ============================================================================
-
-test('requireAuth: GET/POST без куки возвращает 401', () => {
-  const req = { method: 'GET', cookies: {} };
-  let statusCode;
-  let payload;
-  let nextCalled = false;
-
-  const res = {
-    status(code) {
-      statusCode = code;
-      return { json(body) { payload = body; } };
-    }
-  };
-
-  requireAuth(req, res, () => { nextCalled = true; });
-
-  assert.strictEqual(nextCalled, false, 'next() не должен вызываться');
-  assert.strictEqual(statusCode, 401, 'Ожидается HTTP 401');
-  assert.ok(payload && payload.error, 'Должен быть текст ошибки');
+test('requireAuth: GET/POST без куки возвращает 401', async (t) => {
+  await withSessionsDb(t);
+  for (const method of ['GET', 'POST']) {
+    const { res, nextCalled } = await passAuth({}, method);
+    assert.strictEqual(nextCalled, false, 'next() не должен вызываться');
+    assert.strictEqual(res.code, 401, 'Ожидается HTTP 401');
+  }
 });
 
-test('requireAuth: запрос с неверным токеном возвращает 401', () => {
-  const req = { method: 'POST', cookies: { [COOKIE_NAME]: 'WRONG_TOKEN_123' } };
-  let statusCode;
-  let nextCalled = false;
-
-  const res = {
-    status(code) {
-      statusCode = code;
-      return { json() {} };
-    }
-  };
-
-  requireAuth(req, res, () => { nextCalled = true; });
-
+test('requireAuth: запрос с неверным токеном возвращает 401', async (t) => {
+  await withSessionsDb(t);
+  const { res, nextCalled } = await passAuth({ [COOKIE_NAME]: 'WRONG_TOKEN_123' });
   assert.strictEqual(nextCalled, false, 'next() не должен вызываться при неверном токене');
-  assert.strictEqual(statusCode, 401, 'Ожидается HTTP 401');
+  assert.strictEqual(res.code, 401, 'Ожидается HTTP 401');
 });
 
-test('requireAuth: запрос с правильным токеном пропускается', (t) => {
-  const originalToken = dbService.sessionToken;
+test('requireAuth: вход этого устройства пропускается, в базе лежит только хэш; просроченный и стёртый — нет', async (t) => {
+  const db = await withSessionsDb(t);
+  const sessions = require('./src/utils/sessions.js');
+  const made = await sessions.create(sessions.OWNER);
+  assert.match(made.token, /^[0-9a-f]{64}$/);
+  assert.match(made.id, /^[0-9a-f]{16}$/);
+  const row = await db.get('SELECT * FROM sessions');
+  assert.ok(!JSON.stringify(row).includes(made.token), 'сам токен в базу не пишется');
+  // Два чтения часов: между ними может пройти миллисекунда
+  assert.ok(Math.abs(row.expires_at - row.created_at - 30 * 24 * 3600e3) < 1000, 'срок — 30 дней от входа, как у прежней куки');
+
+  const ok = await passAuth({ [COOKIE_NAME]: made.token }, 'POST');
+  assert.strictEqual(ok.nextCalled, true, 'Запрос с валидным токеном должен проходить');
+  assert.deepStrictEqual(ok.req.person, { id: 'owner', sid: made.id, isOwner: true, mustChange: false, rights: { request: true, download: true, upload: true, view: true } });
+  assert.deepStrictEqual(ok.res.cookies, [], 'кука при обычном входе не меняется');
+
+  const old = await sessions.create(sessions.OWNER, { expiresAt: Date.now() - 1 });
+  assert.strictEqual((await passAuth({ [COOKIE_NAME]: old.token })).res.code, 401, 'срок вышел');
+  // Просроченные убираются при следующем входе
+  await sessions.create(sessions.OWNER);
+  assert.strictEqual(await db.get('SELECT 1 FROM sessions WHERE id = ?', [old.id]), undefined);
+
+  await sessions.end(made.id);
+  assert.strictEqual((await passAuth({ [COOKIE_NAME]: made.token })).res.code, 401, 'стёртый вход');
+});
+
+test('requireAuth: прежняя кука (ключ сессии) годится только в окне и тут же меняется на вход устройства', async (t) => {
+  const db = await withSessionsDb(t);
   dbService.sessionToken = 'test_token_123';
-  t.after(() => { dbService.sessionToken = originalToken; });
+  const until = Date.now() + 3600e3;
+  dbService.legacyUntil = until;
+  const ok = await passAuth({ [COOKIE_NAME]: 'test_token_123' });
+  assert.strictEqual(ok.nextCalled, true);
+  assert.strictEqual(ok.res.cookies.length, 1, 'новая кука выставлена');
+  const [name, value, options] = ok.res.cookies[0];
+  assert.strictEqual(name, COOKIE_NAME);
+  assert.match(value, /^[0-9a-f]{64}$/);
+  assert.strictEqual(options.httpOnly, true);
+  assert.ok(options.maxAge > 3590e3 && options.maxAge <= 3600e3, 'кука живёт до конца окна');
+  const row = await db.get('SELECT * FROM sessions');
+  assert.deepStrictEqual([row.user_id, row.expires_at, ok.req.person.sid], ['owner', until, row.id]);
+  // Новая кука — обычный вход, старая рядом по-прежнему обменивается (другое устройство)
+  assert.strictEqual((await passAuth({ [COOKIE_NAME]: value })).nextCalled, true);
 
-  const req = { method: 'POST', cookies: { [COOKIE_NAME]: 'test_token_123' } };
-  const res = {};
-  let nextCalled = false;
-
-  requireAuth(req, res, () => { nextCalled = true; });
-
-  assert.strictEqual(nextCalled, true, 'Запрос с валидным токеном должен проходить');
+  dbService.legacyUntil = Date.now() - 1;
+  const late = await passAuth({ [COOKIE_NAME]: 'test_token_123' });
+  assert.deepStrictEqual([late.nextCalled, late.res.code, late.res.cookies], [false, 401, []], 'окно закрыто');
+  assert.strictEqual((await passAuth({ [COOKIE_NAME]: value })).nextCalled, true, 'обмененный вход окно не трогает');
 });
 
-test('requireAuth: пустой токен сервера (до init) не пропускает пустую куку', (t) => {
-  const originalToken = dbService.sessionToken;
+test('requireAuth: пустой ключ сервера (до init) не пропускает пустую куку', async (t) => {
+  await withSessionsDb(t);
   dbService.sessionToken = '';
-  t.after(() => { dbService.sessionToken = originalToken; });
-
-  const req = { method: 'GET', cookies: { [COOKIE_NAME]: '' } };
-  let statusCode;
-  let nextCalled = false;
-  const res = { status(code) { statusCode = code; return { json() {} }; } };
-
-  requireAuth(req, res, () => { nextCalled = true; });
-
-  assert.strictEqual(nextCalled, false, 'next() не должен вызываться');
-  assert.strictEqual(statusCode, 401, 'Ожидается HTTP 401');
+  dbService.legacyUntil = Date.now() + 3600e3;
+  for (const cookie of ['', 'anything']) {
+    const { res, nextCalled } = await passAuth({ [COOKIE_NAME]: cookie });
+    assert.strictEqual(nextCalled, false, 'next() не должен вызываться');
+    assert.strictEqual(res.code, 401, 'Ожидается HTTP 401');
+  }
 });
 
-test('requireAuth: старый захардкоженный fallback-токен больше не работает', () => {
-  const req = { method: 'GET', cookies: { [COOKIE_NAME]: 'fallback_secret_key_for_dev' } };
-  let statusCode;
-  let nextCalled = false;
-  const res = { status(code) { statusCode = code; return { json() {} }; } };
-
-  requireAuth(req, res, () => { nextCalled = true; });
-
+test('requireAuth: старый захардкоженный fallback-токен больше не работает', async (t) => {
+  await withSessionsDb(t);
+  dbService.legacyUntil = Date.now() + 3600e3;
+  const { res, nextCalled } = await passAuth({ [COOKIE_NAME]: 'fallback_secret_key_for_dev' });
   assert.strictEqual(nextCalled, false, 'next() не должен вызываться');
-  assert.strictEqual(statusCode, 401, 'Ожидается HTTP 401');
+  assert.strictEqual(res.code, 401, 'Ожидается HTTP 401');
 });
 
-// ============================================================================
-// isSafeSegment tests (Защита id игры от "." / ".." / слэшей)
-// ============================================================================
+test('входы: смена пароля стирает все, кроме этого; чужие люди не задеты', async (t) => {
+  const db = await withSessionsDb(t);
+  const sessions = require('./src/utils/sessions.js');
+  await db.run("INSERT INTO users (id) VALUES ('uabc')");
+  const [a, b, c] = [await sessions.create('owner'), await sessions.create('owner'), await sessions.create('uabc')];
+  const gone = await sessions.endAllFor('owner', a.id);
+  assert.deepStrictEqual(gone, [b.id]);
+  assert.deepStrictEqual((await db.all('SELECT id FROM sessions ORDER BY id')).map((r) => r.id).sort(), [a.id, c.id].sort());
+  assert.deepStrictEqual(await sessions.endAllFor('owner', a.id), []);
+  assert.strictEqual((await sessions.findById(c.id)).userId, 'uabc');
+  assert.strictEqual(await sessions.findById('../etc'), null);
+  assert.strictEqual(await sessions.find(c.id), null, 'публичный id — не токен');
+});
 
 test('isSafeSegment: отбивает опасные значения', () => {
   for (const bad of ['', '.', '..', '../x', 'a/b', '/etc', 'x/..', undefined, null, 42]) {
@@ -119,10 +165,6 @@ test('isSafeSegment: пропускает реальные имена папок
     assert.strictEqual(isSafeSegment(good), true, `Должен пропустить: ${good}`);
   }
 });
-
-// ============================================================================
-// findRJCode tests (Поиск RJ-кода в файлах)
-// ============================================================================
 
 const fsp = require('fs').promises;
 
@@ -137,10 +179,6 @@ test('titleFromFolder: всё после номера версии — служ�
   assert.strictEqual(t('Lantern.Keeper.Northern.Isles.KG'), 'Lantern Keeper Northern Isles KG');
   assert.strictEqual(t('Game.Name.v1.03'), 'Game Name', 'точка в версии — не пробел, версия срезана');
 });
-
-// ============================================================================
-// translateText tests (Проверка переводчика)
-// ============================================================================
 
 test('translateText: корректно обрабатывает пустой текст', async () => {
   // Вызываем через объект скрапера
@@ -158,10 +196,6 @@ test('translateText: возвращает оригинальный текст п
   const result = await scraperService.translateText('Original text');
   assert.strictEqual(result, 'Original text', 'При сбое сети должен вернуться оригинал');
 });
-
-// ============================================================================
-// Политика поиска метаданных (итог попытки и срок следующей)
-// ============================================================================
 
 const plan = require('./src/utils/scrapeplan.js');
 
@@ -218,12 +252,10 @@ test('lookupMetadata: «нигде нет» и «не смогли спроси�
     assert.ok(limited.failed.length > 0);
 });
 
-// ============================================================================
-// gamelang: язык по тексту самой игры
-// ============================================================================
-
 const os = require('os');
+
 const path = require('path');
+
 const { detectGameLanguages } = require('./src/utils/gamelang.js');
 
 // Настоящая папка игры во временном каталоге: детектор читает файлы сам
@@ -236,6 +268,7 @@ async function makeGame(t, files) {
   }
   return dir;
 }
+
 const say = (lines) => ({ events: [null, { pages: [{ list: lines.map(s => ({ code: 401, parameters: [s] })) }] }] });
 
 test('gamelang: русский перевод японской игры', async (t) => {
@@ -263,10 +296,6 @@ test('gamelang: таблица переводов даёт все языки, к
   const found = await detectGameLanguages(dir);
   assert.deepStrictEqual([...found.langs].sort(), ['en', 'ja']);
 });
-
-// ============================================================================
-// Название для показа и версия
-// ============================================================================
 
 const { presentTitle, extractVersion } = require('./src/utils/title.js');
 
@@ -300,8 +329,12 @@ test('extractVersion: из названия, иначе из папки; вер�
   assert.strictEqual(extractVersion('Walking to the harbor', 'Walking to the harbor 2.0.0v'), '2.0.0');
   assert.strictEqual(extractVersion('Лисички никогда не сдаются v1', 'fox-girls-never-give-up-ver1.03-rus__example.site'), '1.03');
   assert.strictEqual(extractVersion('Nebel | Версия перевода: 1.0', ''), '');
+  // «ver» прилип к слову — только в самом конце и только номер с точкой
+  assert.strictEqual(extractVersion('', 'The_Lantern_Keepers_of_Saint_Maria_Starfallver1.00'), '1.00');
+  assert.strictEqual(extractVersion('', 'The_Lantern_Keepers_of_Saint_Maria_Starfallver1.00_a1b2c3'), '1.00', 'папка игры, загруженной человеком');
+  assert.strictEqual(extractVersion('', 'Silver_Knight'), '');
+  assert.strictEqual(extractVersion('', 'Forever2'), '');
 });
-
 
 test('compareVersions: цепочка чисел, буква в конце, слова вокруг; без чисел — не сравнить', () => {
   const { compareVersions } = require('./src/utils/version.js');
@@ -345,10 +378,6 @@ test('Сейвы: где остановился — название карты 
   assert.strictEqual(await mapName('No_Such_Game', 3, root), null);
   assert.deepStrictEqual((await fsp.readdir(data)).sort(), before, 'в папке игры ничего не появилось');
 });
-
-// ============================================================================
-// itch.io
-// ============================================================================
 
 test('itch.io: ссылка на игру — из строки ссылок; страница автора и сам itch.io — не игра', () => {
   const { itchGameUrl } = require('./src/utils/itch.js');
@@ -505,16 +534,12 @@ test('ScraperAPI: дневной запас — в кредитах по цен�
   assert.strictEqual(await scraper.fetchViaScraper('https://example.com/page'), null);
   assert.strictEqual(asked.length, sent);
 
-  // Окно «Новинки»: страница itch.io не открылась, а запаса меньше её цены — окно скажет, что до завтра
+  // Вкладка «Найти»: страница itch.io не открылась, а запаса меньше её цены — окно скажет, что до завтра
   const itch = require('./src/services/itch.js');
   assert.strictEqual(await itch.budgetSpent(), true);
   used = 0;
   assert.strictEqual(await itch.budgetSpent(), false);
 });
-
-// ============================================================================
-// «Хочу поиграть»
-// ============================================================================
 
 const WISHLIST_TABLE = `CREATE TABLE wishlist (
   key TEXT PRIMARY KEY, source TEXT NOT NULL, ref TEXT NOT NULL, url TEXT NOT NULL,
@@ -575,10 +600,6 @@ test('«Хочу поиграть»: добавить, убрать, «в биб
   assert.strictEqual((await wishlist.list()).items.length, 1);
   assert.ok(events.includes('wishlist-changed'), 'другие устройства узнают об изменении');
 });
-
-// ============================================================================
-// Поиск по названию: полные названия, слитные слова, readme, сверка (SkyKnight, SevenKeys3)
-// ============================================================================
 
 test('названия: слитные слова, хвост релиза, порядок поиска и сверка по полному', () => {
   const { splitWords, stripRelease, searchNames, bestSimilarity, titleSimilarity, presentTitle } = require('./src/utils/title.js');
@@ -823,10 +844,6 @@ test('Steam: из одноимённых игр — та, чей автор из
   assert.strictEqual(asked.filter((u) => u.includes('appdetails')).length, 1);
 });
 
-// ============================================================================
-// Полная проверка библиотеки (кнопка «Проверить всё» в ревизии)
-// ============================================================================
-
 test('полная проверка: ход с игрой «сейчас», итог в базе; вторая поверх идущей не начинается; после перезапуска — «прервалась»', async (t) => {
   const { open } = require('sqlite');
   const sqlite3 = require('sqlite3');
@@ -1000,9 +1017,44 @@ test('полная проверка: ход по сокету — не чаще 
   t.mock.timers.reset();
 });
 
-// ============================================================================
-// Ревизия библиотеки
-// ============================================================================
+test('полка: загруженная как новая — та же, что «на полке», если совпали название или страница магазина и загружена после полки; «нет» помнится', () => {
+  const { shelfMatches } = require('./src/utils/audit.js');
+  const steam = (id) => `https://store.steampowered.com/app/${id}`;
+  const T = 1767225600000;
+  const rows = [
+    // Та же игра новой версией: название без версии одно
+    { id: 'Rosebloom-1.08', title: 'Rosebloom', link: '', shelved_at: T, playtime: 3600 },
+    { id: 'Rosebloom v1.1', title: 'Rosebloom v1.1', link: '', addedAt: T + 1000 },
+    // Японская папка и английская — по странице в Steam; две полки одной игры — берём самую свежую
+    { id: 'Loretta_old', title: "Loretta's Job", link: steam(248754), shelved_at: T - 5000 },
+    { id: 'Loretta_v2', title: "Loretta's Job", link: steam(248754), shelved_at: T },
+    { id: 'Loretta_jp', title: 'ロレッタの仕事', link: steam(248754), addedAt: T + 1 },
+    // Страница в Steam одна, но новая лежала в библиотеке ещё до полки — это не «загрузили заново»
+    { id: 'Early', title: 'Early One', link: steam(55), addedAt: T - 1 },
+    { id: 'Early_shelf', title: 'Other Name', link: steam(55), shelved_at: T },
+    // На «это она?» ответили «нет» — больше не спрашиваем
+    { id: 'Moon', title: 'Moon Flower', link: '', shelved_at: T },
+    { id: 'Moon_1', title: 'Moon Flower', link: '', addedAt: T + 5, shelf_dismissed: 'Moon' },
+    // Обе на месте — просто одна игра в двух папках, не полка
+    { id: 'Twin A', title: 'Twin Game', link: '', addedAt: T + 9 },
+    { id: 'Twin B', title: 'Twin Game', link: '', addedAt: T + 10 },
+    // По цепочке — нет: новая совпала названием с игрой на месте, а та с полкой — страницей; с полкой у новой общего нет
+    { id: 'Chain_new', title: 'Chain Story', link: '', addedAt: T + 3 },
+    { id: 'Chain_here', title: 'Chain Story', link: steam(3333333), addedAt: T - 10 },
+    { id: 'Chain_shelf', title: 'Totally Other', link: steam(3333333), shelved_at: T },
+    // Две копии на полке: «нет» про обе помнится — не спрашиваем по кругу то про одну, то про другую
+    { id: 'Dup_a', title: 'Dupe Quest', link: '', shelved_at: T - 1 },
+    { id: 'Dup_b', title: 'Dupe Quest', link: '', shelved_at: T },
+    { id: 'Dup_new', title: 'Dupe Quest', link: '', addedAt: T + 7, shelf_dismissed: 'Dup_b\nDup_a' },
+    { id: 'Dup_new2', title: 'Dupe Quest', link: '', addedAt: T + 8, shelf_dismissed: 'Dup_b' },
+  ];
+  const got = [...shelfMatches(rows)].map(([id, m]) => [id, m.row.id, m.why.sort().join(',')]).sort();
+  assert.deepStrictEqual(got, [
+    ['Dup_new2', 'Dup_a', 'name'],
+    ['Loretta_jp', 'Loretta_v2', 'page'],
+    ['Rosebloom v1.1', 'Rosebloom-1.08', 'name'],
+  ]);
+});
 
 test('ревизия: одна игра в двух папках — по названию или странице магазина, по цепочке; японские названия тоже', () => {
   const { duplicateGroups, pagesOf } = require('./src/utils/audit.js');
@@ -1056,10 +1108,6 @@ test('ревизия: «Можно дополнить» — найденные, 
   assert.deepStrictEqual(coverage(rows), { itch: 1, steam: 1, vndb: 1 });
 });
 
-// ============================================================================
-// Загрузка архивов: кусками, с продолжением после обрыва (services/uploads.js)
-// ============================================================================
-
 // Сервер загрузки на временной папке: настоящие маршруты и сервис, вместо 7-Zip — подделка,
 // которая «распаковывает» игру и запоминает, какой архив ей дали. restart() — как перезапуск
 // сервера: новый сервис на тех же папках
@@ -1070,13 +1118,13 @@ async function uploadRig(t) {
   const createUploadsRouter = require('./src/routes/uploads.js');
   const { findGameFolder } = require('./src/utils/archive.js');
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'uploads-'));
-  const rig = { dir: path.join(root, '_tmp_uploads'), gamesDir: path.join(root, 'games'), added: [], refreshed: [], archives: [], free: 1e15, entries: null, extract: null };
+  const rig = { dir: path.join(root, '_tmp_uploads'), gamesDir: path.join(root, 'games'), added: [], addedWith: [], refreshed: [], archives: [], free: 1e15, entries: null, extract: null };
   await fsp.mkdir(rig.gamesDir);
   rig.restart = () => {
     rig.svc = new UploadService();
     rig.svc.setDependencies({
       dir: rig.dir, gamesDir: rig.gamesDir, inboxDir: path.join(root, '_inbox'), findGameFolder,
-      addGameToDB: async (folder) => { rig.added.push(folder); },
+      addGameToDB: async (folder, dest, opts = {}) => { rig.added.push(folder); rig.addedWith.push([folder, opts]); },
       refreshGame: async (folder, dest, { archiveName, version }) => { rig.refreshed.push([folder, archiveName, ...(version ? [version] : [])]); return { version: '' }; },
       tools: {
         list: async (archive, password) => (rig.list ? rig.list(password, archive) : rig.entries || [{ path: 'Game/www/index.html', size: 10, encrypted: false }]),
@@ -1094,7 +1142,7 @@ async function uploadRig(t) {
   rig.restart();
   const app = express();
   app.use(express.json());
-  app.use('/u', (req, res, next) => rig.router(req, res, next));
+  app.use('/u', (req, res, next) => { req.person = rig.person; rig.router(req, res, next); });
   const server = http.createServer(app);
   await new Promise((r) => server.listen(0, '127.0.0.1', r));
   t.after(async () => {
@@ -1196,6 +1244,15 @@ test('MyJDownloader: вход по подписи, ссылка — в «Зах�
   setSavedSecret('myjd', JSON.stringify(acc));
   t.after(() => setSavedSecret('myjd', ''));
   assert.deepStrictEqual(await svc.send('https://mega.nz/file/abc#key', 'Game'), { found: 4, sent: 1, names: ['Game-1.0-pc.zip'], partial: false });
+  // JDownloader правит имя пакета под файловую систему: «Game: Remaster» хранит как «Game; Remaster». Это тот же пакет, а другой
+  // пакет с похожим именем — нет
+  const rename = async (name) => {
+    const call = svc.call;
+    svc.call = async (a, action, params) => (action === '/linkgrabberv2/queryPackages' ? [{ name, uuid: 5, saveTo: acc.folder }] : action === '/linkgrabberv2/queryLinks' ? [{ uuid: 1, name: 'Game-1.0.zip', availability: 'ONLINE', bytesTotal: 0 }] : call.call(svc, a, action, params));
+    try { return await svc.packageLinks(acc, 'Game: Remaster'); } finally { svc.call = call; }
+  };
+  assert.strictEqual((await rename('Game; Remaster')).length, 1);
+  assert.strictEqual((await rename('Game Remaster 2')).length, 0);
   assert.deepStrictEqual(calls.find((c) => c[0] === '/linkgrabberv2/addLinks'), ['/linkgrabberv2/addLinks', [{ links: 'https://mega.nz/file/abc#key', packageName: 'Game', autostart: false, autoExtract: false, overwritePackagizerRules: true, destinationFolder: '/mnt/mimikin/_inbox' }]]);
   assert.deepStrictEqual(calls.find((c) => c[0] === '/linkgrabberv2/queryLinks')[1][0].packageUUIDs, [9], 'ссылки — из пакета с нашим именем в папке «Входящие»');
   assert.deepStrictEqual(calls.find((c) => c[0] === '/linkgrabberv2/removeLinks')[1], [[2, 3, 4], []], 'Mac, Android и недоступный — убраны');
@@ -1264,7 +1321,7 @@ test('MyJDownloader: вход по подписи, ссылка — в «Зах�
   const realSend = svc.send;
   svc.send = async (...args) => { resent.push(args); return { started: true }; };
   assert.deepStrictEqual(await svc.retry('3'), { started: true });
-  assert.deepStrictEqual(resent, [['https://mega.nz/file/three#key', 'R', '3', { version: '2.0', target: 'R_Game', via: 'tg', passwords: [] }]]);
+  assert.deepStrictEqual(resent, [['https://mega.nz/file/three#key', 'R', '3', { version: '2.0', target: 'R_Game', via: 'tg', passwords: [], force: false }]]);
   await assert.rejects(svc.retry('4'), (e) => e.status === 404);
   svc.send = realSend;
   await svc.forgetJob('3');
@@ -1299,6 +1356,12 @@ test('MyJDownloader: ход загрузки — скачивание с бай�
   const now = async () => { svc.jdCache = null; const [j] = await svc.downloads(); return j; };
   pkgs = [{ name: 'Game', saveTo: '/other', bytesLoaded: 1, bytesTotal: 2 }, { name: 'Game', saveTo: '/in/', bytesLoaded: 50, bytesTotal: 200, speed: 10, eta: 15 }];
   assert.deepStrictEqual(await now().then((j) => [j.stage, j.loaded, j.total, j.speed, j.eta, j.file]), ['download', 50, 200, 10, 15, 'Game-1.0.7z'], 'пакет — из нашей папки');
+  // Имя с двоеточием JDownloader хранит с «;» — это тот же пакет, ход виден
+  await svc.saveJob({ key: '6', title: 'Tail: Remaster', packageName: 'Tail: Remaster', folder: '/in', stage: 'download', names: ['Tail.rar'], started: 1 });
+  pkgs = [{ name: 'Tail; Remaster', saveTo: '/in', bytesLoaded: 7, bytesTotal: 9 }];
+  svc.jdCache = null;
+  assert.strictEqual((await svc.downloads()).find((j) => j.key === '6').loaded, 7);
+  await svc.forgetJob('6');
   pkgs = [];
   assert.strictEqual((await now()).stage, 'download', 'JDownloader не нашёл пакет — этап не меняем');
   pkgs = [{ name: 'Game', saveTo: '/in', bytesLoaded: 200, bytesTotal: 200, finished: true }];
@@ -1327,6 +1390,11 @@ test('MyJDownloader: ход загрузки — скачивание с бай�
   assert.deepStrictEqual(await now().then((j) => [j.stage, j.game]), ['done', 'Game-1.0']);
   meta = { state: 'password' };
   assert.strictEqual((await now()).stage, 'done', 'готовую больше не пересчитываем');
+  // Архив не распаковался: причина кодом — страница напишет её на языке человека
+  await svc.forgetJob('5');
+  await svc.saveJob({ key: '5', title: 'Game', packageName: 'Game', folder: '/in', stage: 'import', names: ['Game-1.0.7z'], started: 1 });
+  meta = { state: 'error', error: 'Это игра на Unity', reason: 'other-engine', params: { engine: ['Unity'] } };
+  assert.deepStrictEqual(await now().then((j) => [j.stage, j.reason, j.params]), ['error', 'other-engine', { engine: ['Unity'] }]);
   await svc.forgetJob('5');
   assert.deepStrictEqual(await svc.downloads(), []);
   // Записи — на диске: переживают перезапуск; сбор ссылок и ожидание капчи, прерванные перезапуском, — ошибка,
@@ -1341,6 +1409,61 @@ test('MyJDownloader: ход загрузки — скачивание с бай�
   again.setDependencies({ file: path.join(dir, 'jd.json') });
   const [b, a, c] = await Promise.all([again.loadJobs(), again.loadJobs()]).then(([m]) => [m.get('8'), m.get('7'), m.get('9')]);
   assert.deepStrictEqual([a.stage, a.error, b.stage, c.stage, c.error], ['error', 'stale', 'done', 'error', 'stale']);
+});
+
+test('MyJDownloader: место — до скачивания; не влезает — ничего не скачиваем, «Скачать всё равно» шлёт; размер неизвестен — не проверяем; две загрузки разом не делят одно место', async (t) => {
+  const { MyJdService } = require('./src/services/myjd.js');
+  const { setSavedSecret } = require('./src/utils/secrets.js');
+  setSavedSecret('myjd', JSON.stringify({ email: 'me@example.org', password: 'p', device: 'server', folder: '' }));
+  t.after(() => setSavedSecret('myjd', ''));
+  const rig = await uploadRig(t);
+  const GB = 1024 ** 3;
+  const svc = new MyJdService();
+  svc.sleep = async () => {};
+  let links = [];
+  const calls = [];
+  svc.call = async (acc, action) => {
+    calls.push(action);
+    return { '/linkgrabberv2/queryPackages': [{ name: 'Game', uuid: 9 }], '/linkgrabberv2/queryLinks': links, '/linkgrabberv2/isCollecting': false, '/captcha/list': [] }[action] ?? null;
+  };
+  // Свободное место — подменённое (rig.free), не настоящего диска; бронь JDownloader видит и загрузка из браузера
+  svc.setDependencies({ file: '', uploads: rig.svc });
+  rig.svc.inFlight = () => svc.inFlight();
+  const moved = () => calls.filter((c) => c === '/linkgrabberv2/moveToDownloadlist').length;
+  const url = 'https://mega.nz/file/abc';
+  const job = async (key) => (await svc.downloads()).find((j) => j.key === key);
+  const go = async (key, opts) => { await svc.send(url, 'Game', key, opts); await svc.runs.get(key); return job(key); };
+  links = [{ uuid: 1, name: 'Game.zip', availability: 'ONLINE', bytesTotal: 10 * GB }, { uuid: 2, name: 'Game.zip', availability: 'ONLINE', bytesTotal: 10 * GB }];
+  rig.free = 12 * GB;
+  const short = await go('1');
+  assert.deepStrictEqual([short.stage, short.error, short.need, short.free, short.hard, short.retry], ['error', 'space', 26 * GB, 12 * GB, false, true], 'архив и игра — 10 + 15 + 1 ГБ');
+  assert.ok(!moved() && !calls.includes('/downloadcontroller/start') && !calls.includes('/linkgrabberv2/removeLinks'), 'ничего не скачано и не убрано: ссылки ждут в «Захвате ссылок»');
+  await svc.retry('1');
+  await svc.runs.get('1');
+  assert.deepStrictEqual([(await job('1')).error, moved()], ['space', 0], '«Повторить» без места — то же');
+  await svc.retry('1', { force: true });
+  await svc.runs.get('1');
+  assert.deepStrictEqual([(await job('1')).stage, moved(), (await svc.loadJobs()).get('1').size, await svc.forced('Game.zip')], ['download', 1, 10 * GB, true], '«Скачать всё равно» — на скачивание');
+  assert.strictEqual((await rig.svc.room({ size: 1 })).reserved, 25 * GB, 'качающееся бронирует архив и игру');
+  // Не влезет и сам архив — «всё равно» не помогает
+  await svc.forgetJob('1');
+  rig.free = 5 * GB;
+  await go('2');
+  await svc.retry('2', { force: true });
+  await svc.runs.get('2');
+  assert.deepStrictEqual([(await job('2')).error, (await job('2')).hard, moved()], ['space', true, 1]);
+  await svc.forgetJob('2');
+  // JDownloader не знает размер — не проверяем: защитит точная проверка на распаковке
+  links = [{ uuid: 1, name: 'Game.zip', availability: 'ONLINE', bytesTotal: -1 }];
+  assert.strictEqual((await go('3')).stage, 'download');
+  await svc.forgetJob('3');
+  // «Обновить все»: две разом — вторая видит бронь первой
+  links = [{ uuid: 1, name: 'Game.zip', availability: 'ONLINE', bytesTotal: 4 * GB }];
+  rig.free = 11.5 * GB;
+  await Promise.all([svc.send(url, 'Game', '4'), svc.send(url, 'Game', '5')]);
+  await Promise.all([svc.runs.get('4'), svc.runs.get('5')]);
+  assert.deepStrictEqual([(await job('4')).stage, (await job('5')).stage, (await job('5')).error], ['download', 'error', 'space']);
+  assert.strictEqual(svc.booked.size, 0, 'бронь — у записи, не в памяти');
 });
 
 test('две установки: «Связать» на одной, «Разрешить» на другой — дальше каждая сама находит свои архивы, где бы JDownloader их ни скачал', async (t) => {
@@ -1438,7 +1561,15 @@ test('две установки: «Связать» на одной, «Разр�
   B.r.fetch = (u, o) => (/\/file\?/.test(u) && o.method === 'GET' ? Promise.resolve(new Response('x')) : nativeFetch(u, o));
   await B.r.pass();
   assert.match(B.r.state.error, /Next\.zip: пришло 1 байт из 50/);
+  assert.deepStrictEqual(B.r.state.problems.map((p) => [p.reason, p.params?.name]), [['pull-short', 'Next.zip']], 'причина кодом — для «Настроек» на любом языке');
   assert.ok(fs.existsSync(path.join(A.dir, `.${b.self}`, 'Next.zip')) && !fs.existsSync(path.join(B.dir, 'Next.zip')));
+  // Места у ноутбука нет — архив не качается и ждёт у сервера
+  let taken = 0;
+  B.r.fetch = (u, o) => { if (/\/file\?/.test(u) && (o.method || 'GET') === 'GET') taken += 1; return nativeFetch(u, o); };
+  B.r.setDependencies({ dir: B.dir, uploads: { room: async () => ({ ok: false, need: 9, free: 1, text: 'нужно около 9 ГБ, свободно 1 ГБ' }) } });
+  await B.r.pass();
+  assert.deepStrictEqual([taken, /Ждёт места: Next\.zip/.test(B.r.state.error), B.r.state.waiting['Next.zip'], fs.existsSync(path.join(A.dir, `.${b.self}`, 'Next.zip'))], [0, true, { need: 9, free: 1 }, true]);
+  B.r.setDependencies({ dir: B.dir });
   B.r.fetch = nativeFetch;
   // Ноутбук выключен — для сервера это не ошибка: его архивы подождут
   A.r.fetch = () => Promise.reject(new Error('down'));
@@ -1452,6 +1583,21 @@ test('две установки: «Связать» на одной, «Разр�
   // Просьбы без входа не копятся
   for (let i = 0; i < 7; i++) await ask({ id: `0000000${i}`, url: `http://10.0.0.${i}`, key: 'k'.repeat(40), nonce: 'n'.repeat(40) });
   assert.strictEqual(A.r.asks.size, 5);
+});
+
+test('Seedbox: ключ, который ssh2 сама не читает (бывает у 4 из 1000), не берём — создаём другой', () => {
+  const { utils } = require('ssh2');
+  const { newKey } = require('./src/services/seedbox.js');
+  const real = utils.generateKeyPairSync;
+  let calls = 0;
+  utils.generateKeyPairSync = (...args) => (++calls === 1 ? { private: 'broken', public: 'broken' } : real(...args));
+  try {
+    const pair = newKey('mimikin-test');
+    assert.strictEqual(calls, 2);
+    assert.ok(!(utils.parseKey(pair.private) instanceof Error));
+  } finally {
+    utils.generateKeyPairSync = real;
+  }
 });
 
 test('Seedbox: пароль — один раз, на сервере свой ключ вместо прежнего; готовые архивы — во «Входящие» и с сервера долой, свежие и тома — нет', async (t) => {
@@ -1539,6 +1685,23 @@ test('Seedbox: пароль — один раз, на сервере свой к
   assert.ok(!files.has('dl/Game-1.0.7z') && !files.has('dl/sub/Other.zip'), 'забранные — с сервера долой');
   assert.ok(files.has('dl/Fresh.7z') && files.has('dl/Game-1.0/www/data.zip'), 'свежий и архив внутри распакованной игры — на месте');
   assert.deepStrictEqual([box.status().pulled, box.status().error], [4, '']);
+  // Места нет — архив не качаем и на сервере не трогаем, раз в минуту — не по кругу до конца диска; освободили — забран
+  files.set('dl/Huge.zip', { data: Buffer.from('huge'), mtime: old });
+  let room = { ok: false, need: 9, free: 1, text: 'нужно около 9 ГБ, свободно 1 ГБ' };
+  const asked = [];
+  box.setDependencies({ dir: inbox, uploads: { room: async (q) => { asked.push(q); return room; } }, forced: async (name) => name === 'Forced.zip' });
+  const realGet = sftp.fastGet;
+  let gets = 0;
+  sftp.fastGet = (...args) => { gets += 1; return realGet(...args); };
+  await box.pull();
+  assert.deepStrictEqual([gets, files.has('dl/Huge.zip'), fs.existsSync(path.join(inbox, 'Huge.zip'))], [0, true, false]);
+  assert.match(box.status().error, /Ждёт места: Huge\.zip — нужно около 9 ГБ/);
+  assert.deepStrictEqual(box.status().problems.map((p) => [p.reason, p.params.name]), [['pull-space', 'Huge.zip']], 'причина кодом — для «Настроек» на любом языке');
+  assert.deepStrictEqual([box.status().waiting['Huge.zip'], asked[0]], [{ need: 9, free: 1 }, { size: 4, force: false, name: 'Huge.zip' }]);
+  room = { ok: true };
+  await box.pull();
+  assert.deepStrictEqual([gets, files.has('dl/Huge.zip'), fs.existsSync(path.join(inbox, 'Huge.zip')), box.status().error, box.status().waiting], [1, false, true, '', {}]);
+  sftp.fastGet = realGet;
   // Подменённый сервер: отпечаток другой — не подключаемся
   setSavedSecret('seedbox', JSON.stringify({ ...again, folder: 'dl', host: 'evil' }));
   await box.pull();
@@ -1637,7 +1800,20 @@ test('Обновления: новая метка на GitHub — «вышла �
   assert.strictEqual((await up.status(true)).newer, false, 'та же версия — не новая');
   // Закрытый или удалённый репозиторий GitHub отдаёт чужим как «нет такого»
   up.fetch = async () => new Response('', { status: 404 });
-  assert.match((await up.status(true)).error, /не найден или закрыт/);
+  // Это не сбой, а обычное дело: без error, строка спокойная, и спрашивать снова через 10 минут незачем
+  const closed = await up.status(true);
+  assert.deepStrictEqual([closed.reason, closed.error], ['repo-closed', '']);
+  up.fetch = async () => { throw new Error('спросили раньше срока'); };
+  assert.strictEqual((await up.status()).reason, 'repo-closed');
+  // Настоящие сбои — кодом с данными: текст на языке человека делает страница
+  up.fetch = async () => new Response('', { status: 503 });
+  const refused = await up.status(true);
+  assert.deepStrictEqual([refused.reason, refused.params], ['github-refused', { status: 503 }]);
+  up.fetch = async () => { throw new TypeError('fetch failed'); };
+  assert.strictEqual((await up.status(true)).reason, 'github-down');
+  up.fetch = async () => new Response(JSON.stringify([{ name: 'nightly' }]));
+  const noTags = await up.status(true);
+  assert.deepStrictEqual([noTags.reason, noTags.error], ['no-releases', '']);
   // Кнопка — только с помощником; ключ уходит ему в заголовке
   await assert.rejects(up.update(), { status: 409 });
   up.env = { UPDATE_URL: 'http://watchtower:8080/v1/update', UPDATE_TOKEN: 'tok' };
@@ -1813,6 +1989,12 @@ test('«Входящие»: докачанный архив — в библио�
   await fsp.writeFile(orphan, 'zip bytes 3');
   await rig.svc.importFile(orphan, { target: 'No_Such_Game' });
   await rig.until(async () => rig.added.length === 2, 'новой игрой');
+  // Новая игра из «Загрузить»: версия темы и сама тема — в библиотеку вместе с игрой
+  const moon = path.join(inboxDir, 'Moon.zip');
+  await fsp.writeFile(moon, 'zip bytes 4');
+  await rig.svc.importFile(moon, { version: 'v1.3', link: 'https://moon-studio.itch.io/moon' });
+  await rig.until(async () => rig.added.length === 3, 'новая игра из темы');
+  assert.deepStrictEqual(rig.addedWith.at(-1), ['Moon', { version: 'v1.3', link: 'https://moon-studio.itch.io/moon' }]);
   rig.extract = async () => { throw new Error('битый архив'); };
   const bad = path.join(inboxDir, 'Broken.zip');
   await fsp.writeFile(bad, 'broken');
@@ -1848,7 +2030,7 @@ test('«Входящие»: докачанный архив — в библио�
   await box2.scan();
   await box2.scan();
   assert.deepStrictEqual(asked.filter(([n]) => ['upd.zip', 'plain.zip', 'locked.zip'].includes(n)).sort(),
-    [['locked.zip', { target: '', version: '', passwords: ['Esan'] }], ['plain.zip', {}], ['upd.zip', { target: 'My_Game', version: '1.1', passwords: [] }]], 'пароль со страницы — до распаковки');
+    [['locked.zip', { target: '', version: '', passwords: ['Esan'], link: '' }], ['plain.zip', {}], ['upd.zip', { target: 'My_Game', version: '1.1', passwords: [], link: '' }]], 'пароль со страницы — до распаковки');
 });
 
 test('загрузка: куски строго подряд; повтор куска — 409 и сколько получено; целиком — игра в библиотеке', async (t) => {
@@ -1911,7 +2093,9 @@ test('загрузка: оборванный кусок — записанное
 test('загрузка: зависшее соединение — живое держит файл (409), молчащее уступает место новому запросу, брошенное закрывается само', async (t) => {
   const crypto = require('crypto');
   const rig = await uploadRig(t);
-  rig.svc.takeoverMs = 400;
+  // 400 мс были тоньше пауз раннера: любой сбой дольше ~350 мс между записью и вторым куском делал
+  // «живого» молчащим. С запасом в секунды пауза процессора ничего не ломает
+  rig.svc.takeoverMs = 3000;
   const KB = 1024;
   const file = crypto.randomBytes(1024 * KB);
   const { id } = (await rig.start({ name: 'G.zip', size: file.length, fingerprint: 'f2' })).body;
@@ -1921,7 +2105,7 @@ test('загрузка: зависшее соединение — живое д�
   await rig.until(async () => (await rig.size(id)) === 100 * KB, '100 КБ на диске');
   let r = await rig.chunk(id, 100 * KB, file.subarray(100 * KB));
   assert.deepStrictEqual([r.status, r.body.busy], [409, true], 'только что писавший запрос не перебиваем');
-  await new Promise((res) => setTimeout(res, 500));
+  await new Promise((res) => setTimeout(res, 3200));
   r = await rig.chunk(id, 100 * KB, file.subarray(100 * KB));
   assert.deepStrictEqual(r.body, { received: file.length, state: 'processing' }, 'молчавший уступил место');
   await rig.until(() => hungClosed, 'зависшее соединение закрыто');
@@ -1980,21 +2164,165 @@ test('загрузка: отказы — нет места, путь наруж�
 
   rig.entries = [{ path: 'G/../../etc/cron.d/x', size: 5, encrypted: false }];
   assert.match((await upload()).error, /путь наружу/);
-  rig.entries = [{ path: 'G/www/index.html', size: 1e15, encrypted: false }];
-  assert.match((await upload()).error, /места для распаковки/);
   rig.entries = null;
   rig.extract = async (out) => { await fsp.writeFile(path.join(out, 'readme.txt'), 'x'); };
   assert.match((await upload()).error, /нет игры/);
-  rig.extract = async () => { throw new Error(explain7z('ERROR: CRC Failed : a.bin', 2)); };
+  rig.extract = async () => { throw explain7z('ERROR: CRC Failed : a.bin', 2); };
   const broken = await upload();
   assert.match(broken.error, /Архив повреждён/);
 
   assert.deepStrictEqual(await fsp.readdir(rig.gamesDir), [], 'в библиотеку ничего не попало');
   assert.ok((await fsp.readdir(rig.dir)).every((f) => f.endsWith('.json')), 'ни архивов, ни распакованного');
   const list = (await rig.call('GET', '/list')).body;
-  assert.deepStrictEqual(list.map((x) => x.state), ['error', 'error', 'error', 'error']);
+  assert.deepStrictEqual(list.map((x) => x.state), ['error', 'error', 'error']);
   assert.deepStrictEqual((await rig.call('POST', `/cancel?id=${broken.id}`)).body, { cancelled: true });
-  assert.strictEqual((await rig.call('GET', '/list')).body.length, 3, 'убранная из списка пропала');
+  assert.strictEqual((await rig.call('GET', '/list')).body.length, 2, 'убранная из списка пропала');
+});
+
+test('загрузка: место — до начала, под архив и игру (архив + 1,5 архива + 1 ГБ); «всё равно» снимает только оценку и помнится; начатые бронируют своё', async (t) => {
+  const crypto = require('crypto');
+  const rig = await uploadRig(t);
+  const GB = 1024 ** 3;
+  const file = crypto.randomBytes(4096);
+  const A = file.length;
+  const need = A + 1.5 * A + GB;
+  const meta = { name: 'Big.zip', size: A, fingerprint: 'sp1' };
+  rig.free = need - 1;
+  const short = await rig.start(meta);
+  assert.deepStrictEqual([short.status, short.body.reason, short.body.hard, short.body.need, short.body.free], [507, 'space', false, need, need - 1], 'архив влез бы, а с игрой — нет');
+  rig.free = A + GB - 1;
+  const hard = await rig.start({ ...meta, force: true });
+  assert.deepStrictEqual([hard.status, hard.body.reason, hard.body.hard], [507, 'space', true], 'не влезет и архив — «всё равно» не помогает');
+  rig.free = need - 1;
+  const forced = await rig.start({ ...meta, force: true });
+  assert.strictEqual(forced.status, 200, '«всё равно» — начинаем');
+  rig.restart();
+  assert.strictEqual((await rig.start(meta)).status, 200, 'продолжение после перезапуска второй раз не спрашивает');
+
+  // Начатая загрузка бронирует остаток архива и игру: себе не мешает, вторая её видит, после отмены первой — проходит
+  const { id } = forced.body;
+  await rig.chunk(id, 0, file.subarray(0, 1024));
+  const reserve = (A - 1024) + 1.5 * A;
+  rig.free = reserve + GB;
+  assert.strictEqual((await rig.start(meta)).status, 200, 'своя бронь себе не мешает');
+  assert.strictEqual((await rig.svc.room({ size: 1 })).reserved, reserve);
+  const other = { name: 'Other.zip', size: A, fingerprint: 'sp2' };
+  rig.free = need + reserve - 1;
+  const second = await rig.start(other);
+  assert.deepStrictEqual([second.status, second.body.reason, second.body.free], [507, 'space', need - 1], 'вторая видит бронь первой');
+  await rig.call('POST', `/cancel?id=${id}`);
+  assert.strictEqual((await rig.start(other)).status, 200, 'первую отменили — место её');
+});
+
+test('загрузка: брошенная (байты не шли час) и вставшие записи JDownloader места не держат; «всё равно» — по месту на диске, без брони', async (t) => {
+  const crypto = require('crypto');
+  const { MyJdService } = require('./src/services/myjd.js');
+  const rig = await uploadRig(t);
+  const GB = 1024 ** 3;
+  const HOUR = 60 * 60 * 1000;
+  const file = crypto.randomBytes(4096);
+  const A = file.length;
+  const reserve = (A - 1024) + 1.5 * A;
+  // С телефона начали архив, дошли до 1 КБ и бросили
+  const big = (await rig.start({ name: 'Big.zip', size: A, fingerprint: 'ab1' })).body;
+  await rig.chunk(big.id, 0, file.subarray(0, 1024));
+  assert.strictEqual((await rig.svc.room({ size: 1 })).reserved, reserve, 'байты шли только что — бронь');
+  const old = (Date.now() - 2 * HOUR) / 1000;
+  await fsp.utimes(rig.svc.archivePath(big.id), old, old);
+  const meta = JSON.parse(await fsp.readFile(rig.svc.metaPath(big.id), 'utf8'));
+  await fsp.writeFile(rig.svc.metaPath(big.id), JSON.stringify({ ...meta, updatedAt: Date.now() - 2 * HOUR }));
+  assert.strictEqual((await rig.svc.room({ size: 1 })).reserved, 0, 'брошенная — нет');
+  rig.free = A + GB;
+  assert.strictEqual((await rig.start({ name: 'Patch.zip', size: 1, fingerprint: 'ab0' })).status, 200, 'маленький архив проходит');
+  rig.free = reserve + GB;
+  assert.strictEqual((await rig.start({ name: 'Big.zip', size: A, fingerprint: 'ab1' })).status, 200, 'брошенную можно продолжить');
+  await rig.call('POST', `/cancel?id=${big.id}`);
+
+  // Свежая бронь съела почти всё, а на диске архив влезает — оценка не сходится, но «всё равно» пускает
+  const fresh = (await rig.start({ name: 'Fresh.zip', size: A, fingerprint: 'ab2' })).body;
+  await rig.chunk(fresh.id, 0, file.subarray(0, 1024));
+  rig.free = reserve + GB;
+  const small = { name: 'Small.zip', size: A, fingerprint: 'ab3' };
+  const short = await rig.start(small);
+  assert.deepStrictEqual([short.status, short.body.hard], [507, false]);
+  assert.strictEqual((await rig.start({ ...small, force: true })).status, 200);
+  await rig.call('POST', `/cancel?id=${fresh.id}`);
+
+  // JDownloader: качается — бронь; пакет давно не виден (удалили в JD) — нет; скачано, а во «Входящие» не приходит
+  // и никто не переносит — нет
+  const jd = new MyJdService();
+  jd.setDependencies({ file: '', uploads: rig.svc });
+  rig.svc.inFlight = () => jd.inFlight();
+  const now = Date.now();
+  await jd.saveJob({ key: '1', stage: 'download', names: ['A.zip'], size: 10 * GB, started: now });
+  await jd.saveJob({ key: '2', stage: 'download', names: ['B.zip'], size: 10 * GB, started: now - 7 * HOUR });
+  await jd.saveJob({ key: '3', stage: 'transfer', names: ['C.zip'], size: 10 * GB, started: now - 7 * HOUR, transferAt: now - HOUR });
+  const reserved = async () => (await rig.svc.room({ size: 1 })).reserved / GB;
+  assert.strictEqual(await reserved(), 25, 'только идущая: 10 + 15 ГБ');
+  jd.seenAt.set('2', Date.now());
+  assert.strictEqual(await reserved(), 50, 'JDownloader только что показал пакет — качается');
+  jd.seedbox = { state: { current: { name: 'C.zip', got: 1, total: 10 * GB } } };
+  assert.strictEqual(await reserved(), 75, 'seedbox его сейчас переносит');
+});
+
+test('загрузка: не хватило места на распаковку — архив ждёт («space»), а не стирается; «Повторить» после освобождения распаковывает; из «Входящих» крестик и уборка уносят его в _inbox/_failed', async (t) => {
+  const crypto = require('crypto');
+  const { explain7z } = require('./src/services/uploads.js');
+  const rig = await uploadRig(t);
+  const file = crypto.randomBytes(2048);
+  const meta = { name: 'Wait.zip', size: file.length, fingerprint: 'sp3' };
+  const { id } = (await rig.start(meta)).body;
+  rig.entries = [{ path: 'G/www/index.html', size: 1e15, encrypted: false }];
+  await rig.chunk(id, 0, file);
+  await rig.svc.jobs.get(id);
+  const st = await rig.status(id);
+  assert.deepStrictEqual([st.state, st.need > 1e15, st.free, /места для распаковки/.test(st.error)], ['space', true, 1e15, true]);
+  assert.strictEqual(await rig.size(id), file.length, 'архив цел');
+  assert.deepStrictEqual((await rig.call('GET', '/list')).body.map((u) => [u.state, u.need > 1e15, u.free]), [['space', true, 1e15]]);
+  assert.strictEqual((await rig.start(meta)).body.state, 'space', 'тот же файл ещё раз — та же ждущая загрузка');
+  assert.strictEqual((await rig.svc.room({ size: 1 })).reserved, 0, 'ждущая места не бронирует: она и так ждёт «Повторить», а бронь не пускала бы ничего');
+  // Место освободили — «Повторить»: распаковка с начала
+  rig.entries = null;
+  assert.strictEqual((await rig.call('POST', `/retry?id=${id}`)).status, 200);
+  await rig.svc.jobs.get(id);
+  assert.strictEqual((await rig.status(id)).state, 'done');
+  assert.deepStrictEqual(rig.added, ['Wait']);
+  assert.strictEqual((await rig.call('POST', `/retry?id=${id}`)).status, 409, 'не ждёт места — нечего повторять');
+  // 7-Zip упёрся в диск посреди распаковки — тоже ждёт; распакованное наполовину убрано
+  rig.extract = async (out) => {
+    await fsp.writeFile(path.join(out, 'half.bin'), 'x');
+    throw Object.assign(explain7z('ERROR: No space left on device', 2), { space: true });
+  };
+  const late = (await rig.start({ ...meta, fingerprint: 'sp4' })).body.id;
+  await rig.chunk(late, 0, file);
+  await rig.svc.jobs.get(late);
+  assert.deepStrictEqual([(await rig.status(late)).state, (await rig.status(late)).need > 0], ['space', true]);
+  assert.ok(!(await fsp.readdir(rig.dir)).some((f) => f.startsWith('ext_')), 'распакованное наполовину — долой');
+  rig.extract = null;
+
+  // Из «Входящих»: крестик — архив в _inbox/_failed, а не в никуда
+  const inboxDir = path.join(path.dirname(rig.dir), '_inbox');
+  await fsp.mkdir(inboxDir, { recursive: true });
+  const failed = () => fs.readdirSync(path.join(inboxDir, '_failed'));
+  const put = async (name, mtime = new Date()) => { const p = path.join(inboxDir, name); await fsp.writeFile(p, name); await fsp.utimes(p, mtime, mtime); return p; };
+  rig.entries = [{ path: 'G/www/index.html', size: 1e15, encrypted: false }];
+  const a = await rig.svc.importFile(await put('InA.zip'));
+  await rig.until(async () => (await rig.svc.status(a)).state === 'space', 'ждёт места');
+  await rig.svc.cancel(a);
+  assert.ok(failed().some((f) => f.endsWith('-InA.zip')), 'отменённый — в _failed');
+  // Уборка: архив из «Входящих» хранит прежнее время — его не в счёт, ждущий живёт сутки по своей метке, потом — в _failed
+  const old = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+  const b = await rig.svc.importFile(await put('InB.zip', old));
+  await rig.until(async () => (await rig.svc.status(b)).state === 'space', 'ждёт места');
+  await fsp.writeFile(path.join(rig.dir, 'stray.tmp'), 'x');
+  await fsp.utimes(path.join(rig.dir, 'stray.tmp'), old, old);
+  await rig.svc.cleanup();
+  assert.strictEqual((await rig.svc.status(b)).state, 'space', 'метка свежая — ждёт дальше, хоть архив и старый');
+  assert.ok(!fs.existsSync(path.join(rig.dir, 'stray.tmp')), 'прочее старое — долой');
+  await fsp.utimes(rig.svc.metaPath(b), old, old);
+  await rig.svc.cleanup();
+  assert.ok(failed().some((f) => f.endsWith('-InB.zip')), 'сутки прошли — в _failed, не стёрт');
+  assert.ok(!fs.existsSync(rig.svc.metaPath(b)));
 });
 
 test('загрузка: архив с паролем ждёт пароля; не тот — спрашиваем снова, верный — распаковываем; пароль нигде не остаётся', async (t) => {
@@ -2136,6 +2464,57 @@ test('загрузка: новая версия игры из библиотек
   assert.deepStrictEqual(rig.refreshed, [['Ironhold_Keep_ver1.3', 'Ironhold_Keep_ver1.3.1.69.zip']], 'версию и прочее из файлов — запросили');
 });
 
+test('загрузка: игра с полки — архив встаёт на её место без _old; патч к ней — нельзя; без полки папки нет — 404', async (t) => {
+  const crypto = require('crypto');
+  const rig = await uploadRig(t);
+  rig.svc.isShelved = async (id) => id === 'Moon_v1';
+  const refused = async (target, mode) => (await rig.start({ name: 'x.zip', size: 10, fingerprint: 'a', target, mode })).status;
+  assert.deepStrictEqual([await refused('Moon_v1', 'patch'), await refused('Nope')], [403, 404]);
+
+  // Тот же архив загрузили как новую игру — имя игры с полки занято: это другая игра, пока не скажут «это она»
+  const same = crypto.randomBytes(2048);
+  const { id: id0 } = (await rig.start({ name: 'Moon_v1.zip', size: same.length, fingerprint: 's0' })).body;
+  await rig.chunk(id0, 0, same);
+  await rig.svc.jobs.get(id0);
+  assert.deepStrictEqual([(await rig.status(id0)).folder, rig.added], ['Moon_v1_1', ['Moon_v1_1']]);
+  // Имя занято — это вторая карточка: страница скажет об этом, а не просто «игра добавлена»
+  assert.strictEqual((await rig.status(id0)).copy, true);
+  const fresh = crypto.randomBytes(2048);
+  const { id: free } = (await rig.start({ name: 'Free_game.zip', size: fresh.length, fingerprint: 's9' })).body;
+  await rig.chunk(free, 0, fresh);
+  await rig.svc.jobs.get(free);
+  assert.deepStrictEqual([(await rig.status(free)).folder, (await rig.status(free)).copy], ['Free_game', false]);
+  rig.added.length = 1;
+
+  const file = crypto.randomBytes(4096);
+  const { id } = (await rig.start({ name: 'Moon_v1.2.zip', size: file.length, fingerprint: 's1', target: 'Moon_v1' })).body;
+  await rig.chunk(id, 0, file);
+  await rig.svc.jobs.get(id);
+  const st = await rig.status(id);
+  assert.deepStrictEqual([st.state, st.folder, st.error], ['done', 'Moon_v1', '']);
+  assert.strictEqual(await fsp.readFile(path.join(rig.gamesDir, 'Moon_v1', 'index.html'), 'utf8'), 'game', 'файлы — в папке игры с полки');
+  assert.ok(!require('fs').existsSync(path.join(rig.gamesDir, '_old')), 'прежних файлов не было — и в _old ничего');
+  assert.deepStrictEqual(rig.added, ['Moon_v1_1'], 'новой игры от загрузки на полку не появилось (Moon_v1_1 — загруженная выше как новая)');
+  assert.deepStrictEqual(rig.refreshed, [['Moon_v1', 'Moon_v1.2.zip']], 'версию и прочее из файлов — запросили (это и снимает полку)');
+
+  // Прежние файлы ещё в корзине (services/trash.js, shelfToOld) — встают прежней версией в _old, как при обычном обновлении
+  rig.svc.isShelved = async (id) => id === 'Sun_v1';
+  rig.svc.oldFromShelf = async (game, to) => {
+    await fsp.mkdir(to, { recursive: true });
+    await fsp.writeFile(path.join(to, 'index.html'), 'old');
+    return game === 'Sun_v1';
+  };
+  const file2 = crypto.randomBytes(4096);
+  const { id: id2 } = (await rig.start({ name: 'Sun_v1.1.zip', size: file2.length, fingerprint: 's2', target: 'Sun_v1' })).body;
+  await rig.chunk(id2, 0, file2);
+  await rig.svc.jobs.get(id2);
+  assert.strictEqual((await rig.status(id2)).state, 'done');
+  const stamps = await fsp.readdir(path.join(rig.gamesDir, '_old', 'Sun_v1'));
+  assert.strictEqual(stamps.length, 1);
+  assert.strictEqual(await fsp.readFile(path.join(rig.gamesDir, '_old', 'Sun_v1', stamps[0], 'index.html'), 'utf8'), 'old', 'прежняя версия — из корзины');
+  assert.strictEqual(await fsp.readFile(path.join(rig.gamesDir, 'Sun_v1', 'index.html'), 'utf8'), 'game', 'новая — на месте');
+});
+
 test('загрузка: сервер перезапустился посреди замены папок — доделываем по тому, где что лежит', async (t) => {
   const crypto = require('crypto');
   const { UploadService } = require('./src/services/uploads.js');
@@ -2219,7 +2598,7 @@ test('новая версия в базе: название и своя верс
   const { open } = require('sqlite');
   const sqlite3 = require('sqlite3');
   const db = await open({ filename: ':memory:', driver: sqlite3.Database });
-  await db.exec(`CREATE TABLE games (id TEXT PRIMARY KEY, title TEXT, cover TEXT, my_version TEXT, text_lang TEXT, playtime INTEGER, description TEXT, meta_locked TEXT DEFAULT '[]')`);
+  await db.exec(`CREATE TABLE games (id TEXT PRIMARY KEY, title TEXT, cover TEXT, my_version TEXT, text_lang TEXT, playtime INTEGER, description TEXT, meta_locked TEXT DEFAULT '[]', shelved_at INTEGER DEFAULT 0)`);
   const add = (...values) => db.run('INSERT INTO games (id, title, cover, my_version, text_lang, playtime, description) VALUES (?, ?, ?, ?, ?, ?, ?)', values);
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'refresh-'));
   const prev = { db: dbService.db, dir: dbService.GAMES_DIR };
@@ -2239,9 +2618,11 @@ test('новая версия в базе: название и своя верс
   await fsp.mkdir(path.join(root, 'A', 'img', 'titles1'), { recursive: true });
   await fsp.writeFile(path.join(root, 'A', 'img', 'titles1', 'New.png'), 'png');
   await add('A', 'Game A', 'A/img/titles1/Old.png', '1.3', '{"main":"en"}', 500, 'desc');
+  // Игра была «на полке» (services/trash.js): файлы новой версии легли на место — она снова игра
+  await db.run('UPDATE games SET shelved_at = 1767225600000 WHERE id = ?', ['A']);
   assert.deepStrictEqual(await dbService.refreshGame('A', path.join(root, 'A'), { archiveName: 'Game_A_v2.03.zip' }), { version: '2.03' });
   assert.deepStrictEqual(await db.get('SELECT * FROM games WHERE id = ?', 'A'),
-    { id: 'A', title: 'Game A', cover: 'A/img/titles1/New.png', my_version: '2.03', text_lang: null, playtime: 500, description: 'desc', meta_locked: '[]' },
+    { id: 'A', title: 'Game A', cover: 'A/img/titles1/New.png', my_version: '2.03', text_lang: null, playtime: 500, description: 'desc', meta_locked: '[]', shelved_at: 0 },
     'названия в новой версии нет — прежнее остаётся');
 
   // B: в имени архива версии нет — берём из названия в System.json; обложка из _media остаётся
@@ -2346,11 +2727,134 @@ test('7-Zip: разбор списка и понятные причины отк
     { path: 'g', size: 0, encrypted: false },
     { path: 'g/www/index.html', size: 3, encrypted: true },
   ]);
-  assert.match(explain7z('ERROR: e.7z Cannot open encrypted archive. Wrong password?', 2), /под паролем/);
-  assert.match(explain7z('Open ERROR: Cannot open the file as [zip] archive\nERRORS: Is not archive', 2), /не открывается как архив/);
-  assert.match(explain7z('ERROR: CRC Failed : g/www/a.bin', 2), /повреждён/);
-  assert.match(explain7z('ERROR: Dangerous link path was ignored : g/www/up : ../../tmp', 2), /ссылка/);
-  assert.match(explain7z('ERROR: something odd', 7), /7-Zip не справился: ERROR: something odd/);
+  assert.match(explain7z('ERROR: e.7z Cannot open encrypted archive. Wrong password?', 2).message, /под паролем/);
+  assert.match(explain7z('Open ERROR: Cannot open the file as [zip] archive\nERRORS: Is not archive', 2).message, /не открывается как архив/);
+  assert.match(explain7z('ERROR: CRC Failed : g/www/a.bin', 2).message, /повреждён/);
+  assert.match(explain7z('ERROR: Dangerous link path was ignored : g/www/up : ../../tmp', 2).message, /ссылка/);
+  assert.match(explain7z('ERROR: something odd', 7).message, /7-Zip не справился: ERROR: something odd/);
+});
+
+test('загрузка: отказ кодом — движок, нет игры, повреждён; код доходит до состояния и списка, текст журнала прежний', async (t) => {
+  const crypto = require('crypto');
+  const { explain7z } = require('./src/services/uploads.js');
+  const rig = await uploadRig(t);
+  const file = crypto.randomBytes(2048);
+  let n = 0;
+  const upload = async () => {
+    const { id } = (await rig.start({ name: `C${++n}.rar`, size: file.length, fingerprint: 'f6' })).body;
+    await rig.chunk(id, 0, file);
+    await rig.svc.jobs.get(id);
+    return rig.status(id);
+  };
+  const put = (rel) => async (out) => {
+    await fsp.mkdir(path.dirname(path.join(out, rel)), { recursive: true });
+    await fsp.writeFile(path.join(out, rel), 'x');
+  };
+  rig.extract = put('Game/archive.rpa');
+  const renpy = await upload();
+  assert.deepStrictEqual([renpy.state, renpy.reason, renpy.params], ['error', 'other-engine', { engine: ["Ren'Py"] }]);
+  assert.match(renpy.error, /^Это игра на Ren'Py — /);
+  rig.extract = put('Game/Game.rgss3a');
+  const vx = await upload();
+  assert.deepStrictEqual(vx.params, { engine: ['RPG Maker VX Ace', 'VX', 'XP'] });
+  assert.match(vx.error, /RPG Maker VX Ace, VX или XP/, '«или» — у каждого языка своё, в коде только названия');
+  rig.extract = put('readme.txt');
+  assert.strictEqual((await upload()).reason, 'no-game');
+  let opened = 0;
+  rig.extract = async (out) => put(opened++ === 0 ? 'inner.zip' : 'readme.txt')(out);
+  assert.strictEqual((await upload()).reason, 'no-game-nested');
+  const refused = async (text) => {
+    rig.extract = async () => { throw explain7z(text, 2); };
+    return upload();
+  };
+  assert.strictEqual((await refused('ERROR: CRC Failed : a.bin')).reason, 'archive-broken');
+  assert.strictEqual((await refused('Open ERROR: Cannot open the file as [zip] archive')).reason, 'archive-bad');
+  assert.strictEqual((await refused('ERROR: Missing volume : a.002')).reason, 'archive-volumes');
+  const odd = await refused('ERROR: something odd');
+  assert.deepStrictEqual([odd.reason, odd.params], ['archive-tool', { detail: 'ERROR: something odd' }]);
+  rig.extract = null;
+  rig.entries = [{ path: 'a/../../x', size: 1, encrypted: false }];
+  assert.strictEqual((await upload()).reason, 'archive-path');
+  rig.entries = null;
+  const listed = (await rig.call('GET', '/list')).body.find((x) => x.id === renpy.id);
+  assert.deepStrictEqual([listed.reason, listed.params], ['other-engine', { engine: ["Ren'Py"] }], 'строка «не догружено» — с тем же кодом');
+  await rig.svc.writeMeta({ ...(await rig.svc.readMeta(renpy.id)), inbox: true, createdAt: 5 });
+  const inbox = await rig.svc.inboxStatus([renpy.name], 0);
+  assert.deepStrictEqual([inbox.reason, inbox.params], ['other-engine', { engine: ["Ren'Py"] }], 'и ход «Загрузить» — тоже');
+
+  // Под паролем — не ошибка, а ожидание: кода нет, страница смотрит на state
+  rig.entries = [{ path: 'Game/www/index.html', size: 10, encrypted: true }];
+  const locked = await upload();
+  assert.deepStrictEqual([locked.state, locked.reason], ['password', '']);
+  const empty = await rig.call('POST', `/password?id=${locked.id}`, { json: { password: '' } });
+  assert.deepStrictEqual([empty.status, empty.body.reason], [400, 'password-empty']);
+  rig.entries = null;
+
+  // Отказы по HTTP: не архив, загрузки уже нет, нет места — тоже кодом
+  const notArchive = await rig.start({ name: 'notes.txt', size: 5, fingerprint: 'f6' });
+  assert.deepStrictEqual([notArchive.status, notArchive.body.reason], [400, 'archive-only']);
+  const gone = await rig.call('GET', `/status?id=${'0'.repeat(32)}`);
+  assert.deepStrictEqual([gone.status, gone.body.reason], [404, 'upload-gone']);
+  rig.free = 1024 ** 3;
+  const full = await rig.start({ name: 'Big.zip', size: file.length, fingerprint: 'f7' });
+  assert.deepStrictEqual([full.status, full.body.reason], [507, 'space']);
+});
+
+test('telegram: причина неудачной загрузки — на языке получателя, незнакомый код — без русского текста', async (t) => {
+  const { tg, sent } = await telegramRig(t);
+  const error = "Это игра на Ren'Py — библиотека запускает только игры на RPG Maker MV и MZ";
+  const failed = (extra) => tg.uploadFinished({ name: 'g.zip', state: 'error', error, unattended: true, ...extra });
+  await failed({ reason: 'other-engine', params: { engine: ["Ren'Py"] } });
+  assert.ok(sent().at(-1).body.text.includes(error), 'по-русски — слова самого сервера');
+  await tg.savePrefs({ lang: 'en' });
+  await failed({ reason: 'other-engine', params: { engine: ['RPG Maker 2000', '2003'] } });
+  assert.match(sent().at(-1).body.text, /made with RPG Maker 2000 or 2003/);
+  await tg.savePrefs({ lang: 'de' });
+  await failed({ reason: 'no-game' });
+  assert.match(sent().at(-1).body.text, /kein Spiel/);
+  await failed({ reason: '' });
+  assert.match(sent().at(-1).body.text, /Serverprotokoll/);
+  for (const m of sent().slice(1)) assert.ok(!/[а-яё]/i.test(m.body.text.replace(/\n.*/s, '')), m.body.text);
+});
+
+test('резервная копия: не копия и не архив — кодом, а не только русским текстом', async (t) => {
+  const { unpackBackup } = require('./src/routes/backup.js');
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'backup-why-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const junk = path.join(dir, 'junk.zip');
+  await fsp.writeFile(junk, 'это не архив');
+  await assert.rejects(unpackBackup(junk, path.join(dir, 'out')), { status: 400, reason: 'backup-not-archive' });
+});
+
+test('страница ошибки сервера: язык из Accept-Language (ru, en, de), иначе английский; тёмная, как библиотека', async (t) => {
+  const http = require('http');
+  const { createGameApp } = require('./src/routes/play.js');
+  const app = createGameApp({ secret: () => 's1', store: { list: async () => ({}) }, publicDir: __dirname });
+  const server = http.createServer(app);
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  t.after(() => { server.closeAllConnections?.(); server.close(); });
+  const denied = (language) => new Promise((resolve, reject) => {
+    const req = http.request({ port: server.address().port, host: '127.0.0.1', path: `/g/${'0'.repeat(32)}/Game%20A/index.html`, headers: language ? { 'accept-language': language } : {} }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (d) => { text += d; });
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, text }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  const ru = await denied('ru-RU,ru;q=0.9,en;q=0.8');
+  assert.strictEqual(ru.status, 403);
+  assert.match(ru.headers['content-type'], /^text\/html; charset=utf-8/);
+  assert.match(ru.headers.vary, /Accept-Language/);
+  assert.match(ru.text, /<html lang="ru">/);
+  assert.match(ru.text, /<h1>Нет доступа<\/h1>/);
+  assert.match(ru.text, /background: #080608/);
+  assert.match((await denied('de-DE,de;q=0.9')).text, /<h1>Kein Zugriff<\/h1>/);
+  assert.match((await denied('en-US,en;q=0.9')).text, /<h1>Access denied<\/h1>/);
+  assert.match((await denied('en;q=0.5,de;q=0.9')).text, /<h1>Kein Zugriff<\/h1>/, 'важнее тот, кого браузер просит сильнее');
+  assert.match((await denied('fr-FR,fr;q=0.9')).text, /<html lang="en">/, 'такого языка нет — английский');
+  assert.match((await denied('')).text, /<html lang="en">/, 'браузер не сказал — английский');
 });
 
 test('резервная копия: в базе копии нет ключа входа и учётной записи — даже в свободных страницах файла', async (t) => {
@@ -2362,8 +2866,10 @@ test('резервная копия: в базе копии нет ключа в
   const file = path.join(dir, 'library.db');
   const secret = 'f00d'.repeat(32);
   const db = await open({ filename: file, driver: sqlite3.Database });
-  await db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE games (id TEXT PRIMARY KEY, playtime INTEGER)');
-  for (const [key, value] of [['session_secret', secret], ['admin_user', 'owner'], ['admin_pass', '$2b$10$hashhashhash'], ['scraper_api_key', 'scraperkey0123456789'], ['known_langs', '["en","ru"]']]) {
+  await db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); CREATE TABLE games (id TEXT PRIMARY KEY, playtime INTEGER); CREATE TABLE sessions (id TEXT, token_hash TEXT); CREATE TABLE users (id TEXT, pass_hash TEXT)');
+  await db.run("INSERT INTO sessions VALUES ('s1', 'tokenhash0123456789')");
+  await db.run("INSERT INTO users VALUES ('u1', '$2b$10$userhashhash')");
+  for (const [key, value] of [['legacy_session_until', '99999999999999'], ['accounts_epoch', '5'], ['session_secret', secret], ['admin_user', 'owner'], ['admin_pass', '$2b$10$hashhashhash'], ['scraper_api_key', 'scraperkey0123456789'], ['known_langs', '["en","ru"]']]) {
     await db.run('INSERT INTO settings (key, value) VALUES (?, ?)', [key, value]);
   }
   await db.run("INSERT INTO games (id, playtime) VALUES ('G', 600)");
@@ -2375,8 +2881,11 @@ test('резервная копия: в базе копии нет ключа в
   assert.strictEqual(bytes.includes(secret), false);
   assert.strictEqual(bytes.includes('$2b$10$hashhashhash'), false);
   assert.strictEqual(bytes.includes('scraperkey0123456789'), false);
+  assert.strictEqual(bytes.includes('tokenhash0123456789'), false, 'хэши токенов входа в копию не идут');
+  assert.strictEqual(bytes.includes('$2b$10$userhashhash'), false, 'хэши паролей людей — тоже');
   const copy = await open({ filename: file, driver: sqlite3.Database });
   t.after(() => copy.close());
+  // Окно старой куки и эпоха тоже не остаются: восстановление не должно открывать закрытое окно
   assert.deepStrictEqual(await copy.all('SELECT key, value FROM settings'), [{ key: 'known_langs', value: '["en","ru"]' }]);
   assert.deepStrictEqual(await copy.all('SELECT id, playtime FROM games'), [{ id: 'G', playtime: 600 }]);
 });
@@ -2592,6 +3101,8 @@ async function telegramRig(t, { chat = { id: 42, name: 'Me' } } = {}) {
     const file = path.join(dir, 'b.zip'); await fsp.writeFile(file, 'zip'); return { file, name: 'b.zip', size: 3, games: 2, saves: 1 };
   } });
   if (chat) await tg.setJson('telegram_chat', chat);
+  // Тексты проверяем по-русски; запасной язык — отдельный тест («без записанного языка»)
+  await tg.savePrefs({ lang: 'ru' });
   return { tg, db, calls, sent: () => calls.filter((c) => c.method.startsWith('send')) };
 }
 
@@ -2614,6 +3125,14 @@ test('telegram: загрузка — только если за ней никт�
   await tg.uploadFinished({ name: 'x.rar', state: 'password', unattended: true });
   assert.match(sent()[0].body.text, /Игра добавлена: <b>Great Game<\/b>/);
   assert.strictEqual(sent()[1].body.disable_notification, false);
+  // Не хватило места на распаковку — архив ждёт, с числами
+  await tg.uploadFinished({ name: 'big.7z', state: 'space', error: 'Не хватает места для распаковки', need: 3 * 1024 ** 3, free: 2 * 1024 ** 3, unattended: true });
+  assert.match(sent()[2].body.text, /не хватило места на распаковку: нужно 3 ГБ, свободно 2 ГБ\. Архив сохранён/);
+  // В ту же игру: новая версия — «обновлена», с полки — «вернулась»
+  await tg.uploadFinished({ name: 'g2.zip', state: 'done', target: 'G', version: 'v2', unattended: true });
+  await tg.uploadFinished({ name: 'g3.zip', state: 'done', target: 'G', version: 'v3', shelf: true, unattended: true });
+  assert.match(sent()[3].body.text, /Игра обновлена: <b>Great Game<\/b> — версия v2/);
+  assert.match(sent()[4].body.text, /Игра вернулась с полки: <b>Great Game<\/b> — версия v3/);
 });
 
 test('telegram: копия — раз в сутки и только если что-то изменилось; кнопка шлёт сразу', async (t) => {
@@ -2629,6 +3148,50 @@ test('telegram: копия — раз в сутки и только если ч�
   await tg.setJson('telegram_backup', { ...(await tg.getJson('telegram_backup')), at: Date.now() - 21 * 3600e3 });
   assert.deepStrictEqual(await tg.checkBackup(), { sent: true });
   assert.deepStrictEqual(await tg.checkBackup({ force: true }), { sent: true });
+  assert.strictEqual(sent().length, 3);
+});
+
+test('telegram: отпечаток копии — с одним владельцем прежний до байта, а изменение у человека (строка или сейв) ведёт к новой копии', async (t) => {
+  const crypto = require('crypto');
+  const { tg, db, sent } = await telegramRig(t);
+  await db.run("INSERT INTO games (id, title, playtime) VALUES ('G', 'G', 10)");
+  const saves = path.join(tg.savesDir);
+  await fsp.mkdir(path.join(saves, 'G'), { recursive: true });
+  await fsp.writeFile(path.join(saves, 'G', 'RPG%20File1.json'), 'save');
+  // Как считалось до людей: игры, список желаний, файлы сейвов владельца
+  const old = async () => {
+    const h = crypto.createHash('sha1');
+    h.update(JSON.stringify(await db.all('SELECT id, title, status, rating, link, my_version, meta_locked, lastPlayed, playtime FROM games ORDER BY id')));
+    h.update(JSON.stringify(await db.all('SELECT key FROM wishlist ORDER BY key')));
+    const st = await fsp.stat(path.join(saves, 'G', 'RPG%20File1.json'));
+    h.update(`G/RPG%20File1.json:${st.size}:${Math.round(st.mtimeMs)}\n`);
+    return h.digest('hex');
+  };
+  assert.strictEqual(await tg.changeMark(), await old(), 'таблиц людей нет вовсе');
+  await db.exec('CREATE TABLE user_games (user_id TEXT, game_id TEXT, playtime INTEGER, PRIMARY KEY (user_id, game_id)); CREATE TABLE user_wishlist (user_id TEXT, key TEXT, PRIMARY KEY (user_id, key))');
+  assert.strictEqual(await tg.changeMark(), await old(), 'таблицы есть, но пусты — отпечаток тот же');
+
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: true });
+  const aDay = async () => tg.setJson('telegram_backup', { ...(await tg.getJson('telegram_backup')), at: Date.now() - 21 * 3600e3 });
+  await aDay();
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: false }, 'ничего не менялось');
+
+  await db.run("INSERT INTO user_games VALUES ('u0123456789abcdef', 'G', 60)");
+  await aDay();
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: true }, 'человек поиграл — копия нужна');
+  await aDay();
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: false });
+
+  const mine = path.join(saves, '.people', 'u0123456789abcdef', 'G');
+  await fsp.mkdir(mine, { recursive: true });
+  await fsp.writeFile(path.join(mine, 'RPG%20File1.json'), 'his save');
+  await aDay();
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: true }, 'сейв человека — тоже');
+  // История и моменты человека отпечаток не двигают, как и у владельца
+  await fsp.mkdir(path.join(saves, '.people', 'u0123456789abcdef', '.history', 'G'), { recursive: true });
+  await fsp.writeFile(path.join(saves, '.people', 'u0123456789abcdef', '.history', 'G', 'x.json'), 'old');
+  await aDay();
+  assert.deepStrictEqual(await tg.checkBackup(), { sent: false });
   assert.strictEqual(sent().length, 3);
 });
 
@@ -2818,6 +3381,15 @@ test('сервер игр: ключ подходит только к своей 
   assert.strictEqual((await fetch(markUrl(`/${choiceId}/answer`), { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"cancel":true}' })).status, 200);
   const cancelled = (await (await fetch(markUrl())).json()).find((m) => m.id === choiceId);
   assert.deepStrictEqual([cancelled.cancel, cancelled.answer], [true, undefined], 'отказ — отметкой, прежний ответ снят');
+  // «Где вышли» посреди сцены — в списке mid; строка в журнале с устройством: по ней видно, долетает ли точка с iPhone
+  const exitLog = [];
+  t.mock.method(console, 'log', (...a) => { exitLog.push(a.join(' ')); });
+  const iphone = 'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
+  r = await fetch(markUrl(), { method: 'POST', headers: { 'content-type': 'application/json', 'user-agent': iphone }, body: JSON.stringify({ kind: 'auto', why: 'exit', mid: true, standalone: true, label: 'Ты опять опоздал', value: '{"s":4}', thumb: jpg }) });
+  t.mock.restoreAll();
+  const { id: exitId } = await r.json();
+  assert.strictEqual((await (await fetch(markUrl())).json()).find((m) => m.id === exitId).mid, true);
+  assert.deepStrictEqual(exitLog.filter((l) => l.startsWith('[Где вышли]')), ['[Где вышли] Game A: посреди сцены, iPhone · веб-приложение, 0 КБ']);
   // «Путь»: запись по ключу своей игры, чужая — 403
   const journalUrl = (game, rest = '') => `${base}/journal/${key}/${encodeURIComponent(game)}${rest}`;
   r = await fetch(journalUrl('Game A'), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ kind: 'map', label: 'Дом', mapId: 2 }) });
@@ -2917,6 +3489,87 @@ test('моменты: хранилище — подпись в одну стро
   fs.utimesSync(path.join(trash, `${b.id}.json`), old, old);
   await store.remove('G', a.id);
   assert.deepStrictEqual(fs.readdirSync(trash).sort(), [`${a.id}.jpg`, `${a.id}.json`, `${a.id}.save.gz`]);
+});
+
+test('моменты: «Где вышли» посреди сцены — mid и версия игры от сервера; из прежней версии игры — stale', async (t) => {
+  const { createMarkStore } = require('./src/utils/marks.js');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marks-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  let rev = 'r1';
+  const store = createMarkStore(dir, { revOf: async (g) => (g === 'G' ? rev : '') });
+  const exit = await store.create('G', { kind: 'auto', why: 'exit', mid: true, rev: 'fake', label: 'Ты опять опоздал', value: '{"e":1}' });
+  const onMap = await store.create('G', { kind: 'auto', why: 'exit', value: '{"e":2}' });
+  const asText = await store.create('G', { kind: 'auto', why: 'exit', mid: 'true', value: '{"e":3}' });
+  const scene = await store.create('G', { kind: 'auto', why: 'scene', mid: true, line: 'line0001', value: '{"s":1}' });
+  const own = await store.create('G', { kind: 'mark', why: 'exit', mid: true, value: '{"m":1}' });
+  let list = await store.list('G');
+  const by = (id) => list.find((m) => m.id === id);
+  assert.deepStrictEqual([by(exit.id).mid, by(exit.id).stale], [true, undefined]);
+  for (const m of [onMap, asText, scene, own]) assert.ok(!('mid' in by(m.id)), 'mid — только у «Где вышли» и только true');
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dir, '.marks', 'G', `${exit.id}.json`), 'utf8')).rev, 'r1', 'версия — от сервера, не из тела');
+  assert.ok(!('rev' in by(exit.id)), 'версия наружу не отдаётся');
+  // Игру обновили — середина сцены из прежней версии; точка на карте — нет
+  rev = 'r2';
+  list = await store.list('G');
+  assert.strictEqual(by(exit.id).stale, true);
+  assert.ok(!('stale' in by(onMap.id)));
+});
+
+test('моменты: версия игры — папка: «Обновить игру» новой версией и патчем делают точку посреди сцены stale, включение перевода — нет', async (t) => {
+  const { createMarkStore, folderRev } = require('./src/utils/marks.js');
+  const { TranslateService } = require('./src/services/translate.js');
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const rig = await uploadRig(t);
+  const g = path.join(rig.gamesDir, 'G', 'www');
+  await fsp.mkdir(path.join(g, 'data'), { recursive: true });
+  await fsp.writeFile(path.join(g, 'index.html'), 'game');
+  await fsp.writeFile(path.join(g, 'data', 'Map001.json'), 'jp');
+  rig.svc.refreshGame = async () => ({});
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'marks-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const store = createMarkStore(dir, { revOf: folderRev(rig.gamesDir) });
+  const point = async () => (await store.create('G', { kind: 'auto', why: 'exit', mid: true, label: 'Реплика', value: '{"e":1}' })).id;
+  const stale = async (id) => !!(await store.list('G')).find((m) => m.id === id).stale;
+  const upload = async (meta) => {
+    const file = Buffer.from(meta.fingerprint);
+    const { body } = await rig.start({ ...meta, size: file.length, target: 'G' });
+    await rig.chunk(body.id, 0, file);
+    await rig.until(async () => (await rig.status(body.id)).state === 'done', meta.name);
+  };
+
+  // Включили перевод: словарь и выбор языка — в базе, папка игры та же
+  const first = await point();
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  t.after(() => db.close());
+  await db.exec(`CREATE TABLE game_translation (id TEXT PRIMARY KEY, lang TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, engine TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL DEFAULT 0,
+    check_at INTEGER NOT NULL DEFAULT 0, check_result TEXT NOT NULL DEFAULT '')`);
+  const tl = new TranslateService();
+  tl.setDependencies({ dbService: { get: () => db }, gamesDir: rig.gamesDir });
+  tl.enqueue = () => {};                            // сам перевод (службы, сеть) здесь не нужен
+  tl.status = async () => ({});
+  await tl.setLang('G', 'ru');
+  assert.strictEqual(await stale(first), false, 'перевод — та же версия игры');
+
+  // Патч (копия из жёстких ссылок и замена папки) — версия другая
+  rig.entries = [{ path: 'Patch/www/data/Map001.json', size: 2, encrypted: false }];
+  rig.extract = async (out) => {
+    await fsp.mkdir(path.join(out, 'Patch', 'www', 'data'), { recursive: true });
+    await fsp.writeFile(path.join(out, 'Patch', 'www', 'data', 'Map001.json'), 'en');
+  };
+  await upload({ name: 'Patch.zip', fingerprint: 'rev1', mode: 'patch' });
+  assert.strictEqual(await stale(first), true, 'после патча');
+
+  // Новая версия целиком — тоже
+  const second = await point();
+  assert.strictEqual(await stale(second), false);
+  rig.entries = null;
+  rig.extract = null;
+  // Прежняя версия уходит в _old/G/<секунда>: вторая замена в ту же секунду считала бы себя уже сделанной
+  await new Promise((r) => setTimeout(r, 1100));
+  await upload({ name: 'G_v2.zip', fingerprint: 'rev2' });
+  assert.strictEqual(await stale(second), true, 'после новой версии');
 });
 
 test('моменты: снимок без сейва, кадр целиком; перемотка — по времени, по прохождениям, слитые точки, путь к нынешнему; «Оставить»; моменты до сжатия читаются', async (t) => {
@@ -3149,13 +3802,13 @@ test('распаковка: игра не на MV/MZ — ошибка назыв
   await put('mv/Game/www/index.html');
   await put('vxopen/Game/Data/Actors.rvdata2');
   await put('r2k/Game/RPG_RT.exe');
-  assert.strictEqual(await otherEngine(path.join(root, 'vx')), 'RPG Maker VX Ace, VX или XP');
-  assert.strictEqual(await otherEngine(path.join(root, 'wolf')), 'WOLF RPG Editor');
-  assert.strictEqual(await otherEngine(path.join(root, 'renpy')), "Ren'Py");
-  assert.strictEqual(await otherEngine(path.join(root, 'unity')), 'Unity');
-  assert.strictEqual(await otherEngine(path.join(root, 'mv')), '');
-  assert.strictEqual(await otherEngine(path.join(root, 'vxopen')), 'RPG Maker VX Ace, VX или XP', 'незашифрованный VX Ace (переводы)');
-  assert.strictEqual(await otherEngine(path.join(root, 'r2k')), 'RPG Maker 2000 или 2003');
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'vx')), ['RPG Maker VX Ace', 'VX', 'XP']);
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'wolf')), ['WOLF RPG Editor']);
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'renpy')), ["Ren'Py"]);
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'unity')), ['Unity']);
+  assert.strictEqual(await otherEngine(path.join(root, 'mv')), null);
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'vxopen')), ['RPG Maker VX Ace', 'VX', 'XP'], 'незашифрованный VX Ace (переводы)');
+  assert.deepStrictEqual(await otherEngine(path.join(root, 'r2k')), ['RPG Maker 2000', '2003']);
   // Настоящий сервис загрузки: архив с игрой на VX Ace — ошибка с движком, архив из «Входящих» не стёрт
   const rig = await uploadRig(t);
   rig.entries = [{ path: 'Moonlit Paradox/Game.rgss3a', size: 10, encrypted: false }];
@@ -4041,7 +4694,7 @@ test('галерея: распознавание — ответы без век�
   assert.strictEqual(asked, 0);
 });
 
-test('поиск по картинкам: лучшие из всех игр, повтор рисунка одним, кэш не больше 40 игр, недописанный файл не запоминается', async (t) => {
+test('поиск по картинкам: лучшие из всех игр, повтор рисунка одним, кэш не больше SEARCH_GAMES игр, недописанный файл не запоминается', async (t) => {
   const { GalleryService } = require('./src/services/gallery.js');
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-search-'));
   t.after(() => fsp.rm(root, { recursive: true, force: true }));
@@ -4066,27 +4719,1258 @@ test('поиск по картинкам: лучшие из всех игр, п�
   assert.ok(!svc.searchMemo.has('C'));
   await save('C', { 'c1.png\n1': pack([110]) });
   assert.deepStrictEqual((await svc.searchPictures(query, ['C'], 3)).rows.map((r) => r.file), ['c1.png']);
-  // Игр в памяти не больше сорока
+  // Игр в памяти не больше SEARCH_GAMES
+  const { SEARCH_GAMES } = require('./src/services/gallery.js');
   const ids = [];
-  for (let i = 0; i < 45; i++) { ids.push(`G${i}`); await save(`G${i}`, { 'x.png\n1': pack([i + 1]) }); }
+  for (let i = 0; i < SEARCH_GAMES + 5; i++) { ids.push(`G${i}`); await save(`G${i}`, { 'x.png\n1': pack([i % 100 + 1]) }); }
   await svc.searchPictures(query, ids, 5);
-  assert.strictEqual(svc.searchMemo.size, 40);
+  assert.strictEqual(svc.searchMemo.size, SEARCH_GAMES);
 });
 
-test('поиск по картинкам: подсказка английским словом — по основе, короткие ключи только целым словом или с окончанием', () => {
+test('поиск по картинкам: слова из словаря заменяются английскими — по основе, короткие ключи только целым словом или с окончанием', () => {
   const { GalleryText } = require('./src/services/galleryText.js');
-  const hint = (q) => GalleryText.prototype.withEnglish.call({}, q);
-  // Ложные срабатывания по началу слова
-  for (const q of ['садистка', 'лесбиянка', 'банк', 'бандит', 'оркестр', 'картина', 'hundred', 'grasp', 'mannequin']) assert.strictEqual(hint(q), q, q);
-  // Целое слово и падежи
-  assert.strictEqual(hint('сад'), 'сад, garden');
-  assert.strictEqual(hint('в саду'), 'в саду, garden');
-  assert.strictEqual(hint('лесом'), 'лесом, forest');
-  assert.strictEqual(hint('Hund'), 'Hund, dog');
-  assert.strictEqual(hint('Hunde'), 'Hunde, dog');
-  // Длинный ключ — по началу слова
-  assert.strictEqual(hint('драконами'), 'драконами, dragon');
-  assert.strictEqual(hint('горничные'), 'горничные, maid');
+  const hint = (q) => GalleryText.prototype.toEnglish.call({}, q);
+  // Ложные срабатывания по началу слова; английский запрос не трогаем
+  for (const q of ['садовник', 'банк', 'бандит', 'оркестр', 'картина', 'голова', 'работа', 'мечта', 'лесть', 'hundred', 'grasp', 'mannequin', 'under', 'girl in the bath',
+    'regeneration', 'muttering', 'stranded', 'Unterhose']) assert.strictEqual(hint(q), q, q);
+  // Целое слово и падежи; «лесть» — не «лес»
+  assert.strictEqual(hint('сад'), 'garden');
+  assert.strictEqual(hint('в саду'), 'в garden');
+  assert.strictEqual(hint('лесом'), 'forest');
+  assert.strictEqual(hint('кровью'), 'blood');
+  assert.strictEqual(hint('Верёвка'), 'rope');
+  assert.strictEqual(hint('Hund'), 'dog');
+  assert.strictEqual(hint('Hunde'), 'dog');
+  // Длинный ключ — по началу слова; самый длинный из подходящих («кровать» — не «кровь», «меч» — не «мечта»)
+  assert.strictEqual(hint('драконами'), 'dragon');
+  assert.strictEqual(hint('горничные'), 'maid');
+  assert.strictEqual(hint('кровать'), 'bed');
+  assert.strictEqual(hint('мечом'), 'sword');
+  // Фразы: русское слово не остаётся рядом с английским, знаки и незнакомые слова — как были
+  assert.strictEqual(hint('Горничная в платье, ночью'), 'maid в dress, night');
+  assert.strictEqual(hint('Mädchen mit Kleid'), 'girl mit dress');
+  assert.strictEqual(hint('Аква'), 'Аква');
+});
+
+test('поиск по картинкам: слова запроса → теги разметчика — свои синонимы, имя тега, множественное число, до трёх слов', () => {
+  const { GalleryTags, pack, unpack } = require('./src/services/galleryTags.js');
+  const tags = new GalleryTags();
+  // Как список модели: сначала рейтинг (не «общие» — null), потом теги
+  const names = [null, null, 'white_dress', 'dress', 'witch_hat', 'robe', 'ocean', 'beach', 'maid', 'cat', 'night'];
+  const show = (q) => tags.concepts(q, names).map((g) => g.map((i) => names[i]).join('|'));
+  assert.deepStrictEqual(show('wedding dress'), ['white_dress'], 'два слова — свой синоним, а не «dress»');
+  assert.deepStrictEqual(show('witch hat'), ['witch_hat'], 'два слова — один тег');
+  assert.deepStrictEqual(show('witch'), ['witch_hat|robe'], 'синоним: кадру хватит любого тега группы');
+  assert.deepStrictEqual(show('sea'), ['ocean|beach']);
+  assert.deepStrictEqual(show('Cats'), ['cat']);
+  assert.deepStrictEqual(show('wedding dress girl'), ['white_dress'], '«girl» — без тега, его ищет CLIP');
+  assert.deepStrictEqual(show('maid in dress, night'), ['maid', 'dress', 'night']);
+  assert.deepStrictEqual(tags.concepts('maid', null), [], 'списка нет — без тегов');
+  // Теги кадра в файле: номер и уверенность 0…255
+  assert.deepStrictEqual(unpack(pack([2, 230, 1000, 51])), [2, 230, 1000, 51]);
+  assert.deepStrictEqual(unpack(''), []);
+});
+
+test('поиск по картинкам: теги поднимают нужные кадры, не больше четырёх подряд из одной игры, «Ещё» и «Похожие»', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { pack: packTags } = require('./src/services/galleryTags.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-tags-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  svc.vision = { available: true, version: 'v', embedModel: 'clip' };
+  svc.tags = { version: 'wd', unpack: require('./src/services/galleryTags.js').unpack };
+  svc.knows = async () => true;
+  // Векторы разные (иначе — копии одного рисунка), близость к запросу падает по номеру
+  const vec = (i) => Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? 100 - i : k === i + 1 ? 120 : 0))).toString('base64');
+  const write = async (id, embeds, tagged) => {
+    await fsp.mkdir(path.join(root, '_media', id), { recursive: true });
+    await fsp.writeFile(svc.picturesPath(id), JSON.stringify({ model: 'clip', items: embeds }));
+    if (tagged) await fsp.writeFile(svc.tagsPath(id), JSON.stringify({ model: 'wd', items: tagged }));
+  };
+  // A: шесть кадров ближе всех; у a5 — тег 7 (sword). B: два кадра подальше. Пустая строка — нечитаемый кадр
+  await write('A', Object.fromEntries([0, 1, 2, 3, 4, 5].map((i) => [`a${i}.png\n1`, vec(i)]).concat([['bad.png\n1', '']])), { 'a5.png\n1': packTags([7, 230]) });
+  await write('B', { 'b0.png\n1': vec(10), 'b1.png\n1': vec(11) });
+  // Кнопка «Что на картинках»: только игры этого человека, B без файла тегов
+  assert.strictEqual(await svc.anyTagged(['B', 'A']), true);
+  assert.strictEqual(await svc.anyTagged(['B']), false);
+  assert.strictEqual(await svc.anyTagged([]), false);
+  const query = Float32Array.from({ length: 512 }, (_, i) => (i === 0 ? 1 : 0));
+  const files = (r) => r.rows.map((x) => x.file);
+  const plain = await svc.searchPictures(query, ['A', 'B'], 8);
+  assert.deepStrictEqual(files(plain), ['a0.png', 'a1.png', 'a2.png', 'a3.png', 'b0.png', 'b1.png', 'a4.png', 'a5.png'], 'пятый и шестой кадр A — после B');
+  assert.strictEqual(plain.more, false);
+  // Тег понятия запроса поднимает кадр над ближайшими по CLIP
+  const tagged = await svc.searchPictures(query, ['A', 'B'], 3, { groups: [[7, 8]] });
+  assert.strictEqual(tagged.rows[0].file, 'a5.png');
+  assert.ok(tagged.rows[0].score > 1, String(tagged.rows[0].score));
+  // Страницы: вторая — с третьей картинки, тот же порядок
+  const page = await svc.searchPictures(query, ['A', 'B'], 3, { from: 3 });
+  assert.deepStrictEqual(files(page), ['a3.png', 'b0.png', 'b1.png']);
+  assert.strictEqual(page.more, true);
+  // «Похожие»: сам кадр не в счёт; его вектор — из разобранного
+  const like = await svc.frameVector('A', 'a2.png');
+  assert.ok(Math.abs(like[0] - 0.49) < 1e-6 && Math.abs(like[3] - 0.6) < 1e-6);
+  assert.ok(!files(await svc.searchPictures(like, ['A', 'B'], 8, { exclude: { game: 'A', file: 'a2.png' } })).includes('a2.png'));
+  // Векторы распознавания (1–3 кадра альбома) тоже в поиске, вместе с разбором всех кадров; пустая строка разбора их
+  // не затирает
+  await fsp.writeFile(svc.visionPath('B'), JSON.stringify({ version: 'v', scores: {}, embeds: { 'b9.png\n1': vec(9), 'b1.png\n1': vec(11) } }));
+  await write('B', { 'b0.png\n1': vec(10), 'b1.png\n1': '' });
+  assert.deepStrictEqual(files(await svc.searchPictures(query, ['B'], 5)), ['b9.png', 'b0.png', 'b1.png']);
+  // Игра с сотнями кадров ближе всех: всё равно четыре, потом другие игры; страницы «Ещё» — без повторов и в том же
+  // порядке, что одним запросом
+  const many = (n) => Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? 120 - (n % 20) : k === 1 + (n % 400) ? 100 : 0))).toString('base64');
+  await write('F', Object.fromEntries(Array.from({ length: 300 }, (_, i) => [`f${i}.png\n1`, many(i)])));
+  const whole = files(await svc.searchPictures(query, ['F', 'A', 'B'], 30));
+  assert.deepStrictEqual(whole.slice(0, 4).map((f) => f[0]), ['f', 'f', 'f', 'f']);
+  assert.ok(whole.slice(4, 11).every((f) => f[0] !== 'f'), whole.join());
+  assert.strictEqual(whole[11][0], 'f', 'кадры других игр кончились — снова F');
+  const paged = [];
+  for (const from of [0, 10, 20]) paged.push(...files(await svc.searchPictures(query, ['F', 'A', 'B'], 10, { from })));
+  assert.deepStrictEqual(paged, whole);
+  assert.strictEqual(new Set(paged).size, 30);
+});
+
+test('поиск по картинкам: разбор всех кадров — векторы и теги, готовое не считает, запоминает нечитаемое, без модели стоит', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-pass-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  await fsp.mkdir(path.join(root, 'G'), { recursive: true });
+  const index = { albums: [
+    { kind: 'cg', files: ['a.png', 'b.png', 'bad.png'] },
+    { kind: 'cg', anim: true, files: ['f1.png', 'f2.png', 'f3.png'] },   // анимация — первый кадр
+    { kind: 'portrait', files: ['p.png'] },                               // не CG — не в поиске
+    { kind: 'animation', script: true, files: ['v1.webm', 'v2.webm', 'v3.webm'], scenes: [{ f: [0] }, { f: [2] }] },   // ролики-сцены — первый кадр каждой сцены
+    { kind: 'dialogue', script: true, files: ['face.png'] },
+    { kind: 'animation', script: true, spine: true, files: ['rig.json'] },
+  ] };
+  svc.cached = async () => index;
+  svc.scenesOf = async () => ({});
+  svc.contentRoot = async () => root;
+  // bad.png не прочитать никогда; у flaky.png миниатюра не вышла (ffmpeg не успел) — это не навсегда
+  svc.thumb = async (id, rel) => { if (rel === 'flaky.png') throw new Error('timeout'); return rel === 'bad.png' ? null : `/thumbs/${rel}`; };
+  const seen = [];
+  let model = true;
+  svc.vision = { available: true, version: 'v', embedModel: 'clip', score: async (file, out) => { seen.push(file); if (!model) return null; out.embed = Array.from({ length: 512 }, (_, i) => (i === 0 ? 1 : 0)); return 0.5; } };
+  svc.tags = { version: 'wd', tag: async (file) => (model ? `T:${file}` : null) };
+  // Вектор, который уже посчитало распознавание, — берём готовым
+  await fsp.writeFile(svc.visionPath('G'), JSON.stringify({ version: 'v', scores: {}, embeds: { 'a.png\n0': 'READY' } }));
+  await svc.picturePass('G', 'embeds');
+  await svc.picturePass('G', 'tags');
+  const read = async (f) => JSON.parse(await fsp.readFile(f, 'utf8'));
+  const emb = await read(svc.picturesPath('G'));
+  assert.strictEqual(emb.model, 'clip');
+  assert.deepStrictEqual(Object.keys(emb.items).sort(), ['a.png\n0', 'b.png\n0', 'bad.png\n0', 'f1.png\n0', 'v1.webm\n0', 'v3.webm\n0']);
+  assert.strictEqual(emb.items['a.png\n0'], 'READY');
+  assert.strictEqual(emb.items['bad.png\n0'], '', 'нечитаемый кадр — пустая строка');
+  assert.deepStrictEqual(seen, ['/thumbs/b.png', '/thumbs/f1.png', '/thumbs/v1.webm', '/thumbs/v3.webm']);
+  const tg = await read(svc.tagsPath('G'));
+  assert.deepStrictEqual(tg, { model: 'wd', items: { 'a.png\n0': 'T:/thumbs/a.png', 'b.png\n0': 'T:/thumbs/b.png', 'bad.png\n0': '', 'f1.png\n0': 'T:/thumbs/f1.png', 'v1.webm\n0': 'T:/thumbs/v1.webm', 'v3.webm\n0': 'T:/thumbs/v3.webm' } });
+  // Второй проход — ничего не считает; кадр ушёл из оглавления — из файла тоже
+  seen.length = 0;
+  index.albums[0].files = ['a.png', 'b.png'];
+  await svc.picturePass('G', 'embeds');
+  assert.deepStrictEqual(seen, []);
+  assert.ok(!('bad.png\n0' in (await read(svc.picturesPath('G'))).items));
+  // Временный сбой миниатюры или модели — не записываем, следующий проход попробует снова
+  index.albums[0].files.push('flaky.png', 'odd.png');
+  const tag = svc.tags.tag;
+  svc.tags.tag = async (file) => { if (file.endsWith('odd.png')) throw new Error('onnx'); return tag(file); };
+  await svc.picturePass('G', 'tags');
+  const after = (await read(svc.tagsPath('G'))).items;
+  assert.ok(!('flaky.png\n0' in after) && !('odd.png\n0' in after));
+  svc.tags.tag = tag;
+  index.albums[0].files = ['a.png', 'b.png'];
+  // Новый кадр, а модели нет — проход останавливается, ничего не помечая
+  index.albums[0].files.push('c.png');
+  model = false;
+  await svc.picturePass('G', 'tags');
+  assert.ok(!('c.png\n0' in (await read(svc.tagsPath('G'))).items));
+  // Игру убрали (корзина, полка) — проход ничего не пишет
+  model = true;
+  await fsp.rm(path.join(root, 'G'), { recursive: true });
+  const before = await fsp.readFile(svc.tagsPath('G'), 'utf8');
+  await svc.picturePass('G', 'tags');
+  assert.strictEqual(await fsp.readFile(svc.tagsPath('G'), 'utf8'), before);
+});
+
+test('поиск по картинкам: очередь разбора — только с PICTURE_PASS=1, новая игра — следующей, сколько разобрано', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const svc = new GalleryService();
+  svc.vision = { available: true };
+  const order = [];
+  let release;
+  const gate = new Promise((r) => { release = r; });
+  let counted;
+  const counting = new Promise((r) => { counted = r; });
+  svc.cached = async (id) => { if (id === 'C') await counting; return { albums: [{ kind: 'cg', files: ['a.png', 'b.png'] }] }; };
+  svc.picturePass = async (id, kind) => { order.push(`${kind}:${id}`); if (id === 'A') await gate; svc.pictureQueue[kind].done += 2; };
+  svc.visionPass = async () => {};
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  // «Разбор закончен» — в журнал сервера, а не в вывод тестов
+  t.mock.method(console, 'log', () => {});
+  delete process.env.PICTURE_PASS;
+  svc.queuePictures(['A', 'B']);
+  assert.strictEqual(svc.pictureQueue, undefined, 'без PICTURE_PASS=1 — не идёт');
+  assert.strictEqual(svc.pictureStatus(), null);
+  process.env.PICTURE_PASS = '1';
+  svc.queuePictures(['A', 'B', 'C']);
+  svc.queuePictures(['C'], { first: true });
+  await new Promise((r) => setImmediate(r));
+  assert.deepStrictEqual(svc.pictureStatus(), { embeds: { done: 0, total: 4, running: true }, tags: { done: 0, total: 4, running: true } });
+  // Очередь прошла все игры и ждёт подсчёт кадров — в этот миг пришла новая: её не теряем
+  release();
+  while (order.length < 6) await new Promise((r) => setTimeout(r, 5));
+  svc.queuePictures(['D']);
+  counted();
+  while (svc.pictureStatus()) await new Promise((r) => setTimeout(r, 5));
+  assert.deepStrictEqual(order.filter((x) => x.startsWith('embeds')), ['embeds:A', 'embeds:C', 'embeds:B', 'embeds:D'], 'C — следующей после той, что идёт');
+  assert.strictEqual(svc.pictureQueue.tags.done, 8);
+  assert.strictEqual(svc.pictureQueue.tags.total, 8);
+});
+
+test('теги картинок: кадра, игры и по тегу — только уверенные и говорящие о картинке, про детей — никогда', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const real = require('./src/services/galleryTags.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-tagshow-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  const names = [null, 'cat', '1girl', 'censored', 'blue_eyes', 'sword', 'child', 'baby', 'maid', 'castle'];
+  svc.vision = { available: true, version: 'v', embedModel: 'clip' };
+  svc.tags = { version: 'wd', unpack: real.unpack, list: async () => names, shown: real.shown.bind(real) };
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const vec = Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? 100 : 0))).toString('base64');
+  // Пять кадров; cat — на двух уверенно и на одном слабо (0,2)
+  const p = (x) => Math.round(x * 255);
+  const frames = {
+    'a.png': [1, p(0.9), 2, p(1), 3, p(0.9), 4, p(0.8), 5, p(0.6), 9, p(0.9)],
+    'b.png': [1, p(0.5), 6, p(0.9), 7, p(0.9), 9, p(0.9)],
+    'c.png': [1, p(0.2), 8, p(0.7), 9, p(0.9)],
+    'd.png': [8, p(0.6), 9, p(0.9)],
+    'e.png': [9, p(0.9)],
+  };
+  await fsp.writeFile(svc.picturesPath('G'), JSON.stringify({ model: 'clip', items: Object.fromEntries(Object.keys(frames).map((f) => [`${f}\n1`, vec])) }));
+  await fsp.writeFile(svc.tagsPath('G'), JSON.stringify({ model: 'wd', items: Object.fromEntries(Object.entries(frames).map(([f, l]) => [`${f}\n1`, real.pack(l)])) }));
+  assert.deepStrictEqual(await svc.frameTags('G', 'a.png'), [{ tag: 'castle', p: 0.9 }, { tag: 'cat', p: 0.9 }, { tag: 'sword', p: 0.6 }], 'без 1girl, цензуры и цвета глаз');
+  assert.deepStrictEqual(await svc.frameTags('G', 'b.png'), [{ tag: 'castle', p: 0.9 }, { tag: 'cat', p: 0.5 }], 'про детей — нет');
+  assert.deepStrictEqual(await svc.frameTags('G', 'нет.png'), []);
+  // Теги игры — для фильтра галереи: слабый тег (0,2) не в счёт, служебных и про детей нет
+  const game = await svc.gameTags('G');
+  const named = Object.fromEntries(game.tags.map((x) => [x.tag, x.f.map((i) => game.files[i]).sort()]));
+  assert.deepStrictEqual(named, { cat: ['a.png', 'b.png'], sword: ['a.png'], maid: ['c.png', 'd.png'], castle: ['a.png', 'b.png', 'c.png', 'd.png', 'e.png'] });
+  // Без разметки — пусто
+  assert.deepStrictEqual(await svc.gameTags('Нет'), { files: [], tags: [] });
+  // По тегам про детей и не ищем
+  assert.deepStrictEqual(new real.GalleryTags().concepts('child maid', ['child', 'maid']), [[1]]);
+  assert.ok(real.shown('cat') && !real.shown('1girl') && !real.shown('white_background') && !real.shown(null));
+  // Все такие теги из списка модели — и ни одного лишнего: бельё «babydoll», рюкзак, плюшевый мишка — не про детей
+  for (const tag of ['child', 'child_on_child', 'child_carry', "child's_drawing",
+    'baby', 'baby_bottle', 'aged_down', 'age_regression', 'age_comparison', 'pacifier', 'diaper', 'onesie', 'bib', 'randoseru', 'kindergarten_uniform', 'tomoeda_elementary_school_uniform']) assert.ok(!real.shown(tag), tag);
+  for (const tag of ['babydoll', 'black_babydoll', 'backpack', 'school_bag', 'teddy_bear', 'petite', 'race_bib']) assert.ok(!real.blocked(tag), tag);
+  for (const tag of ['school_uniform', 'maid', 'bag']) assert.ok(real.shown(tag), tag);
+  // Запрос про детей — не ищем ни на каком языке; обычные слова с похожим началом — ищем
+  for (const q of ['child', 'Child girl', 'kids', 'baby', 'ребёнок', 'дети', 'детская', 'малолетка', 'Kinder', 'kleinkind']) assert.ok(real.blockedQuery(q), q);
+  for (const q of ['maid', 'castle', 'детектив', 'babydoll', 'kindness', 'school uniform', 'горничная']) assert.ok(!real.blockedQuery(q), q);
+  assert.ok(real.blockedQuery('замок', 'child castle'), 'английский вариант запроса — тоже');
+});
+
+test('поиск по картинкам: кадр, у которого есть и прежний ответ распознавания, и разбор, — одной строкой, с тегами разбора', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const real = require('./src/services/galleryTags.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-dedupe-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  svc.vision = { available: true, version: 'v', embedModel: 'clip' };
+  svc.tags = { version: 'wd', unpack: real.unpack, list: async () => [null, 'cat'], shown: real.shown.bind(real) };
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const vec = (x) => Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? x : 0))).toString('base64');
+  // Файл заменили: у распознавания ключ со старым размером, у разбора — с новым и с тегами
+  await fsp.writeFile(svc.visionPath('G'), JSON.stringify({ version: 'v', scores: {}, embeds: { 'a.png\n100': vec(50), 'b.png\n7': vec(40) } }));
+  await fsp.writeFile(svc.picturesPath('G'), JSON.stringify({ model: 'clip', items: { 'a.png\n200': vec(90) } }));
+  await fsp.writeFile(svc.tagsPath('G'), JSON.stringify({ model: 'wd', items: { 'a.png\n200': real.pack([1, 230]) } }));
+  const mine = await svc.searchData('G');
+  assert.deepStrictEqual([...mine.names].sort(), ['a.png', 'b.png']);
+  assert.deepStrictEqual(await svc.frameTags('G', 'a.png'), [{ tag: 'cat', p: 0.9 }]);
+});
+
+test('галерея заранее: новая игра собирается следующей, готовая пропускается, только с PICTURE_PASS=1, сбой не останавливает очередь', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const svc = new GalleryService();
+  const built = [];
+  const warm = [];
+  const ready = new Set(['Готовая']);
+  svc.cached = async (id) => (ready.has(id) ? { albums: [] } : null);
+  svc.contentRoot = async (id) => (id === 'Без папки' ? null : '/x');
+  svc.build = (id) => ({ promise: (async () => { built.push(id); if (id === 'Сбой') throw new Error('нет'); ready.add(id); })() });
+  svc.prewarm = (id) => warm.push(id);
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  delete process.env.PICTURE_PASS;
+  svc.prepare(['A']);
+  assert.deepStrictEqual(built, [], 'без PICTURE_PASS=1 — как раньше, по открытию');
+  process.env.PICTURE_PASS = '1';
+  t.mock.method(console, 'warn', () => {});
+  svc.prepare(['Готовая', 'A', 'Без папки', 'Сбой', 'B']);
+  svc.prepare(['Новая'], { first: true });
+  while (svc.preparing) await new Promise((r) => setTimeout(r, 2));
+  assert.deepStrictEqual(built.slice().sort(), ['A', 'B', 'Новая', 'Сбой'].sort(), 'готовая не собирается заново, после сбоя очередь идёт дальше');
+  assert.ok(built.indexOf('Новая') < built.indexOf('B'), built.join());
+  assert.ok(!warm.includes('Готовая') && warm.includes('Новая') && !warm.includes('Сбой'), warm.join());
+  // Сборка, начатая раньше, — сперва дождаться её
+  const order = [];
+  let done;
+  svc.building.set('Идёт', { promise: new Promise((r) => { done = () => { order.push('старая'); svc.building.delete('Идёт'); r(); }; }) });
+  svc.build = (id) => ({ promise: (async () => { order.push(`новая ${id}`); ready.add(id); })() });
+  svc.prepare(['Идёт']);
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepStrictEqual(order, []);
+  done();
+  while (svc.preparing) await new Promise((r) => setTimeout(r, 2));
+  assert.deepStrictEqual(order, ['старая', 'новая Идёт']);
+});
+
+test('галерея заранее: папку ещё копируют — ждём, пока перестанет меняться; индекс сборки, начатой до обновления игры, не пишется', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-quiet-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  process.env.PICTURE_PASS = '1';
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  svc.quietMs = 5;
+  const asked = [];
+  svc.prepare = (ids) => asked.push(...ids);
+  const game = path.join(root, 'G');
+  const run = svc.prepareWhenQuiet('G');
+  await new Promise((r) => setTimeout(r, 15));
+  assert.deepStrictEqual(asked, [], 'папки ещё нет');
+  await fsp.mkdir(path.join(game, 'img', 'pictures'), { recursive: true });
+  await fsp.writeFile(path.join(game, 'img', 'pictures', 'a.png'), 'x');
+  await run;
+  assert.deepStrictEqual(asked, ['G']);
+  assert.match(await svc.folderPrint('G'), /^1:1$/);
+  // forget во время сборки: старое оглавление на диск не ложится
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const job = svc.build('G');
+  await svc.forget('G');
+  await job.promise;
+  assert.ok(!require('fs').existsSync(svc.indexPath('G')));
+});
+
+test('разбор картинок: настройка главнее PICTURE_PASS; мало памяти — сам не включается, но включить можно', (t) => {
+  const { analysisOn, tooSmall, turnedOff, tagThreads } = require('./src/services/galleryModels.js');
+  const { option, setOption, describeOptions } = require('./src/utils/options.js');
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { setOption('picture_analysis', null); if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  const GB = 1024 ** 3;
+  delete process.env.PICTURE_PASS;
+  assert.strictEqual(analysisOn(8 * GB), false, 'ни настройки, ни окружения — выключено');
+  process.env.PICTURE_PASS = '1';
+  assert.deepStrictEqual([analysisOn(8 * GB), analysisOn(GB), tooSmall(GB), tooSmall(8 * GB)], [true, false, true, false], 'меньше 2 ГБ — сам не включается');
+  process.env.PICTURE_PASS = '0';
+  assert.deepStrictEqual([analysisOn(8 * GB), tooSmall(GB), turnedOff()], [false, false, false], 'выключено окружением — не память и не человек');
+  setOption('picture_analysis', true);
+  assert.deepStrictEqual([option('picture_analysis'), analysisOn(GB), tooSmall(GB), describeOptions().picture_analysis.fromEnv], [true, true, false, false], 'человек включил — и окружение, и память ему не указ');
+  process.env.PICTURE_PASS = '1';
+  setOption('picture_analysis', false);
+  assert.deepStrictEqual([analysisOn(8 * GB), turnedOff()], [false, true]);
+  setOption('picture_analysis', null);
+  assert.deepStrictEqual([analysisOn(8 * GB), turnedOff()], [true, false], 'настройку убрали — снова окружение');
+  assert.deepStrictEqual([1, 2, 3, 4, 32].map((n) => tagThreads(n, 'fast')), [1, 1, 2, 2, 2], 'быстро: на двух ядрах разметчик не занимает оба');
+  assert.deepStrictEqual([1, 2, 3, 4, 32].map((n) => tagThreads(n, 'quiet')), [1, 1, 1, 1, 1], 'тихо: один поток на любой машине');
+  assert.strictEqual(tagThreads(4), 1, 'не трогали настройку — тихо');
+  setOption('picture_speed', 'fast');
+  assert.strictEqual(tagThreads(4), 2);
+  setOption('picture_speed', null);
+});
+
+test('модели: открывается один раз на всех, закрывается после простоя и только когда ею не пользуются, потом открывается снова', async () => {
+  const { ModelHolder } = require('./src/services/galleryModels.js');
+  const made = [];
+  const fake = () => { const m = { closed: false, release() { this.closed = true; } }; made.push(m); return m; };
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const hold = new ModelHolder(async () => { await wait(2); return fake(); }, { idleMs: 25 });
+  const run = async (m) => { assert.strictEqual(m.closed, false, 'закрытую сессию никто не получает'); await wait(5); assert.strictEqual(m.closed, false, 'и не закрывают во время работы'); return m; };
+  // Параллельные вызовы — одна сессия
+  const both = await Promise.all([hold.use(run), hold.use(run), hold.use(run)]);
+  assert.ok(both[0] === both[1] && both[1] === both[2]);
+  assert.deepStrictEqual([made.length, hold.ready], [1, true]);
+  // Работа дольше простоя: пока идёт, таймер не срабатывает
+  await hold.use(async (m) => { await wait(60); assert.strictEqual(m.closed, false); });
+  assert.strictEqual(hold.ready, true, 'простой считается от конца работы');
+  await wait(60);
+  assert.deepStrictEqual([hold.ready, made[0].closed], [false, true], 'простой — закрыта');
+  // Сразу после простоя — снова работает, только открывает заново
+  await Promise.all([hold.use(run), hold.use(run)]);
+  assert.strictEqual(made.length, 2);
+  // Выключили посреди работы: закрывается, как только досчитает
+  let closedInside = null;
+  const going = hold.use(async (m) => { await wait(5); closedInside = m.closed; return m; });
+  await wait(1);
+  hold.unload();
+  const m = await going;
+  await wait(1);
+  assert.deepStrictEqual([closedInside, m.closed, hold.ready], [false, true, false]);
+  // Пока открывается (окно поиска), выключили — закрывается сразу, как откроется
+  const warming = hold.warm();
+  hold.unload();
+  await warming;
+  await wait(1);
+  assert.strictEqual(hold.ready, false);
+  assert.strictEqual(made.at(-1).closed, true);
+  // Закрывается медленно, а уже просят новую: дожидается и открывает новую, две в памяти не лежат
+  const order = [];
+  const h2 = new ModelHolder(async () => { order.push('open'); return { release: async () => { order.push('closing'); await wait(10); order.push('closed'); } }; }, { idleMs: 1000 });
+  await h2.warm();
+  h2.unload();
+  await h2.use(async () => order.push('use'));
+  assert.deepStrictEqual(order, ['open', 'closing', 'closed', 'open', 'use']);
+  // Не вышло открыть — пусто, без поломки; выключение пустого держателя ни на что не влияет
+  const h3 = new ModelHolder(async () => null, { idleMs: 1 });
+  assert.strictEqual(await h3.use(async (x) => x), null);
+  h3.unload();
+  assert.strictEqual(h3.dropping, false);
+  // Сломавшееся закрытие не ломает следующую работу
+  const warn = console.warn;
+  console.warn = () => {};
+  const h4 = new ModelHolder(async () => ({ release() { throw new Error('нет'); } }), { idleMs: 1000 });
+  await h4.warm();
+  h4.unload();
+  await h4.use(async (x) => { assert.ok(x); });
+  console.warn = warn;
+});
+
+test('модели: настоящие службы отпускают сессию после простоя и работают сразу после этого', async (t) => {
+  const { ModelHolder } = require('./src/services/galleryModels.js');
+  const { GalleryVision } = require('./src/services/galleryVision.js');
+  const { GalleryTags } = require('./src/services/galleryTags.js');
+  const { GalleryText } = require('./src/services/galleryText.js');
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const sessions = [];
+  const session = (out) => { const s = { closed: 0, inputNames: ['x'], outputNames: ['y'], release() { s.closed++; }, run: async () => { assert.strictEqual(s.closed, 0, 'закрытая сессия не считает'); return out; } }; sessions.push(s); return s; };
+
+  const vision = new GalleryVision();
+  vision.pixels = async () => Buffer.alloc(224 * 224 * 3);
+  vision.hold = new ModelHolder(async () => session({ image_embeds: { data: new Float32Array(512).fill(0.1) } }), { idleMs: 15 });
+  const seen = {};
+  const scores = await Promise.all([vision.score('a', seen), vision.score('b', {})]);
+  assert.ok(scores.every((x) => typeof x === 'number') && seen.embed.length === 512);
+  assert.strictEqual(sessions.length, 1, 'двое подряд — одна сессия');
+  await wait(40);
+  assert.deepStrictEqual([vision.hold.ready, sessions[0].closed], [false, 1]);
+  assert.strictEqual(typeof await vision.score('c', {}), 'number');
+  assert.strictEqual(sessions.length, 2);
+
+  const tags = new GalleryTags();
+  tags.names = [null, 'maid'];
+  tags.pixels = async () => Buffer.alloc(448 * 448 * 3);
+  tags.hold = new ModelHolder(async () => session({ y: { data: Float32Array.from([0, 0.9]) } }), { idleMs: 15 });
+  assert.deepStrictEqual(require('./src/services/galleryTags.js').unpack(await tags.tag('a')), [1, 229]);
+  await wait(40);
+  assert.strictEqual(tags.hold.ready, false);
+  assert.ok(await tags.tag('b'));
+  tags.hold.unload();
+  await wait(1);
+  assert.strictEqual(tags.hold.ready, false);
+
+  // Поиск сразу после простоя: «готовлю» и повтор — как в окне; запрос в обход этого тоже дожидается модели
+  const text = new GalleryText();
+  text.setDependencies({ mediaDir: '/нет' });
+  Object.defineProperty(text, 'available', { value: true });
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  process.env.PICTURE_PASS = '1';
+  const opened = [];
+  text.hold = new ModelHolder(async () => {
+    opened.push(1);
+    return { session: session({ last_hidden_state: { data: new Float32Array(768 * 8).fill(0.2) } }), dense: new Float32Array(512 * 768).fill(0.01), vocab: new Map([['[CLS]', 1], ['[SEP]', 2], ['[UNK]', 3], ['maid', 4]]) };
+  }, { close: (m) => m.session.release(), idleMs: 15 });
+  assert.strictEqual(text.prepare({ start: false }).state, 'preparing', 'только спросить');
+  assert.strictEqual(opened.length, 0, 'опрос модель не открывает');
+  assert.strictEqual(text.prepare().state, 'preparing');
+  await wait(1);
+  assert.strictEqual(text.prepare().state, 'ready');
+  assert.strictEqual((await text.embed('maid')).length, 512);
+  await wait(40);
+  assert.deepStrictEqual([text.hold.ready, text.prepare({ start: false }).state], [false, 'preparing']);
+  assert.strictEqual((await text.embed('maid и ещё')).length, 512);
+  assert.strictEqual(opened.length, 2);
+  assert.strictEqual((await text.embed('maid')).length, 512, 'из запомненного — без модели');
+  assert.strictEqual(opened.length, 2);
+  await wait(40);
+  // Разбор выключен: то, что скачано, работает, а чего нет — не качаем и говорим «нельзя»
+  process.env.PICTURE_PASS = '0';
+  assert.strictEqual(text.prepare().state, 'off', 'файлов нет — off сразу, без попытки скачать');
+  assert.strictEqual(opened.length, 2);
+});
+
+test('модели: файлы — скачать только при включённом разборе, сумму считаем один раз, ход виден; выключили — скачивание обрывается', async (t) => {
+  const { modelFile, modelsOnDisk, registerModels, stopDownloads } = require('./src/services/galleryModels.js');
+  const crypto = require('crypto');
+  const media = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-models-'));
+  t.after(() => fsp.rm(media, { recursive: true, force: true }));
+  const was = process.env.PICTURE_PASS;
+  const fetchWas = global.fetch;
+  t.after(() => { global.fetch = fetchWas; if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; });
+  const body = Buffer.from('модель');
+  const spec = { url: 'http://x/m', name: `t${Date.now()}.onnx`, size: body.length, sha256: crypto.createHash('sha256').update(body).digest('hex') };
+  registerModels([spec]);
+  const file = path.join(media, '_models', spec.name);
+  let asked = 0;
+  global.fetch = async () => { asked++; return new Response(body, { headers: { 'content-length': String(body.length) } }); };
+  delete process.env.PICTURE_PASS;
+  await assert.rejects(modelFile(spec, media), /выключен/);
+  assert.strictEqual(asked, 0, 'выключено — в сеть не ходим');
+  process.env.PICTURE_PASS = '1';
+  assert.strictEqual(await modelFile(spec, media), file);
+  assert.strictEqual(asked, 1);
+  // Уже на диске: выключенному разбору не мешает, в сеть не идёт
+  delete process.env.PICTURE_PASS;
+  assert.strictEqual(await modelFile(spec, media), file);
+  // Сумму сверили один раз: файл не читается заново при каждом открытии сессии
+  await fsp.writeFile(file, 'испорчено позже');
+  assert.strictEqual(await modelFile(spec, media), file);
+  assert.strictEqual(await fsp.readFile(file, 'utf8'), 'испорчено позже');
+  const seen = await modelsOnDisk(media);
+  assert.ok(seen.have > 0 && seen.total > 700 * 1000 * 1000, JSON.stringify(seen));
+  assert.strictEqual(seen.downloading, false);
+  // Обрыв: файл не появляется, временного не остаётся
+  process.env.PICTURE_PASS = '1';
+  const other = { ...spec, name: `s${Date.now()}.onnx` };
+  let enter;
+  const entered = new Promise((r) => { enter = r; });
+  global.fetch = async (url, opts) => {
+    const stream = new ReadableStream({
+      start(c) { c.enqueue(new Uint8Array(3)); enter(); opts.signal.addEventListener('abort', () => c.error(opts.signal.reason)); },
+    });
+    return new Response(stream, { headers: { 'content-length': '10' } });
+  };
+  const going = modelFile(other, media);
+  await entered;
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual((await modelsOnDisk(media)).downloading, true);
+  stopDownloads();
+  await assert.rejects(going);
+  assert.strictEqual((await modelsOnDisk(media)).downloading, false);
+  assert.deepStrictEqual((await fsp.readdir(path.join(media, '_models'))).filter((n) => n.startsWith('s')), []);
+});
+
+test('разбор картинок: выключили — очереди стоят, готовое сохранено, модели закрыты; строка настроек говорит, что происходит', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { setOption } = require('./src/utils/options.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-stop-'));
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { setOption('picture_analysis', null); if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; return fsp.rm(root, { recursive: true, force: true }); });
+  t.mock.method(console, 'log', () => {});
+  process.env.PICTURE_PASS = '1';
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  await fsp.mkdir(path.join(root, 'G'), { recursive: true });
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const unloaded = [];
+  const files = ['a.png', 'b.png', 'c.png', 'd.png'];
+  svc.cached = async () => ({ albums: [{ kind: 'cg', files }] });
+  svc.scenesOf = async () => ({});
+  svc.contentRoot = async () => path.join(root, 'G');
+  svc.thumb = async (id, rel) => `/thumbs/${rel}`;
+  const read = async () => JSON.parse(await fsp.readFile(svc.tagsPath('G'), 'utf8')).items;
+  const tagged = [];
+  svc.vision = { available: true, version: 'v', embedModel: 'clip', hold: { unload: () => unloaded.push('vision') }, score: async (f, out) => { out.embed = Array.from({ length: 512 }, () => 0); return 0.5; } };
+  svc.tags = { version: 'wd', hold: { unload: () => unloaded.push('tags') }, tag: async (file) => { tagged.push(file); if (tagged.length === 2) { setOption('picture_analysis', false); svc.stopPictures(); } return `T:${file}`; } };
+  // Идёт: разбор и сколько кадров. На втором кадре выключают
+  svc.queuePictures(['G']);
+  svc.queuePictures(['H', 'I']);
+  const running = await svc.analysisStatus();
+  assert.strictEqual(running.on, true);
+  assert.strictEqual(running.state, 'analysing');
+  while (svc.pictureQueue) await new Promise((r) => setTimeout(r, 2));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepStrictEqual(tagged, ['/thumbs/a.png', '/thumbs/b.png'], 'после текущего кадра — стоп, ни в какую другую игру не идёт');
+  assert.deepStrictEqual(Object.keys(await read()).sort(), ['a.png\n0', 'b.png\n0'], 'готовое сохранено, продолжится с места');
+  assert.deepStrictEqual(unloaded.sort(), ['tags', 'tags', 'vision', 'vision'], 'и сразу, и когда проход вышел: кадр на ходу мог открыть модель заново');
+  assert.strictEqual(svc.pictureStatus(), null);
+  // Выключено человеком: новая игра в очередь не встаёт, галерея без фонового распознавания
+  svc.queuePictures(['G']);
+  svc.prepare(['G']);
+  assert.ok(!svc.pictureQueue && !svc.preparing);
+  assert.deepStrictEqual(await svc.analysisStatus(), { on: false, state: 'off' });
+  let vision = 0;
+  svc.vision.score = async () => { vision++; return null; };
+  await svc.visionPass('G');
+  assert.strictEqual(vision, 0);
+  // Включили: продолжает с места
+  setOption('picture_analysis', true);
+  tagged.length = 0;
+  svc.tags.tag = async (file) => { tagged.push(file); return `T:${file}`; };
+  svc.queuePictures(['G']);
+  while (svc.pictureStatus()) await new Promise((r) => setTimeout(r, 2));
+  assert.deepStrictEqual(tagged, ['/thumbs/c.png', '/thumbs/d.png']);
+  assert.deepStrictEqual(Object.keys(await read()).sort(), files.map((f) => `${f}\n0`));
+  // Моделей на диске нет, очередь прошла — ждёт первую игру; файлы есть — готово
+  assert.strictEqual((await svc.analysisStatus()).state, 'waiting');
+  await fsp.mkdir(path.join(root, '_media', '_models'), { recursive: true });
+  await fsp.writeFile(path.join(root, '_media', '_models', 'clip-vit-b32-vision-q8.onnx'), 'x');
+  assert.strictEqual((await svc.analysisStatus()).state, 'done');
+  // Без модуля или с GALLERY_VISION=0 — недоступно, как бы ни стоял переключатель
+  svc.vision.available = false;
+  assert.strictEqual((await svc.analysisStatus()).state, 'unavailable');
+});
+
+// Игра из files и модели-подделки: запоминают, что считалось и сколько кадров шло одновременно (миниатюра — тоже часть кадра)
+async function pictureSpeedRig(t, files) {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { setOption } = require('./src/utils/options.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-speed-'));
+  t.after(() => { setOption('picture_analysis', null); setOption('picture_speed', null); return fsp.rm(root, { recursive: true, force: true }); });
+  t.mock.method(console, 'log', () => {});
+  setOption('picture_analysis', true);
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  for (const id of ['G', 'H']) {
+    await fsp.mkdir(path.join(root, id), { recursive: true });
+    await fsp.mkdir(path.join(root, '_media', id), { recursive: true });
+  }
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const rig = { svc, setOption, wait, now: 0, peak: 0, order: [], steps: [] };
+  const work = async (name, ms) => {
+    rig.now++;
+    rig.peak = Math.max(rig.peak, rig.now);
+    rig.order.push(name);
+    const p = svc.pictureStatus();
+    if (p && name !== 'thumb') rig.steps.push(Math.min(p.embeds.done, p.tags.done));
+    await wait(ms);
+    rig.now--;
+  };
+  svc.cached = async () => ({ albums: [{ kind: 'cg', files }] });
+  svc.scenesOf = async () => ({});
+  svc.contentRoot = async () => path.join(root, 'G');
+  svc.build = () => ({ promise: Promise.resolve() });
+  svc.thumb = async (id, rel) => { await work('thumb', 1); return `/thumbs/${rel}`; };
+  svc.vision = { available: true, version: 'v', embedModel: 'clip', hold: { unload() {} }, score: async (f, out) => { await work('embed', 4); out.embed = Array.from({ length: 512 }, () => 0); return 0.5; } };
+  svc.tags = { version: 'wd', hold: { unload() {} }, tag: async (file) => { await work('tag', 8); return `T:${file}`; } };
+  // Распознавание мешало бы смотреть порядок кадров; там, где нужно, тест убирает эту подмену
+  svc.visionPass = async () => {};
+  rig.finish = async (q) => {
+    const deadline = Date.now() + 10000;
+    while (q.embeds.running || q.tags.running) {
+      assert.ok(Date.now() < deadline, 'разбор завис');
+      await wait(2);
+    }
+  };
+  rig.run = async (ids) => { svc.queuePictures(ids); await rig.finish(svc.pictureQueue); };
+  return rig;
+}
+
+test('скорость разбора: тихо — один кадр на всю машину, очереди идут через кадр, ход «Разбираю кадры» ровный', async (t) => {
+  const files = ['a.png', 'b.png', 'c.png', 'd.png', 'e.png', 'f.png'];
+  const rig = await pictureSpeedRig(t, files);
+  await rig.run(['G']);
+  assert.strictEqual(rig.peak, 1, 'ни миниатюра, ни модель не идут рядом с другим кадром');
+  const models = rig.order.filter((x) => x !== 'thumb');
+  assert.strictEqual(models.length, files.length * 2);
+  for (let i = 1; i < models.length; i++) assert.notStrictEqual(models[i], models[i - 1], `через кадр: ${models}`);
+  // Счётчик — меньшее из двух очередей: растёт по одному, без рывков и откатов
+  for (let i = 1; i < rig.steps.length; i++) assert.ok(rig.steps[i] - rig.steps[i - 1] === 0 || rig.steps[i] - rig.steps[i - 1] === 1, `ход: ${rig.steps}`);
+  assert.ok(rig.steps.at(-1) >= files.length - 1, `ход: ${rig.steps}`);
+  assert.strictEqual(rig.svc.frameTurns.busy, false);
+
+  // Распознавание перед разбором игры — в той же очереди
+  const again = await pictureSpeedRig(t, files);
+  delete again.svc.visionPass;
+  await again.run(['G']);
+  assert.ok(again.order.includes('embed') && again.order.includes('tag'));
+  assert.strictEqual(again.peak, 1, 'visionPass не идёт рядом с кадром разметчика');
+});
+
+test('скорость разбора: быстро — обе очереди сразу, как раньше; переключение действует со следующего кадра', async (t) => {
+  const rig = await pictureSpeedRig(t, ['a.png', 'b.png', 'c.png', 'd.png']);
+  rig.setOption('picture_speed', 'fast');
+  await rig.run(['G']);
+  assert.strictEqual(rig.peak, 2, 'векторы и теги считаются одновременно');
+  assert.strictEqual(rig.svc.frameTurns.busy, false, 'очередь кадров не при деле');
+
+  // Быстро → тихо посреди прохода: дальше по одному
+  const mid = await pictureSpeedRig(t, ['a.png', 'b.png', 'c.png', 'd.png', 'e.png', 'f.png']);
+  mid.setOption('picture_speed', 'fast');
+  const tag = mid.svc.tags.tag;
+  let frames = 0;
+  mid.svc.tags.tag = async (file) => {
+    if (++frames > 1) return tag(file);
+    // Кадр, начатый быстро, досчитывает рядом с другими; считаем то, что после него
+    mid.setOption('picture_speed', 'quiet');
+    const out = await tag(file);
+    mid.peak = 0;
+    return out;
+  };
+  await mid.run(['G']);
+  assert.strictEqual(mid.peak, 1);
+});
+
+test('скорость разбора: упавший кадр отдаёт очередь, разбор идёт дальше', async (t) => {
+  const { FrameTurns } = require('./src/services/galleryModels.js');
+  const turns = new FrameTurns();
+  let second = false;
+  const fails = turns.run(async () => { await new Promise((r) => setTimeout(r, 2)); throw new Error('onnx'); });
+  const next = turns.run(async () => { second = true; return 7; });
+  await assert.rejects(fails, /onnx/);
+  assert.strictEqual(await next, 7);
+  assert.ok(second);
+  assert.strictEqual(turns.busy, false);
+
+  const rig = await pictureSpeedRig(t, ['a.png', 'b.png', 'c.png']);
+  const { tag } = rig.svc.tags;
+  rig.svc.tags.tag = async (file) => { if (file.endsWith('b.png')) throw new Error('onnx'); return tag(file); };
+  const { score } = rig.svc.vision;
+  rig.svc.vision.score = async (file, out) => { if (file.endsWith('a.png')) throw new Error('onnx'); return score(file, out); };
+  await rig.run(['G']);
+  assert.strictEqual(rig.peak, 1);
+  assert.strictEqual(rig.svc.frameTurns.busy, false);
+  assert.deepStrictEqual(Object.keys(JSON.parse(await fsp.readFile(rig.svc.tagsPath('G'), 'utf8')).items).sort(), ['a.png\n0', 'c.png\n0'], 'кадр после упавшего посчитан');
+});
+
+test('скорость разбора: остановка не ждёт очередь кадров и не оставляет её занятой', async (t) => {
+  const rig = await pictureSpeedRig(t, ['a.png', 'b.png', 'c.png']);
+  const { svc } = rig;
+  const { thumb } = svc;
+  let release;
+  const blocked = new Promise((r) => { release = r; });
+  let started = 0;
+  svc.thumb = async (id, rel) => { started++; await blocked; return thumb(id, rel); };
+  svc.queuePictures(['G']);
+  const q = svc.pictureQueue;
+  // Одна очередь считает кадр, вторая ждёт своего хода
+  for (let i = 0; i < 2000 && !svc.frameTurns.waiting.length; i++) await rig.wait(2);
+  assert.strictEqual(svc.frameTurns.waiting.length, 1);
+  svc.stopPictures();
+  assert.strictEqual(svc.pictureStatus(), null, 'остановка отвечает сразу, не дожидаясь кадра');
+  release();
+  await rig.finish(q);
+  assert.strictEqual(started, 1, 'кадр, ждавший очереди, считать не начал');
+  assert.strictEqual(svc.frameTurns.busy, false);
+  assert.strictEqual(svc.frameTurns.waiting.length, 0);
+
+  // Включили снова — очередь свободна, продолжает с места
+  svc.thumb = thumb;
+  await rig.run(['G']);
+  assert.deepStrictEqual(Object.keys(JSON.parse(await fsp.readFile(svc.tagsPath('G'), 'utf8')).items).sort(), ['a.png\n0', 'b.png\n0', 'c.png\n0']);
+});
+
+test('скорость разбора: смена закрывает сессию разметчика, кадр на ходу досчитывает, следующий открывает с новым числом потоков', async (t) => {
+  const { ModelHolder, tagThreads } = require('./src/services/galleryModels.js');
+  const rig = await pictureSpeedRig(t, ['a.png']);
+  const opened = [];
+  let closed = 0;
+  rig.svc.tags.hold = new ModelHolder(async () => { opened.push(tagThreads(4)); return { release: async () => { closed++; } }; }, { idleMs: 60000 });
+  const { hold } = rig.svc.tags;
+  await hold.use(async () => {
+    assert.deepStrictEqual(opened, [1], 'тихо — один поток');
+    rig.setOption('picture_speed', 'fast');
+    rig.svc.pictureSpeedChanged();
+    await rig.wait(5);
+    assert.strictEqual(closed, 0, 'кадр на ходу сессию не теряет');
+  });
+  await hold.closing;
+  assert.strictEqual(closed, 1);
+  assert.strictEqual(hold.ready, false);
+  await hold.use(async () => {});
+  assert.deepStrictEqual(opened, [1, 2]);
+  rig.setOption('picture_speed', null);
+  hold.unload();
+  await hold.closing;
+  assert.strictEqual(hold.ready, false, 'никто не считает — закрылась сразу');
+});
+
+test('скорость разбора: то, что просил человек, очереди кадров не ждёт; фоновое распознавание — ждёт', async (t) => {
+  const { inBackground } = require('./src/services/gallery.js');
+  const rig = await pictureSpeedRig(t, ['a.png', 'b.png']);
+  const { svc } = rig;
+  delete svc.visionPass;
+  let free;
+  const frame = svc.frameTurns.run(() => new Promise((r) => { free = r; }));
+  svc.knows = async () => true;
+  svc.searchData = async () => null;
+  assert.ok(await svc.frameVector('G', 'a.png'), '«Похожие»');
+  assert.ok(await svc.imageVector(Buffer.from('x')), 'поиск по своей картинке');
+  await svc.visionPass('G');
+  assert.ok(rig.order.includes('embed'), 'распознавание, начатое открытием галереи');
+  const before = rig.order.length;
+  let waited = true;
+  const queued = inBackground(() => svc.visionPass('H')).then(() => { waited = false; });
+  await rig.wait(30);
+  assert.ok(waited && rig.order.length === before, 'фоновое стоит в очереди');
+  free();
+  await frame;
+  await queued;
+  assert.ok(rig.order.length > before);
+});
+
+test('скорость разбора: настройка главнее PICTURE_SPEED, чужое значение не принимается', (t) => {
+  const { option, setOption, checkOption, describeOptions } = require('./src/utils/options.js');
+  const was = process.env.PICTURE_SPEED;
+  t.after(() => { setOption('picture_speed', null); if (was === undefined) delete process.env.PICTURE_SPEED; else process.env.PICTURE_SPEED = was; });
+  delete process.env.PICTURE_SPEED;
+  assert.strictEqual(option('picture_speed'), 'quiet', 'ничего не задано — тихо');
+  process.env.PICTURE_SPEED = 'fast';
+  assert.strictEqual(option('picture_speed'), 'fast');
+  assert.strictEqual(setOption('picture_speed', 'quiet'), 'quiet');
+  assert.deepStrictEqual([option('picture_speed'), describeOptions().picture_speed.fromEnv], ['quiet', false], 'менять можно и при заданном окружении');
+  for (const bad of ['turbo', '', 5, true, ['fast'], {}]) assert.strictEqual(checkOption('picture_speed', bad), undefined, String(bad));
+  assert.strictEqual(setOption('picture_speed', 'turbo'), undefined);
+  assert.strictEqual(option('picture_speed'), 'quiet', 'негодное не затирает сохранённое');
+  assert.strictEqual(checkOption('picture_speed', null), null, 'null — вернуть по умолчанию');
+  setOption('picture_speed', null);
+  process.env.PICTURE_SPEED = 'turbo';
+  assert.strictEqual(option('picture_speed'), 'quiet', 'опечатка в окружении — по умолчанию');
+});
+
+test('OFFLINE=1: ленты и страницы сайтов — отказ, без запроса к сайту; теги, ход загрузок и POST идут дальше', () => {
+  const { offlineSites, offlineMeta } = require('./src/utils/offline.js');
+  const answer = (method, url) => {
+    let got = 'дальше';
+    const res = { status(code) { this.code = code; return this; }, json(body) { got = { code: this.code || 200, body }; return this; } };
+    offlineSites({ method, path: url }, res, () => {});
+    return got;
+  };
+  for (const url of ['/latest', '/trending', '/thread-info', '/similar', '/work', '/post', '/game', '/']) assert.strictEqual(answer('GET', url).code, 503, url);
+  for (const url of ['/meta', '/downloads']) assert.strictEqual(answer('GET', url), 'дальше', url);
+  assert.strictEqual(answer('POST', '/download'), 'дальше', 'загрузку человек начал сам');
+  // В окне игры не обещаем поиск, которого не будет; что уже известно о прошлых поисках — остаётся
+  assert.deepStrictEqual(offlineMeta({ status: 'new', retryAt: 5 }), { status: 'ok', retryAt: null });
+  assert.deepStrictEqual(offlineMeta({ status: 'not_found', retryAt: 5 }), { status: 'not_found', retryAt: null });
+});
+
+test('OFFLINE=1: очередь поиска пуста, хотя игры ждут', () => {
+  const { execFileSync } = require('child_process');
+  // Режим читается при загрузке модуля — поэтому отдельным процессом
+  const script = `const s = require('./src/services/scraper.js');
+    s.dbService = { get: () => ({ all: async () => [{ id: 'a', title: 'A' }], get: async () => ({ n: 1 }) }) };
+    Promise.all([s.queueState(), s.countDue()]).then((r) => { console.log(JSON.stringify(r)); process.exit(); });`;
+  const run = (OFFLINE) => JSON.parse(execFileSync(process.execPath, ['-e', script], { cwd: __dirname, env: { ...process.env, OFFLINE, REDIS_URL: 'memory' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('\n').pop());
+  assert.deepStrictEqual(run('1'), [{ paused: false, current: null, left: 0, next: [] }, 0]);
+  const [online, due] = run('');
+  assert.deepStrictEqual([online.left, due], [1, 1], 'без OFFLINE — как раньше');
+});
+
+test('Telegram: без записанного языка — английский; причины по коду, без русского текста сервера', async (t) => {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const { TelegramService } = require('./src/services/telegram.js');
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  t.after(() => db.close());
+  await db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)');
+  const tg = new TelegramService();
+  tg.token = 'TEST-TOKEN';
+  tg.envChat = '100';
+  tg.gapMs = 0;
+  tg.sql = () => db;
+  const sent = [];
+  tg.deliver = async (kind, text) => { sent.push(text); return true; };
+  assert.strictEqual((await tg.prefs()).lang, 'en', 'TELEGRAM_CHAT_ID: «Подключить» не нажимали');
+  tg.download = async () => { throw Object.assign(new Error('Игры нет в библиотеке'), { reason: 'game-gone' }); };
+  await tg.startDownload({ url: 'x' });
+  await tg.downloadStage({ stage: 'error', title: 'G', error: 'Сбой у JDownloader' });
+  assert.ok(sent.length === 2 && sent.every((x) => !/[а-яё]/i.test(x)), JSON.stringify(sent));
+  // По-русски — слова самого сервера: они точнее
+  await tg.savePrefs({ lang: 'ru' });
+  await tg.startDownload({ url: 'x' });
+  await tg.downloadStage({ stage: 'error', title: 'G', error: 'Сбой у JDownloader' });
+  assert.ok(sent[2].includes('Игры нет в библиотеке') && sent[3].includes('Сбой у JDownloader'), JSON.stringify(sent));
+  // Telegram недоступен: причина кодом — окно в «Настройках» пишет её на языке человека
+  tg.botName = '';
+  tg.fetch = async () => { throw Object.assign(new Error('fetch failed'), { cause: { code: 'ENOTFOUND' } }); };
+  const st = await tg.status();
+  assert.deepStrictEqual([st.reason, st.params], ['tg-offline', { detail: 'ENOTFOUND' }]);
+  assert.match(st.error, /нет связи с Telegram/);
+});
+
+test('Перевод: служба отказала — код с названием и ответом, слова к нему пишет страница', async (t) => {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const { TranslateService } = require('./src/services/translate.js');
+  const secrets = require('./src/utils/secrets.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tl-refused-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  tlGame(root);
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  t.after(() => db.close());
+  await db.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT)');
+  await db.exec(`CREATE TABLE translations (src TEXT NOT NULL, lang TEXT NOT NULL, text TEXT NOT NULL, engine TEXT NOT NULL DEFAULT '',
+    origin TEXT NOT NULL DEFAULT 'machine', at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (src, lang))`);
+  await db.exec(`CREATE TABLE game_translation (id TEXT PRIMARY KEY, lang TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT '', done INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0, failed INTEGER NOT NULL DEFAULT 0, engine TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL DEFAULT 0,
+    check_at INTEGER NOT NULL DEFAULT 0, check_result TEXT NOT NULL DEFAULT '')`);
+  secrets.setSavedSecret('deepl', 'k:fx');
+  t.after(() => secrets.setSavedSecret('deepl', ''));
+  t.mock.method(console, 'error', () => {});
+  t.mock.method(console, 'warn', () => {});
+  const real = global.fetch;
+  t.after(() => { global.fetch = real; });
+  global.fetch = async () => ({ ok: false, status: 403, json: async () => ({}) });
+  const svc = new TranslateService();
+  svc.setDependencies({ dbService: { get: () => db }, gamesDir: root });
+  svc.retryMs = 0;
+  svc.glossaries = { create: async () => { throw new Error('нет'); }, remove: async () => {} };
+  await svc.setLang('G', 'ru');
+  await svc.running;
+  const st = await svc.status('G');
+  assert.deepStrictEqual([st.state, st.error], ['error', 'engine:DeepL:403']);
+});
+
+test('разбор картинок: выключили, пока проход читает файлы игры, — новых кадров нет', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { setOption } = require('./src/utils/options.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-stop-early-'));
+  const was = process.env.PICTURE_PASS;
+  t.after(() => { setOption('picture_analysis', null); if (was === undefined) delete process.env.PICTURE_PASS; else process.env.PICTURE_PASS = was; return fsp.rm(root, { recursive: true, force: true }); });
+  t.mock.method(console, 'log', () => {});
+  process.env.PICTURE_PASS = '1';
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  await fsp.mkdir(path.join(root, 'G'), { recursive: true });
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  svc.cached = async () => ({ albums: [{ kind: 'cg', files: ['a.png', 'b.png', 'c.png'] }] });
+  svc.contentRoot = async () => path.join(root, 'G');
+  svc.thumb = async (id, rel) => `/thumbs/${rel}`;
+  const seen = [];
+  svc.vision = { available: true, version: 'v', embedModel: 'clip', score: async (f) => { seen.push(f); return null; } };
+  svc.tags = { version: 'wd', tag: async (f) => { seen.push(f); return `T:${f}`; } };
+  // До первого кадра: очередь уже убрана, а проход ещё не начал считать
+  svc.scenesOf = async () => { setOption('picture_analysis', false); svc.stopPictures(); return {}; };
+  svc.queuePictures(['G']);
+  const queues = Object.values(svc.pictureQueue);
+  while (queues.some((q) => q.running)) await new Promise((r) => setTimeout(r, 2));
+  assert.deepStrictEqual(seen, [], 'модель не открывается снова, ни одного кадра');
+});
+
+test('разбор картинок: галерею собрали при выключенном разборе — включили, и её кадры распознаются', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { setOption } = require('./src/utils/options.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-vision-on-'));
+  t.after(() => { setOption('picture_analysis', null); return fsp.rm(root, { recursive: true, force: true }); });
+  t.mock.method(console, 'log', () => {});
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  await fsp.mkdir(path.join(root, 'G'), { recursive: true });
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  // Оглавление уже есть и без пометки visionMissing: пересборки не будет, ответы может дать только очередь
+  svc.cached = async () => ({ albums: [{ kind: 'cg', files: ['a.png'] }] });
+  svc.scenesOf = async () => ({});
+  svc.contentRoot = async () => path.join(root, 'G');
+  svc.thumb = async (id, rel) => `/thumbs/${rel}`;
+  let built = 0;
+  svc.build = () => { built++; return { promise: Promise.resolve() }; };
+  const embed = Array.from({ length: 512 }, (_, i) => (i === 0 ? 1 : 0));
+  svc.vision = { available: true, version: 'v', embedModel: 'clip', score: async (f, out) => { out.embed = embed; return 0.1; } };
+  svc.tags = { version: 'wd', tag: async (f) => `T:${f}` };
+  setOption('picture_analysis', false);
+  await svc.visionPass('G');
+  assert.deepStrictEqual((await svc.visionLoad('G')).scores, {}, 'выключено — не распознаём');
+  setOption('picture_analysis', true);
+  svc.queuePictures(['G']);
+  while (svc.pictureStatus()) await new Promise((r) => setTimeout(r, 2));
+  assert.deepStrictEqual((await svc.visionLoad('G')).scores, { 'a.png\n0': 0.1 });
+  assert.strictEqual(built, 1, 'новый ответ — оглавление пересобирается, альбом может уйти из CG');
+  // Второй раз ответы уже есть — пересборки нет
+  svc.queuePictures(['G'], { first: true });
+  while (svc.pictureStatus()) await new Promise((r) => setTimeout(r, 2));
+  assert.strictEqual(built, 1);
+});
+
+test('поиск по картинкам: векторы игр отпускаются после простоя, ответ тот же', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-idle-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  svc.vision = { available: true, version: 'v', embedModel: 'clip' };
+  svc.tags = { version: 'wd' };
+  svc.searchIdleMs = 10;
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const vec = Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? 100 : 0))).toString('base64');
+  await fsp.writeFile(svc.picturesPath('G'), JSON.stringify({ model: 'clip', items: { 'a.png\n1': vec } }));
+  const first = await svc.searchData('G');
+  assert.strictEqual(svc.searchMemo.size, 1);
+  assert.strictEqual(await svc.searchData('G'), first, 'пока спрашивают — из памяти');
+  await new Promise((r) => setTimeout(r, 30));
+  assert.strictEqual(svc.searchMemo.size, 0);
+  const again = await svc.searchData('G');
+  assert.notStrictEqual(again, first);
+  assert.deepStrictEqual([...again.names], [...first.names]);
+  assert.deepStrictEqual([...again.mat], [...first.mat]);
+});
+
+test('JDownloader: пустышки вместо файлов уходят из захвата ссылок; у пакета с тем же именем берётся незавершённый', async () => {
+  const { MyJdService } = require('./src/services/myjd.js');
+  const svc = new MyJdService();
+  svc.sleep = async () => {};
+  const removed = [];
+  let links = [{ uuid: 1, name: 'Blocked by!Cloudflare Site-Protection', host: 'linkcrawlerretry', availability: 'UNKNOWN' }, { uuid: 2, name: 'No valid account found!someone', host: 'linkcrawlerretry', availability: 'UNKNOWN' }, { uuid: 3, name: 'readme.txt', host: 'x', availability: 'ONLINE' }];
+  svc.call = async (acc, action, params) => {
+    if (action === '/linkgrabberv2/queryPackages') return [{ name: 'Game', uuid: 9 }];
+    if (action === '/linkgrabberv2/queryLinks') return links.filter((l) => !removed.includes(l.uuid));
+    if (action === '/linkgrabberv2/removeLinks') { removed.push(...params[0]); return null; }
+    if (action === '/linkgrabberv2/isCollecting') return false;
+    return null;
+  };
+  const acc = { folder: '' };
+  const r = await svc.collect(acc, 'https://x/', 'Game', 'Game');
+  assert.deepStrictEqual(removed, [1, 2]);
+  assert.strictEqual(r.sent, 0);
+  assert.ok(!r.account, 'это не вопрос про аккаунт');
+  // Одни пустышки — ответ «ничего», а не вопрос про аккаунт
+  removed.length = 0;
+  links = links.slice(0, 2);
+  const only = await svc.collect(acc, 'https://x/', 'Game', 'Game');
+  assert.deepStrictEqual([only.found, only.account], [0, undefined]);
+  // Ход загрузки: старый завершённый пакет с тем же именем не считается новым
+  const prog = new MyJdService();
+  prog.setDependencies({ file: '', uploads: { inboxStatus: async () => null }, inbox: { files: async () => [] } });
+  prog.jdCache = null;
+  prog.jdPackages = async () => [{ name: 'Tail; Remaster', saveTo: '/in', finished: true, bytesLoaded: 9, bytesTotal: 9 }, { name: 'Tail: Remaster', saveTo: '/in', bytesLoaded: 3, bytesTotal: 9 }];
+  await prog.saveJob({ key: '7', title: 'Tail: Remaster', packageName: 'Tail: Remaster', folder: '/in', stage: 'download', names: ['Tail.rar'], started: 1 });
+  const step = await prog.advance((await prog.loadJobs()).get('7'), {});
+  assert.deepStrictEqual([step.stage, step.loaded], ['download', 3]);
+});
+
+test('теги кадров по играм: сводка из файла тегов, один кадр не в счёт, скрытые не идут; «Что на картинках» — то, что отличает игру', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const real = require('./src/services/galleryTags.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'pic-summary-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.mediaDir = root;
+  const names = ['cat', 'sword', 'maid', 'child', '1girl'];
+  svc.tags = Object.assign(Object.create(real), { version: 'v', list: async () => names, shown: real.shown.bind(real) });
+  const sure = 200;
+  const weak = 10;
+  const write = async (id, frames) => {
+    await fsp.mkdir(path.join(root, id), { recursive: true });
+    await fsp.writeFile(svc.tagsPath(id), JSON.stringify({ model: 'v', items: Object.fromEntries(frames.map((f, i) => [`f${i}.png\n1`, f === '' ? '' : real.pack(f)])) }));
+  };
+  // A: cat на всех, sword на двух, maid на одном, неуверенный sword не считается, служебный и детский тег — не показываем
+  await write('A', [[0, sure, 1, sure, 2, sure, 3, sure, 4, sure], [0, sure, 1, sure], [0, sure, 1, weak], [0, sure], '']);
+  // B и C: cat у всех — он не отличает игру
+  await write('B', [[0, sure], [0, sure], [2, sure], [2, sure]]);
+  await write('C', [[0, sure], [0, sure]]);
+  const lib = await svc.libraryTags(['A', 'B', 'C', 'Без разметки']);
+  assert.strictEqual(lib.covered, 3);
+  const of = (id) => { const m = {}; for (let k = 0; k < lib.games[id].length; k += 2) m[lib.tags[lib.games[id][k]]] = lib.games[id][k + 1]; return m; };
+  assert.deepStrictEqual(of('A'), { cat: 4, sword: 2 }, 'кадр с пустой строкой, неуверенный тег, тег на одном кадре, служебный и про детей — не в счёт');
+  assert.deepStrictEqual(of('B'), { cat: 2, maid: 2 });
+  assert.ok(!('Без разметки' in lib.games));
+  const hidden = await svc.libraryTags(['A'], { hide: ['sword'] });
+  assert.deepStrictEqual(hidden.tags, ['cat'], 'скрытый тег фильтру не нужен');
+  const inside = await svc.gameInside('A', ['A', 'B', 'C']);
+  assert.strictEqual(inside.frames, 4, 'нечитаемый кадр — не кадр');
+  assert.deepStrictEqual(inside.tags.map((x) => x.tag), ['sword', 'cat'], 'редкий в библиотеке тег выше частого, хотя кадров с ним меньше');
+  assert.deepStrictEqual(inside.tags[0], { tag: 'sword', n: 2 });
+  assert.deepStrictEqual(await svc.gameInside('Без разметки', ['A']), { frames: 0, tags: [] });
+  assert.deepStrictEqual((await svc.gameInside('A', ['A', 'B', 'C'], { hide: ['sword'] })).tags.map((x) => x.tag), ['cat'], 'скрытый тег не показываем');
+  // Тег на одном кадре в другой игре не делает его частым: редкость считается по тому же порогу, что и список
+  await write('D', [[1, sure], [0, sure], [0, sure]]);
+  await write('E', [[1, sure], [0, sure], [0, sure]]);
+  const noisy = await svc.gameInside('A', ['A', 'D', 'E']);
+  assert.deepStrictEqual(noisy.tags[0].tag, 'sword');
+  assert.ok(noisy.tags[0].n === 2);
+  // Разбор дописал файл — сводка новая
+  await write('C', [[1, sure], [1, sure], [1, sure]]);
+  await fsp.utimes(svc.tagsPath('C'), new Date(), new Date(Date.now() + 5000));
+  assert.strictEqual((await svc.tagSummary('C')).tags.get('sword'), 3);
+  // Испорченный файл не запоминаем: дописанный прочитаем
+  await fsp.writeFile(svc.tagsPath('B'), '{');
+  await fsp.utimes(svc.tagsPath('B'), new Date(), new Date(Date.now() + 9000));
+  assert.strictEqual(await svc.tagSummary('B'), null);
+  assert.ok(!svc.tagMemo.has('B'));
+});
+
+test('лента картинок: по рисунку с альбома, без фонов, без скрытых и детских тегов; игра с таким содержимым или с одним рисунком не идёт', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const real = require('./src/services/galleryTags.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'pic-feed-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const svc = new GalleryService();
+  svc.mediaDir = root;
+  const names = ['cat', 'maid', 'child', 'no_humans'];
+  svc.tags = Object.assign(Object.create(real), { version: 'v', list: async () => names });
+  const [cat, maid, child, bg] = [[0, 200], [1, 200], [2, 200], [3, 200]];
+  const indexes = {};
+  svc.cached = async (id) => indexes[id] || null;
+  const write = async (id, albums, frames) => {
+    indexes[id] = { albums };
+    await fsp.mkdir(path.join(root, id), { recursive: true });
+    await fsp.writeFile(svc.tagsPath(id), JSON.stringify({ model: 'v', items: Object.fromEntries(Object.entries(frames).map(([f, p]) => [`${f}\n1`, p && real.pack(p)])) }));
+  };
+  const cg = (key, files, more = {}) => ({ key, kind: 'cg', w: 800, h: 600, files, cover: files[0], ...more });
+  await write('A', [
+    cg('variants', ['a1.png', 'a2.png', 'a3.png']),
+    cg('backdrop', ['b.png']),
+    cg('anim', ['c.png'], { anim: true }),
+    cg('panel', ['d.png'], { panel: true }),
+    cg('unseen', ['e.png']),
+    cg('broken', ['g.png']),
+    { key: 'layers', kind: 'layer', w: 1, h: 1, files: ['f.png'], cover: 'f.png' },
+    cg('loose', ['l1.png', 'l2.png'], { loose: true }),
+    cg('maid', ['m1.png', 'm2.png']),
+  ], { 'a1.png': cat, 'a2.png': cat, 'a3.png': cat, 'b.png': bg, 'c.png': cat, 'd.png': cat, 'f.png': cat, 'g.png': '', 'l1.png': cat, 'l2.png': cat, 'm1.png': maid, 'm2.png': cat });
+  const files = (g) => g.frames.map((f) => f.file);
+  const [a] = await svc.feedGames(['A', 'Без разметки'], { per: 10 });
+  assert.deepStrictEqual(files(a), ['a1.png', 'l1.png', 'l2.png', 'm1.png'], 'один кадр с альбома (обложка), у россыпи — каждый; фон, анимация, панель, слой, неразмеченный, нечитаемый — нет');
+  assert.deepStrictEqual(a.frames[0], { file: 'a1.png', w: 800, h: 600 });
+  const [b] = await svc.feedGames(['A'], { per: 10, hide: ['maid'] });
+  assert.deepStrictEqual(files(b), ['a1.png', 'l1.png', 'l2.png', 'm2.png'], 'скрытый тег на обложке — следующий кадр того же альбома');
+  // Лимит: кадры разные и из разных частей игры
+  const [c] = await svc.feedGames(['A'], { per: 2 });
+  assert.strictEqual(new Set(files(c)).size, 2);
+  assert.ok(['a1.png', 'l1.png'].includes(files(c)[0]) && ['l2.png', 'm1.png'].includes(files(c)[1]), files(c).join());
+
+  // Кадр с тегом про детей — не показываем; остальные кадры игры идут
+  // и весь его альбом: варианты того же рисунка разметчик мог пропустить. Один файл в двух альбомах — один раз
+  const many = Array.from({ length: 30 }, (_, i) => `n${i}.png`);
+  await write('B', [cg('x', ['x.png', 'x2.png']), cg('y', ['y.png', 'shared.png']), cg('z', ['shared.png']), cg('many', many), cg('mix', ['m1.png', 'm2.png', 'm3.png'], { loose: true })],
+    Object.fromEntries([['x.png', child], ['x2.png', cat], ['y.png', cat], ['shared.png', cat], ['m1.png', cat], ['m2.png', child], ['m3.png', cat], ...many.map((f) => [f, cat])]));
+  assert.deepStrictEqual(files((await svc.feedGames(['B'], { per: 10 }))[0]), ['y.png', 'shared.png', 'n0.png', 'm1.png', 'm3.png']);
+  // Таких кадров много — остальные про тех же героев: игры в ленте нет
+  await write('C', [cg('x', ['x.png']), cg('y', ['y.png']), cg('z', ['z.png'])], { 'x.png': child, 'y.png': cat, 'z.png': cat });
+  assert.deepStrictEqual(await svc.feedGames(['C']), []);
+  // Доля — среди кадров CG с людьми: кадры роликов и фоны её не разбавляют
+  await write('E', [cg('x', ['x.png']), cg('y', ['y.png']), cg('z', ['z.png']), cg('bg', ['bg.png'])],
+    Object.fromEntries([['x.png', child], ['y.png', cat], ['z.png', cat], ['bg.png', bg], ...Array.from({ length: 200 }, (_, i) => [`movie${i}.png`, cat])]));
+  assert.deepStrictEqual(await svc.feedGames(['E']), []);
+  // Один рисунок — не глава
+  await write('D', [cg('x', ['x.png', 'x2.png'])], { 'x.png': cat, 'x2.png': cat });
+  assert.deepStrictEqual(await svc.feedGames(['D']), []);
+  // Разбор дописал файл — лента новая; испорченный файл не запоминаем
+  await write('D', [cg('x', ['x.png']), cg('y', ['y.png'])], { 'x.png': cat, 'y.png': cat });
+  await fsp.utimes(svc.tagsPath('D'), new Date(), new Date(Date.now() + 5000));
+  assert.strictEqual((await svc.feedGames(['D']))[0].frames.length, 2);
+  await fsp.writeFile(svc.tagsPath('D'), '{');
+  await fsp.utimes(svc.tagsPath('D'), new Date(), new Date(Date.now() + 9000));
+  assert.deepStrictEqual(await svc.feedGames(['D']), []);
+  assert.ok(!svc.feedMemo.has('D'));
+});
+
+test('поиск по своей картинке: вектор считается во временной папке и файл не остаётся; из запроса — только нужной длины', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const svc = new GalleryService();
+  let seenFile = '';
+  let body = '';
+  svc.vision = { score: async (file, seen) => { seenFile = file; body = await fsp.readFile(file, 'utf8'); seen.embed = new Array(512).fill(0).map((_, i) => (i === 0 ? 0.5 : 0)); return 0.5; } };
+  const v = await svc.imageVector(Buffer.from('картинка'));
+  assert.strictEqual(body, 'картинка');
+  assert.ok(seenFile.startsWith(os.tmpdir()), 'не в папках игр');
+  await assert.rejects(fsp.access(path.dirname(seenFile)), 'временная папка убрана');
+  const back = svc.uploadedVector(v);
+  assert.strictEqual(back.length, 512);
+  assert.strictEqual(back[0], 0.5);
+  for (const bad of ['', 'AAAA', 7, null, 'A'.repeat(1001), ['x']]) assert.strictEqual(svc.uploadedVector(bad), null, String(bad));
+  // Модель выключена — null; файл не прочитался — исключение (и тоже без следов)
+  svc.vision = { score: async () => null };
+  assert.strictEqual(await svc.imageVector(Buffer.from('x')), null);
+  let broken = '';
+  svc.vision = { score: async (file) => { broken = file; throw new Error('ffmpeg: 1'); } };
+  await assert.rejects(svc.imageVector(Buffer.from('x')));
+  await assert.rejects(fsp.access(path.dirname(broken)));
+});
+
+test('живые плитки: у сцены до пяти кадров равномерно, у диалогов, наборов и сцен из одного кадра — нет', async (t) => {
+  const { LibraryScenes } = require('./src/services/libraryScenes.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'scene-peek-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const index = path.join(root, 'index.json');
+  await fsp.writeFile(index, '{}');
+  const many = Array.from({ length: 20 }, (_, i) => `f${i}.png`);
+  const albums = [
+    { key: 'e/Long', script: 's', kind: 'cg', files: many },
+    { key: 'e/Two', script: 's', kind: 'cg', files: ['a.png', 'b.png'] },
+    { key: 'e/One', script: 's', kind: 'cg', files: ['c.png'] },
+    { key: 'e/Talk', script: 's', kind: 'dialogue', files: ['d.png', 'e.png'] },
+    { key: 'e/Rig', script: 's', kind: 'cg', spine: true, files: ['g.png', 'h.png'] },
+    { key: 'e/Guests', script: 's', kind: 'cg', files: ['x.png', 'y.png', 'z.png'], scenes: [{ t: 'Гость', f: [1, 2] }] },
+  ];
+  const lib = new LibraryScenes();
+  lib.setDependencies({ gallery: { indexPath: () => index, cached: async () => ({ albums }) } });
+  const rows = await lib.rowsOf('G');
+  const peek = Object.fromEntries(rows.map((r) => [r.title, r.peek]));
+  assert.deepStrictEqual(peek.Long, ['f0.png', 'f4.png', 'f8.png', 'f12.png', 'f16.png']);
+  assert.deepStrictEqual(peek.Two, ['a.png', 'b.png']);
+  assert.strictEqual(peek.One, undefined);
+  assert.strictEqual(peek.Talk, undefined);
+  assert.strictEqual(peek.Rig, undefined);
+  assert.deepStrictEqual(peek['Гость'], ['y.png', 'z.png'], 'только кадры этой сцены');
+  const { queue } = await lib.queue(['G'], {});
+  assert.ok(queue.every((x) => !('peek' in x)), 'очереди плеера кадры плитки не нужны');
+});
+
+test('сцены библиотеки: отбор по тегам, исключение и скрытые теги, числа сужаются, в очереди те же сцены; скрытые кадры не в поиске', async (t) => {
+  const { LibraryScenes } = require('./src/services/libraryScenes.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'scene-tags-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const index = path.join(root, 'index.json');
+  const tagsFile = path.join(root, 'tags.json');
+  await fsp.writeFile(index, '{}');
+  await fsp.writeFile(tagsFile, '{}');
+  const albums = [
+    { key: 'e/One', script: 's', kind: 'cg', files: ['a.png', 'b.png'] },        // castle на a, maid на b — одна сцена
+    { key: 'e/Two', script: 's', kind: 'cg', files: ['c.png'] },                 // castle, cat
+    { key: 'e/Three', script: 's', kind: 'cg', files: ['d.png'] },               // без тегов
+  ];
+  const gallery = { indexPath: () => index, tagsPath: () => tagsFile, cached: async () => ({ albums }), gameTags: async () => ({ files: ['a.png', 'b.png', 'c.png'], tags: [{ tag: 'castle', f: [0, 2] }, { tag: 'maid', f: [1] }, { tag: 'cat', f: [2] }] }) };
+  const lib = new LibraryScenes();
+  lib.setDependencies({ gallery });
+  const titles = (r) => r.games.flatMap((g) => g.rows.map((x) => x.title));
+  const count = (r) => Object.fromEntries(r.tags.map((x) => [x.tag, x.n]));
+  const all = await lib.list(['G'], {});
+  assert.strictEqual(all.total, 3);
+  assert.deepStrictEqual(count(all), { castle: 2, maid: 1, cat: 1 });
+  const both = await lib.list(['G'], { tags: ['castle', 'maid'] });
+  assert.deepStrictEqual(titles(both), ['One'], 'теги на разных кадрах одной сцены');
+  const one = await lib.list(['G'], { tags: ['castle'] });
+  assert.deepStrictEqual(count(one), { castle: 2, maid: 1, cat: 1 });
+  assert.deepStrictEqual(one.counts, { all: 2, scenes: 2, dialogue: 0 });
+  assert.deepStrictEqual(titles(await lib.list(['G'], { not: ['cat'] })), ['One', 'Three'], 'сцена без разметки остаётся');
+  const hidden = await lib.list(['G'], { hide: ['maid'] });
+  assert.deepStrictEqual(titles(hidden), ['Two', 'Three']);
+  assert.ok(!('maid' in count(hidden)), 'скрытый тег в панель не идёт');
+  assert.deepStrictEqual((await lib.queue(['G'], { tags: ['castle'], not: ['cat'] })).queue.map((x) => x.title), ['One']);
+  // Скрытый тег в поиске по картинкам и «Похожих»
+  const { GalleryService } = require('./src/services/gallery.js');
+  const real = require('./src/services/galleryTags.js');
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  svc.vision = { available: true, version: 'v', embedModel: 'clip' };
+  svc.tags = { version: 'wd', unpack: real.unpack, list: async () => [null, 'maid'] };
+  svc.knows = async () => true;
+  await fsp.mkdir(path.join(root, '_media', 'G'), { recursive: true });
+  const vec = (i) => Buffer.from(Int8Array.from({ length: 512 }, (_, k) => (k === 0 ? 100 : k === i + 1 ? 120 : 0))).toString('base64');
+  await fsp.writeFile(svc.picturesPath('G'), JSON.stringify({ model: 'clip', items: { 'm.png\n1': vec(1), 'o.png\n1': vec(2), 'w.png\n1': vec(3) } }));
+  await fsp.writeFile(svc.tagsPath('G'), JSON.stringify({ model: 'wd', items: { 'm.png\n1': real.pack([1, 230]), 'w.png\n1': real.pack([1, 20]) } }));
+  const q = Float32Array.from({ length: 512 }, (_, i) => (i === 0 ? 1 : 0));
+  assert.deepStrictEqual((await svc.searchPictures(q, ['G'], 5, { hide: ['maid'] })).rows.map((r) => r.file).sort(), ['o.png', 'w.png'], 'слабый тег (0,08) не скрывает');
+});
+
+test('поиск по картинкам: кадр → сцена, в которой он есть (гость альбома или сцена альбома)', async (t) => {
+  const { LibraryScenes } = require('./src/services/libraryScenes.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'scene-of-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'index.json');
+  await fsp.writeFile(file, '{}');
+  const albums = [
+    { key: 'events/1/Night', kind: 'cg', script: 's1', files: ['n1.png', 'n2.png'] },
+    { key: 'events/2/Bath', kind: 'cg', script: 's2', title: 'Bath', files: ['b1.png', 'b2.png', 'b3.png'], scenes: [{ t: 'Morning', f: [0] }, { t: 'Evening', f: [1, 2] }] },
+    { key: 'pictures/x', kind: 'cg', files: ['x.png'] },
+  ];
+  const lib = new LibraryScenes();
+  lib.setDependencies({ gallery: { indexPath: () => file, cached: async () => ({ albums }) } });
+  assert.deepStrictEqual(await lib.sceneOf('G', 'n2.png'), { key: 'events/1/Night', n: 0, title: 'Night' });
+  assert.deepStrictEqual(await lib.sceneOf('G', 'b3.png'), { key: 'events/2/Bath', n: 1, title: 'Evening' });
+  assert.strictEqual(await lib.sceneOf('G', 'x.png'), null, 'без сценария — без сцены');
 });
 
 test('галерея: распознавание — альбом, где ни один кадр не похож на сцену, уходит из CG; ответы запоминаются; без модели — как было', async (t) => {
@@ -4729,7 +6613,6 @@ test('галерея: прозрачный «фон по имени» — сло
   assert.strictEqual(albumKey('img/pictures/2 D.png'), 'img/pictures/D');
 });
 
-
 test('галерея: набор Spine — один альбом-анимация, кадр на каждую анимацию, листы текстур не в других альбомах', async (t) => {
   const { GalleryService } = require('./src/services/gallery.js');
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-spine-'));
@@ -5019,7 +6902,6 @@ test('галерея: портреты разговора (узкая фигур
   assert.deepStrictEqual([...new Set(bases)].sort(), ['hero-base', 'hero2-base', ...Array.from({ length: 10 }, (_, i) => `solo${i}-base`), 'wide-base']);
   assert.strictEqual(bases.length, 32);
 });
-
 
 test('галерея: диалоги — разговоры с портретами, убранные из CG, становятся альбомами «dialogue» со сценарием; остальные альбомы, ключи и счёт те же; сводка сцены; старое оглавление без сводки', async (t) => {
   const { GalleryService } = require('./src/services/gallery.js');
@@ -5558,20 +7440,14 @@ test('кэш в памяти: те же команды, что у Redis, и ср
   assert.strictEqual(await r.get('scrape:miss:1'), null);
 });
 
-// ============================================================================
-// Сценарии: что поиск данных добавляет в игру и что убирает
-// ============================================================================
-// Сайты подменены целиком: что каждый «знает» про игру и не лежит ли он. Проверяется путь от поиска
-// до записи в базу так, как его проходят очередь и «Искать сейчас». Главное: ни один сайт не
-// пропускается из-за того, что другие уже что-то нашли (так VNDB не спрашивался у игры, у которой уже была страница itch.io),
-// и повторный поиск не теряет известное
-
 const SCENE_ID = 'Moon_Flower_v1.0';
+
 const SITE = {
   itch: { link: 'https://moon-studio.itch.io/moon-flower', tags: ['fantasy', 'cozy'], description: 'Description from itch.io', developer: 'Moon Studio', releaseDate: '2026-01-02', coverUrl: 'https://itch.test/cover.jpg', screens: ['https://itch.test/1.jpg'] },
   vndb: { link: 'https://vndb.org/v100', tags: ['visual novel'], description: 'Description from VNDB', coverUrl: 'https://vndb.test/cover.jpg' },
   steam: { link: 'https://store.steampowered.com/app/100', tags: ['steam tag'], description: 'Description from Steam', screens: ['https://steam.test/1.jpg'] },
 };
+
 const linksOf = (row) => String(row.link || '').split(',').filter(Boolean);
 
 async function scenario(t, row = {}) {
@@ -5785,6 +7661,342 @@ async function libraryRig(t) {
   return { lib, root, trash, asked, folder, row, fs };
 }
 
+test('новая версия при загрузке: патч, демо, DLC и мод не предлагают заменить полную игру; вся игра и новое демо — предлагают', () => {
+  const { newVersionMatches } = require('./src/utils/audit.js');
+  const rows = [
+    { id: 'Moon Game v1.0', title: 'Moon Game', link: 'https://store.steampowered.com/app/1234567' },
+    { id: 'Demo Lord v1', title: 'Demo Lord', link: '' },
+    { id: 'Star Demo v1', title: 'Star', link: '' },
+  ];
+  const ids = (title) => newVersionMatches(rows, { title }).map((m) => m.row.id);
+  for (const title of ['Moon Game Demo', 'Moon Game v1.0 English patch', 'Moon_Game_DLC', 'Moon Game (demo)', 'Moon Game Trial', 'Moon Game 体験版']) {
+    assert.deepStrictEqual(ids(title), [], title);
+  }
+  for (const title of ['Moon Game v1.1', 'Moon Game v1.1 patched', 'Moon Game English']) assert.deepStrictEqual(ids(title), ['Moon Game v1.0'], title);
+  assert.deepStrictEqual(ids('Demo Lord v2'), ['Demo Lord v1']);
+  assert.deepStrictEqual(ids('Star Demo v2'), ['Star Demo v1']);
+});
+
+test('новая версия при загрузке: то же название без версии, страница в Steam или на itch.io; другая часть серии и другое издание — не она', () => {
+  const { newVersionMatches } = require('./src/utils/audit.js');
+  const steam = (id) => `https://store.steampowered.com/app/${id}`;
+  const rows = [
+    { id: 'Rosebloom-1.08', title: 'ローズブルーム', link: '', lastPlayed: 5 },
+    { id: 'Moon Flower v1.1', title: 'Moon Flower', link: '' },
+    { id: 'Moon Flower 2 v1.0', title: 'Moon Flower 2', link: '' },
+    { id: 'Star Quest 2 v1.0', title: 'Star Quest', link: '' },
+    { id: 'Coded', title: 'Coded Game', link: steam(1234567) },
+    { id: 'Threaded', title: 'Threaded Game', link: 'https://moon-studio.itch.io/threaded-game' },
+    { id: 'TOD', title: 'TOD', link: '' },
+    // Вторая карточка: «_1» не номер серии
+    { id: 'Sunset_1', title: 'Sunset Tale', link: '' },
+    { id: 'Twin v1', title: 'Twin City', link: '', lastPlayed: 1 },
+    { id: 'Twin v2', title: 'Twin City', link: '', lastPlayed: 9 },
+  ];
+  const ids = (title, link) => newVersionMatches(rows, { title, link }).map((m) => [m.row.id, m.why]);
+
+  // Папка помнит прошлый архив, даже если игра зовёт себя иначе
+  assert.deepStrictEqual(ids('Rosebloom_v1.2'), [['Rosebloom-1.08', 'name']]);
+  assert.deepStrictEqual(ids('Moon_Flower_v1.2'), [['Moon Flower v1.1', 'name']]);
+  assert.deepStrictEqual(ids('Moon Flower 2 v1.3'), [['Moon Flower 2 v1.0', 'name']]);
+  assert.deepStrictEqual(ids('Other Title', `${steam(1234567)}/Coded_Game/`), [['Coded', 'page']]);
+  assert.deepStrictEqual(ids('Whatever', 'https://Moon-Studio.itch.io/Threaded-Game/devlog/5'), [['Threaded', 'page']]);
+  // Копий две: первой — та, во что играли позже
+  assert.deepStrictEqual(ids('Twin City v3').map(([id]) => id), ['Twin v2', 'Twin v1']);
+
+  // Чужие: другая часть серии в любую сторону, другое слово, короткое имя
+  for (const near of ['Moon Flower 3 v1.0', 'Moon Flower 1', 'Moon Flower Night', 'Moon', 'TOD v2', 'Sunset 1']) assert.deepStrictEqual(ids(near), [], near);
+  // Название и папка расходятся номером: неясно, какая это часть
+  assert.deepStrictEqual(ids('Star Quest v1.0'), []);
+  // Одно название, а страницы разные — другое издание
+  const edition = [{ id: 'Same Name', title: 'Same Name', link: steam(1111111) }, { id: 'Thread Name', title: 'Thread Name', link: 'https://moon-studio.itch.io/x' }];
+  assert.deepStrictEqual(newVersionMatches(edition, { title: 'Same Name', link: steam(2222222) }), []);
+  assert.deepStrictEqual(newVersionMatches(edition, { title: 'Thread Name', link: 'https://moon-studio.itch.io/y' }), []);
+});
+
+test('новая версия при загрузке: том архива без хвоста, ссылка только для чтения не предлагается, ответ — с названием для показа', async (t) => {
+  const fs = require('fs');
+  const os = require('os');
+  const uploads = require('./src/services/uploads.js');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'match-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const saved = uploads.gamesDir;
+  uploads.gamesDir = root;
+  t.after(() => { uploads.gamesDir = saved; });
+  fs.mkdirSync(path.join(root, 'Moon v1.0'));
+  fs.symlinkSync(path.join(root, 'Moon v1.0'), path.join(root, 'Star v1.0'));
+  const rows = [{ id: 'Moon v1.0', title: 'Moon Flower v1.0', cover: 'c.jpg' }, { id: 'Star v1.0', title: 'Star Tale' }];
+  assert.deepStrictEqual(await uploads.versionMatch(rows, { name: 'Moon_v1.1.part1.rar' }), { id: 'Moon v1.0', title: 'Moon Flower', cover: 'c.jpg', why: 'name' });
+  assert.strictEqual(await uploads.versionMatch(rows, { name: 'Star v1.1.zip' }), null);
+  assert.strictEqual(await uploads.versionMatch(rows, { name: 'Moon v1.1.txt' }), null);
+});
+
+test('ревизия: «Не дубликат» снимает пару и в цепочке; остальные пары остаются, каждая со своей причиной', () => {
+  const { duplicateGroups, pairKey } = require('./src/utils/audit.js');
+  const steam = (id) => `https://store.steampowered.com/app/${id}`;
+  const rows = [
+    { id: 'A', title: 'Some Game' }, { id: 'B', title: 'Some Game', link: steam(1111111) }, { id: 'C', title: 'Third', link: steam(1111111) },
+  ];
+  const pairs = (no) => duplicateGroups(rows, no).flatMap((g) => g.pairs.map((p) => [p.games.map((x) => x.id).join('+'), p.why.join()]));
+  assert.deepStrictEqual(pairs(), [['A+B', 'name'], ['B+C', 'page']]);
+  assert.deepStrictEqual(pairs(new Set([pairKey('B', 'A')])), [['B+C', 'page']], 'порядок в паре не важен');
+  assert.deepStrictEqual(duplicateGroups(rows, new Set([pairKey('A', 'B')])).map((g) => g.games.map((x) => x.id)), [['B', 'C']], 'A больше не в группе');
+  assert.deepStrictEqual(duplicateGroups(rows, new Set([pairKey('A', 'B'), pairKey('B', 'C')])), []);
+});
+
+// Две копии одной игры в библиотеке на диске, с сейвами где надо
+async function copiesRig(t) {
+  const fs = require('fs');
+  const { createCopies } = require('./src/services/copies.js');
+  const rig = await libraryRig(t);
+  const { lib, root, trash, folder } = rig;
+  const savesDir = path.join(root, '_saves');
+  fs.mkdirSync(savesDir, { recursive: true });
+  folder('Moon v1', 'Moon Flower');
+  folder('Moon v2', 'Moon Flower');
+  await lib.syncDatabase();
+  const put = (id, name, text = 'save') => {
+    fs.mkdirSync(path.join(savesDir, id), { recursive: true });
+    fs.writeFileSync(path.join(savesDir, id, name), text);
+  };
+  const copies = createCopies({ db: () => lib.get(), trash, savesDir, gamesDir: root });
+  const state = () => ({
+    v1: fs.existsSync(path.join(root, 'Moon v1')), v2: fs.existsSync(path.join(root, 'Moon v2')),
+    saves: fs.readdirSync(savesDir).filter((n) => !n.startsWith('.')).sort().map((d) => `${d}/${fs.statSync(path.join(savesDir, d)).isDirectory() ? fs.readdirSync(path.join(savesDir, d)).join() : ''}`),
+  });
+  return { ...rig, savesDir, put, copies, state };
+}
+
+test('склейка: время складывается, пустое заполняется, своё не трогаем; сейвы и моменты переезжают к копии без своих; вторая — в корзине', async (t) => {
+  const { lib, root, trash, row, put, savesDir, copies, state, fs } = await copiesRig(t);
+  await lib.get().run(`UPDATE games SET playtime = 100, status = 'playing', rating = 0, notes = '', lists = '[]' WHERE id = 'Moon v2'`);
+  await lib.get().run(`UPDATE games SET playtime = 50, status = 'done', rating = 4, notes = 'заметка', lists = '["Лучшее"]', progress = '{"level":3}', favorite = 1 WHERE id = 'Moon v1'`);
+  put('Moon v1', 'RPG%20File1.json', 'мой сейв');
+  for (const dir of ['.marks', '.history', '.journal']) {
+    fs.mkdirSync(path.join(savesDir, dir, 'Moon v1'), { recursive: true });
+    fs.writeFileSync(path.join(savesDir, dir, 'Moon v1', 'x.json'), dir);
+  }
+
+  const info = await copies.plan('Moon v1', 'Moon v2');
+  assert.deepStrictEqual(info.plans['Moon v2'], { keep: 'Moon v2', drop: 'Moon v1', playtime: 150, carries: ['rating', 'notes', 'lists'], saves: 'move' });
+  assert.strictEqual(info.plans['Moon v1'].saves, 'none');
+  assert.deepStrictEqual(state().saves, ['Moon v1/RPG%20File1.json'], 'показ плана ничего не меняет');
+
+  const res = await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual(res.saves, 'move');
+  const kept = await row('Moon v2');
+  assert.deepStrictEqual([kept.playtime, kept.status, kept.rating, kept.notes, kept.lists, kept.progress, kept.favorite],
+    [150, 'playing', 4, 'заметка', '["Лучшее"]', '{"level":3}', 1]);
+  assert.strictEqual(await row('Moon v1'), undefined);
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'мой сейв');
+  for (const dir of ['.marks', '.history', '.journal']) assert.strictEqual(fs.readFileSync(path.join(savesDir, dir, 'Moon v2', 'x.json'), 'utf8'), dir);
+  assert.ok(!fs.existsSync(path.join(savesDir, 'Moon v1')));
+
+  // Корзина: копия возвращается целиком, со своей строкой
+  const [item] = await trash.list();
+  assert.strictEqual(item.key, res.trashKey);
+  await trash.restore(res.trashKey);
+  assert.strictEqual((await row('Moon v1')).playtime, 0, 'время уже у оставшейся');
+  assert.ok(fs.existsSync(path.join(root, 'Moon v1', 'data', 'System.json')));
+});
+
+test('склейка: сейвы у обеих — не смешиваем: сейвы оставшейся те же, а другая в корзине вернётся со своими', async (t) => {
+  const { row, put, savesDir, trash, copies, state, fs } = await copiesRig(t);
+  put('Moon v1', 'RPG%20File1.json', 'первое прохождение');
+  put('Moon v2', 'RPG%20File1.json', 'второе прохождение');
+  assert.strictEqual((await copies.plan('Moon v1', 'Moon v2')).plans['Moon v2'].saves, 'both');
+  const res = await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual(res.saves, 'both');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'второе прохождение');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v1', 'RPG%20File1.json'), 'utf8'), 'первое прохождение', 'сейвы второй копии на месте');
+  await trash.restore(res.trashKey);
+  assert.ok(await row('Moon v1'));
+  assert.deepStrictEqual(state().saves, ['Moon v1/RPG%20File1.json', 'Moon v2/RPG%20File1.json']);
+});
+
+test('склейка: только моменты у оставшейся — сейвы другой не переезжают, два прохождения не смешиваем', async (t) => {
+  const { put, savesDir, copies, fs } = await copiesRig(t);
+  put('Moon v1', 'RPG%20File1.json', 'сейв');
+  fs.mkdirSync(path.join(savesDir, '.marks', 'Moon v2'), { recursive: true });
+  fs.writeFileSync(path.join(savesDir, '.marks', 'Moon v2', 'm.json'), 'момент');
+  assert.strictEqual((await copies.merge('Moon v2', 'Moon v1')).saves, 'both');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v1', 'RPG%20File1.json'), 'utf8'), 'сейв');
+  assert.ok(!fs.existsSync(path.join(savesDir, 'Moon v2', 'RPG%20File1.json')));
+});
+
+test('склейка: сбой на любом шаге оставляет обе копии и сейвы как были', async (t) => {
+  const { createCopies } = require('./src/services/copies.js');
+  const { lib, root, row, put, savesDir, trash, copies, state, fs } = await copiesRig(t);
+  await lib.get().run(`UPDATE games SET playtime = 100 WHERE id = 'Moon v2'`);
+  await lib.get().run(`UPDATE games SET playtime = 50, notes = 'заметка' WHERE id = 'Moon v1'`);
+  put('Moon v1', 'RPG%20File1.json', 'мой сейв');
+  fs.mkdirSync(path.join(savesDir, '.history', 'Moon v1'), { recursive: true });
+  fs.writeFileSync(path.join(savesDir, '.history', 'Moon v1', 'h.json'), 'история');
+  const before = state();
+  const same = async (what) => {
+    assert.deepStrictEqual(state(), before, what);
+    assert.deepStrictEqual([(await row('Moon v2')).playtime, (await row('Moon v2')).notes, (await row('Moon v1')).playtime], [100, '', 50], what);
+    assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v1', 'RPG%20File1.json'), 'utf8'), 'мой сейв', what);
+    assert.strictEqual(fs.readFileSync(path.join(savesDir, '.history', 'Moon v1', 'h.json'), 'utf8'), 'история', what);
+    assert.deepStrictEqual(await trash.list(), [], `${what}: в корзине пусто`);
+  };
+
+  // База отказала на записи: папка уже в корзине — она возвращается
+  const failing = new Proxy(lib.get(), { get: (db, name) => (name === 'run'
+    ? (sql, ...rest) => (/^UPDATE games SET playtime/.test(sql) ? Promise.reject(new Error('диск полон')) : db.run(sql, ...rest))
+    : typeof db[name] === 'function' ? db[name].bind(db) : db[name]) });
+  await assert.rejects(createCopies({ db: () => failing, trash, savesDir, gamesDir: root }).merge('Moon v2', 'Moon v1'), /диск полон/);
+  await same('сбой записи');
+
+  // Сейвы переехали, а следующая папка — нет: первая едет обратно. Вместо папки .history у оставшейся — файл
+  fs.mkdirSync(path.join(savesDir, '.history'), { recursive: true });
+  fs.writeFileSync(path.join(savesDir, '.history', 'Moon v2'), 'мешает');
+  await assert.rejects(copies.merge('Moon v2', 'Moon v1'));
+  fs.rmSync(path.join(savesDir, '.history', 'Moon v2'));
+  await same('сбой переезда сейвов');
+
+  // Папка не уехала в корзину: запись корзины не остаётся. Первый же шаг, ничего другого не менялось
+  t.mock.method(trash, 'trashGame', async () => { throw new Error('нет места'); });
+  await assert.rejects(copies.merge('Moon v2', 'Moon v1'), /нет места/);
+  await same('сбой корзины');
+});
+
+test('склейка: сбой на COMMIT возвращает и папки людей, и их строки; копия из корзины на месте', async (t) => {
+  const { createCopies } = require('./src/services/copies.js');
+  const { lib, root, row, savesDir, trash, fs } = await copiesRig(t);
+  const uid = 'u0123456789abcdef';
+  const mine = path.join(savesDir, '.people', uid);
+  // У человека сейв и «момент» на удаляемой копии, у оставшейся — ничего: при склейке они переезжают
+  fs.mkdirSync(path.join(mine, 'Moon v1'), { recursive: true });
+  fs.writeFileSync(path.join(mine, 'Moon v1', 'RPG%20File1.json'), 'сейв человека');
+  fs.mkdirSync(path.join(mine, '.marks', 'Moon v1'), { recursive: true });
+  fs.writeFileSync(path.join(mine, '.marks', 'Moon v1', 'm.json'), 'момент человека');
+  await lib.get().run("INSERT INTO user_games (user_id, game_id, playtime, notes, at) VALUES (?, 'Moon v1', 700, 'заметка человека', 1)", [uid]);
+  const filesBefore = fs.readdirSync(mine, { recursive: true }).sort();
+  const rows = () => lib.get().all('SELECT game_id, playtime, notes FROM user_games WHERE user_id = ? ORDER BY game_id', [uid]);
+  const rowsBefore = await rows();
+
+  // Всё прошло, кроме самого COMMIT (диск отказал в последний миг): ROLLBACK настоящий
+  const failing = new Proxy(lib.get(), { get: (db, name) => (name === 'exec'
+    ? (sql) => (sql === 'COMMIT' ? Promise.reject(new Error('commit не удался')) : db.exec(sql))
+    : typeof db[name] === 'function' ? db[name].bind(db) : db[name]) });
+  await assert.rejects(createCopies({ db: () => failing, trash, savesDir, gamesDir: root }).merge('Moon v2', 'Moon v1'), /commit не удался/);
+
+  assert.deepStrictEqual(fs.readdirSync(mine, { recursive: true }).sort(), filesBefore, 'папки человека вернулись, где были');
+  assert.strictEqual(fs.readFileSync(path.join(mine, 'Moon v1', 'RPG%20File1.json'), 'utf8'), 'сейв человека');
+  assert.ok(!fs.existsSync(path.join(mine, 'Moon v2')) && !fs.existsSync(path.join(mine, '.marks', 'Moon v2')), 'у оставшейся ничего не осталось');
+  assert.deepStrictEqual(await rows(), rowsBefore, 'строки человека откатились: ни переноса к Moon v2, ни потери у Moon v1');
+  assert.deepStrictEqual(await trash.list(), [], 'копия вернулась из корзины');
+  assert.ok(fs.existsSync(path.join(root, 'Moon v1')) && fs.existsSync(path.join(root, 'Moon v2')));
+  assert.strictEqual((await row('Moon v1')).id, 'Moon v1');
+
+  // Без сбоя то же самое — переезжает: проверка выше не прошла бы впустую
+  await createCopies({ db: () => lib.get(), trash, savesDir, gamesDir: root }).merge('Moon v2', 'Moon v1');
+  assert.strictEqual(fs.readFileSync(path.join(mine, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'сейв человека');
+  assert.deepStrictEqual((await rows()).map((r) => [r.game_id, r.playtime]), [['Moon v1', 0], ['Moon v2', 700]], 'время ушло к оставшейся, у удалённой обнулено');
+});
+
+test('склейка: копию вернули из корзины — время не считается второй раз, переехавшие сейвы при оставшейся', async (t) => {
+  const { lib, root, row, trash, copies, put, savesDir, fs } = await copiesRig(t);
+  await lib.get().run("UPDATE games SET playtime = 100 WHERE id = 'Moon v1'");
+  await lib.get().run("UPDATE games SET playtime = 50 WHERE id = 'Moon v2'");
+  put('Moon v1', 'run.json');
+  const { trashKey } = await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual((await trash.list()).find((e) => e.key === trashKey).playtime, 0, 'корзина показывает то, что вернётся');
+  await trash.restore(trashKey);
+  assert.deepStrictEqual([(await row('Moon v1')).playtime, (await row('Moon v2')).playtime], [0, 150]);
+  assert.ok(fs.existsSync(path.join(root, 'Moon v1')));
+  assert.ok(fs.existsSync(path.join(savesDir, 'Moon v2', 'run.json')));
+});
+
+test('корзина: игру удалили, а она вернулась карточкой из копии — файлы встают к карточке, а не отказом', async (t) => {
+  const { lib, root, row, trash, folder, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  await lib.get().run("UPDATE games SET cover = 'Moon/cover.png', playtime = 100 WHERE id = 'Moon'");
+  const { key } = await trash.trashGame('Moon');
+  // Так её оставляет восстановление копии (routes/backup.js): строка из копии, папки нет, обложка из папки обнулена
+  await lib.get().run("INSERT INTO games (id, title, cover, playtime, notes, shelved_at) VALUES ('Moon', 'Moon Flower', NULL, 80, 'из копии', 5)");
+  await trash.restore(key);
+  const back = await row('Moon');
+  assert.deepStrictEqual([back.shelved_at, back.cover, back.playtime, back.notes], [0, 'Moon/cover.png', 80, 'из копии']);
+  assert.ok(fs.existsSync(path.join(root, 'Moon', 'data', 'System.json')));
+  assert.deepStrictEqual(await trash.list(), []);
+
+  // Под этим именем обычная игра — отказ, как раньше: её файлы не трогаем
+  folder('Star', 'Star');
+  await lib.syncDatabase();
+  const star = await trash.trashGame('Star');
+  folder('Star', 'Star Again');
+  await lib.syncDatabase();
+  await assert.rejects(trash.restore(star.key), (e) => e.status === 409);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(root, 'Star', 'data', 'System.json'), 'utf8')).gameTitle, 'Star Again');
+});
+
+test('корзина: игра с полки не удалилась из базы после переезда файлов — файлы всё равно можно вернуть', async (t) => {
+  const { createTrash } = require('./src/services/trash.js');
+  const { lib, root, row, trash, folder, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  await trash.shelveGame('Moon');
+  const real = lib.get();
+  const failing = new Proxy(real, { get: (o, k) => (k === 'run'
+    ? (sql, ...rest) => (/^DELETE/.test(sql) ? Promise.reject(new Error('база занята')) : o.run(sql, ...rest))
+    : (typeof o[k] === 'function' ? o[k].bind(o) : o[k])) });
+  const broken = createTrash({ db: () => failing, trashDir: path.join(root, '_trash'), gamesDir: root });
+  await assert.rejects(broken.trashGame('Moon'), /база занята/);
+  assert.ok((await row('Moon')).shelved_at > 0);
+  const [entry] = await trash.list();
+  await trash.restore(entry.key);
+  assert.strictEqual((await row('Moon')).shelved_at, 0);
+  assert.ok(fs.existsSync(path.join(root, 'Moon', 'data', 'System.json')));
+});
+
+test('корзина: папка не переехала — запись не остаётся, игра на месте', async (t) => {
+  const { lib, root, row, trash, folder, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  fs.renameSync(path.join(root, 'Moon'), path.join(root, 'Moon.away'));
+  t.after(() => fs.rmSync(path.join(root, 'Moon.away'), { recursive: true, force: true }));
+  await assert.rejects(trash.trashGame('Moon'));
+  assert.ok(await row('Moon'), 'строка на месте');
+  assert.deepStrictEqual(await trash.list(), []);
+});
+
+test('склейка: чужую игру и копию без файлов вместо копии с файлами не склеить; копия на полке уходит вместе с картой', async (t) => {
+  const { lib, root, folder, trash, row, copies, state } = await copiesRig(t);
+  folder('Other', 'Other Game');
+  await lib.syncDatabase();
+  const before = state();
+  await assert.rejects(copies.merge('Moon v2', 'Other'), (e) => e.reason === 'merge-not-same');
+  await assert.rejects(copies.merge('Moon v2', 'Moon v2'), (e) => e.status === 400);
+  await assert.rejects(copies.merge('Moon v2', 'Nope'), (e) => e.status === 404);
+  assert.deepStrictEqual(state(), before);
+
+  await trash.shelveGame('Moon v1');
+  const info = await copies.plan('Moon v1', 'Moon v2');
+  assert.strictEqual(info.plans['Moon v1'], null);
+  assert.ok(info.plans['Moon v2']);
+  await assert.rejects(copies.merge('Moon v1', 'Moon v2'), (e) => e.reason === 'merge-keep-shelved');
+  assert.ok(require('fs').existsSync(path.join(root, 'Moon v2')));
+  await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual(await row('Moon v1'), undefined);
+  const [item] = await trash.list();
+  assert.deepStrictEqual([item.id, item.shelf], ['Moon v1', false]);
+});
+
+test('«Не дубликат»: ответ живёт в базе и после перезапуска', async (t) => {
+  const { lib, root, copies } = await copiesRig(t);
+  await copies.dismiss('Moon v2', 'Moon v1');
+  await copies.dismiss('Moon v1', 'Moon v2');
+  assert.deepStrictEqual(await lib.get().all('SELECT a, b FROM not_duplicates'), [{ a: 'Moon v1', b: 'Moon v2' }], 'пара одна, в каком порядке ни нажми');
+  await assert.rejects(copies.dismiss('Moon v1', 'Nope'), (e) => e.status === 404);
+  const again = new (dbService.constructor)();
+  await again.init(root);
+  t.after(() => again.get().close());
+  assert.deepStrictEqual(await again.get().all('SELECT a, b FROM not_duplicates'), [{ a: 'Moon v1', b: 'Moon v2' }]);
+});
+
 test('сценарий «новая папка»: запись и поиск данных; вотчер и загрузка добавляют её разом — найденное не стирается', async (t) => {
   const { lib, root, asked, folder, row } = await libraryRig(t);
   folder('Moon', 'Moon Flower');
@@ -5846,6 +8058,130 @@ test('сценарий «удалили через приложение и ве�
   fs.rmSync(path.join(root, '_trash'), { recursive: true, force: true });
 });
 
+test('сценарий «На полку»: файлы — в корзину, карточка со всем остаётся; сверка её не трогает; «Вернуть» — игра снова на месте', async (t) => {
+  const { lib, root, trash, folder, row, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  await lib.get().run(`UPDATE games SET rating = 5, playtime = 3600, status = 'done' WHERE id = 'Moon'`);
+
+  const T = 1767225600000;
+  const { key } = await trash.shelveGame('Moon', T);
+  assert.ok(!fs.existsSync(path.join(root, 'Moon')), 'папки в библиотеке нет');
+  assert.ok(fs.existsSync(path.join(root, '_trash', key, 'game', 'data', 'System.json')), 'файлы — в корзине');
+  const shelved = await row('Moon');
+  assert.deepStrictEqual([shelved.shelved_at, shelved.rating, shelved.playtime, shelved.status], [T, 5, 3600, 'done'], 'карточка — со всем, что о ней известно');
+  assert.deepStrictEqual([...(await trash.shelves()).entries()], [['Moon', { key, at: T, purgeAt: T + 30 * 864e5 }]]);
+  const [item] = await trash.list(T);
+  assert.deepStrictEqual([item.id, item.shelf, item.vanished, item.title], ['Moon', true, false, 'Moon Flower']);
+
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Moon')).shelved_at, T, 'без папки — не «убрали мимо приложения»: на полке так и надо');
+  assert.strictEqual((await trash.list()).length, 1, 'второй записи в корзине нет');
+
+  // Пока файлы на полке, папку с тем же именем заняли — вернуть нельзя, ни одну не трогаем
+  fs.mkdirSync(path.join(root, 'Moon'));
+  await assert.rejects(trash.restore(key), /уже есть/);
+  fs.rmdirSync(path.join(root, 'Moon'));
+
+  await trash.restore(key);
+  assert.ok(fs.existsSync(path.join(root, 'Moon', 'data', 'System.json')), 'файлы — на месте');
+  const back = await row('Moon');
+  assert.deepStrictEqual([back.shelved_at, back.rating, back.playtime], [0, 5, 3600]);
+  assert.deepStrictEqual(await trash.list(), []);
+});
+
+test('сценарий «На полку»: удалили карточку — файлы уходят с ней одной записью; без файлов карточка вернётся на полку', async (t) => {
+  const { lib, root, trash, folder, row, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  await lib.get().run(`UPDATE games SET playtime = 600 WHERE id = 'Moon'`);
+
+  // Файлы ещё в корзине: удаление собирает карточку и файлы в одну запись — вернут её, и игра встанет целиком
+  await trash.shelveGame('Moon');
+  const { key } = await trash.trashGame('Moon');
+  assert.strictEqual(await row('Moon'), undefined);
+  const items = await trash.list();
+  assert.deepStrictEqual(items.map((i) => [i.key, i.shelf]), [[key, false]], 'одна запись, не две');
+  assert.ok(fs.existsSync(path.join(root, '_trash', key, 'game', 'data', 'System.json')));
+  await trash.restore(key);
+  assert.ok(fs.existsSync(path.join(root, 'Moon', 'data', 'System.json')));
+  assert.deepStrictEqual([(await row('Moon')).shelved_at, (await row('Moon')).playtime], [0, 600], 'вернулась игрой, не полкой');
+
+  // Файлы с полки стёрли — карточка остаётся; удалили и её — вернётся снова на полку
+  const shelf = await trash.shelveGame('Moon', 1767225600000);
+  await trash.remove(shelf.key);
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Moon')).shelved_at, 1767225600000, 'файлов нет — карточка на полке');
+  const gone = await trash.trashGame('Moon');
+  assert.ok(!fs.existsSync(path.join(root, '_trash', gone.key, 'game')), 'файлов в записи нет');
+  await trash.restore(gone.key);
+  const card = await row('Moon');
+  assert.deepStrictEqual([card.shelved_at, card.playtime], [1767225600000, 600]);
+  assert.ok(!fs.existsSync(path.join(root, 'Moon')));
+});
+
+test('сценарий «На полку»: вернули новой версией — прежние файлы из корзины становятся прежней версией; запись без папки — уже не полка', async (t) => {
+  const { lib, root, trash, folder, row, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  const { key } = await trash.shelveGame('Moon');
+  const to = path.join(root, '_old', 'Moon', '2026-10-29-10-00-00');
+  assert.strictEqual(await trash.shelfToOld('Moon', to), true);
+  assert.ok(fs.existsSync(path.join(to, 'data', 'System.json')), 'прежние файлы — в _old');
+  assert.ok(!fs.existsSync(path.join(root, '_trash', key)), 'записи «с полки» в корзине нет');
+  assert.strictEqual(await trash.shelfToOld('Moon', `${to}-2`), false, 'второй раз — нечего');
+  // Новая версия встала (refreshGame снимает полку), потом папку убрали мимо приложения: это «папка пропала», а не полка
+  folder('Moon', 'Moon Flower 2');
+  await lib.refreshGame('Moon', path.join(root, 'Moon'), { archiveName: 'Moon_v2.zip' });
+  assert.strictEqual((await row('Moon')).shelved_at, 0);
+  fs.renameSync(path.join(root, 'Moon'), path.join(root, '_old', 'Moon-away'));
+  await lib.syncDatabase();
+  assert.strictEqual(await row('Moon'), undefined);
+  assert.deepStrictEqual((await trash.list()).map((i) => [i.id, i.vanished, i.shelf]), [['Moon', true, false]]);
+
+  // Файлы вернули, а запись стереть не успели (перезапуск): без папки game она уже не полка — ни в списке, ни для сверки
+  folder('Sun', 'Sun');
+  await lib.syncDatabase();
+  const sun = await trash.shelveGame('Sun');
+  fs.renameSync(path.join(root, '_trash', sun.key, 'game'), path.join(root, 'Sun'));
+  assert.strictEqual((await trash.shelves()).has('Sun'), false);
+  assert.ok(!(await trash.list()).some((i) => i.id === 'Sun'));
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Sun')).shelved_at, 0, 'папка на месте — игра');
+});
+
+test('сценарий «На полку»: перезапуск между переездом папки и пометкой; папку положили назад руками', async (t) => {
+  const { lib, root, trash, folder, row, fs } = await libraryRig(t);
+  folder('Moon', 'Moon Flower');
+  await lib.syncDatabase();
+  // Папка уже в корзине, а пометку записать не успели
+  const key = '1767225600000-Moon';
+  fs.mkdirSync(path.join(root, '_trash', key), { recursive: true });
+  fs.writeFileSync(path.join(root, '_trash', key, 'entry.json'), JSON.stringify({ kind: 'shelf', id: 'Moon', deletedAt: 1767225600000, title: 'Moon Flower' }));
+  fs.renameSync(path.join(root, 'Moon'), path.join(root, '_trash', key, 'game'));
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Moon')).shelved_at, 1767225600000, 'на полке, а не «папку убрали» — запись не ушла в корзину');
+  assert.deepStrictEqual((await trash.list()).map((i) => i.shelf), [true]);
+
+  // Папку вернули мимо приложения — игра снова на месте
+  fs.renameSync(path.join(root, '_trash', key, 'game'), path.join(root, 'Moon'));
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Moon')).shelved_at, 0);
+});
+
+test('сценарий «папку вернули мимо приложения»: карточка из копии без обложки становится игрой и получает обложку из файлов', async (t) => {
+  const { lib, root, folder, row, fs } = await libraryRig(t);
+  await lib.get().run("INSERT INTO games (id, title, cover, playtime, shelved_at) VALUES ('Moved', 'Moved', NULL, 600, 5)");
+  await lib.syncDatabase();
+  assert.strictEqual((await row('Moved')).shelved_at, 5, 'пока папки нет — на полке');
+
+  folder('Moved', 'Moved');
+  fs.writeFileSync(path.join(root, 'Moved', 'cover.png'), 'png');
+  await lib.syncDatabase();
+  const back = await row('Moved');
+  assert.deepStrictEqual([back.shelved_at, back.cover, back.playtime], [0, 'Moved/cover.png', 600]);
+});
+
 test('сценарий «новая версия поверх старой»: найденные данные, время и ссылки остаются, название и версия — из новой', async (t) => {
   const { lib, root, folder, row, fs } = await libraryRig(t);
   folder('Moon', 'Moon Flower v1.0');
@@ -5884,10 +8220,6 @@ test('поиск Moonlit Priestess: игра зовёт себя «… Alpha Ver
   const { data } = await scraper.lookupMetadata('Moonlit Priestess Alpha Ver0.80', '', { altTitle: scraper.titleFromFolder('MoonPri_Alpha_080Z'), readmeTitle: '' });
   assert.ok(data?.link.includes('store.steampowered.com/app/44110'), data?.link);
 });
-
-// ============================================================================
-// Журнал поиска («Как искали») и «Возможно, это она»
-// ============================================================================
 
 test('журнал поиска: по каждому сайту — что спросили и что он ответил; журнал пишется в игру', async (t) => {
   const { removedAfterEdit } = require('./src/utils/links.js');
@@ -5982,6 +8314,7 @@ test('«Место»: что сколько занимает и что можн�
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'space-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec('CREATE TABLE not_duplicates (a TEXT, b TEXT, PRIMARY KEY (a, b))');
   t.after(() => db.close());
   await db.exec(`CREATE TABLE games (id TEXT PRIMARY KEY, title TEXT, link TEXT DEFAULT '', size INTEGER DEFAULT 0, status TEXT DEFAULT '',
     playtime INTEGER DEFAULT 0, lastPlayed INTEGER DEFAULT 0, addedAt INTEGER DEFAULT 0, ready INTEGER DEFAULT 1, meta_locked TEXT DEFAULT '[]')`);
@@ -6018,6 +8351,9 @@ test('«Место»: что сколько занимает и что можн�
   assert.deepStrictEqual(r.suggest.dropped.map((g) => g.id), ['Dropped_Game']);
   assert.deepStrictEqual(r.suggest.never.map((g) => g.id), ['Never_Old', 'Moon_v2'], 'недавно добавленную и «в планах» не предлагаем');
   assert.deepStrictEqual(r.suggest.dupes.map((group) => group.map((g) => g.id)), [['Moon_v2', 'Moon_v1']]);
+  await db.run("INSERT INTO not_duplicates (a, b) VALUES ('Moon_v1', 'Moon_v2')");
+  assert.deepStrictEqual((await svc.report({ now, fresh: true })).suggest.dupes, [], '«Не дубликат» — и здесь не копии');
+  await db.run('DELETE FROM not_duplicates');
   assert.deepStrictEqual([r.parts.games, r.parts.old, r.parts.trash, r.parts.uploads, r.unsized], [16600, 1500, 6000, 400, 1]);
   assert.strictEqual(r.games[0].id, 'Never_Old', 'все игры — самые большие первыми');
   assert.strictEqual(r.games.find((g) => g.id === 'Done_Game').old, 1500);
@@ -6245,10 +8581,6 @@ test('галерея: петля — не длиннее двух секунд �
   assert.strictEqual(g.probe.mock.callCount(), asked + 1);
   quiet.forEach((m) => m.mock.restore());
 });
-
-// ============================================================================
-// Перевод игр (utils/gametext.js, services/translate.js): ничего в игре не ломается
-// ============================================================================
 
 const fs = require('fs');
 
@@ -7197,6 +9529,63 @@ test('перевод не ломает игру: запасной файл по 
   await assert.rejects(svc.saveCheck('G', { ok: true }), /Перевод не включён/);
 });
 
+test('хранилище игры в браузере (rpg-fixes): человек и владелец в одном localStorage — у каждого свои ключи; у владельца ключи прежние, чужого не подбирает', () => {
+  const LZString = require('lz-string');
+  // Функцию берём прямо из rpg-fixes.js: до следующего раздела файла (там она кончается) и запускаем на заглушке Storage
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'rpg-fixes.js'), 'utf8');
+  const start = src.indexOf('function setupGameStorage()');
+  const text = src.slice(start, src.indexOf('\n    // ====', start));
+  // Один и тот же «localStorage» на двоих: разные обёртки над одной таблицей — у каждого запуска свой прототип, как у своей страницы
+  const make = (map) => class {
+    get length() { return map.size; }
+    key(i) { return [...map.keys()][i] ?? null; }
+    getItem(k) { return map.has(k) ? map.get(k) : null; }
+    setItem(k, v) { map.set(k, String(v)); }
+    removeItem(k) { map.delete(k); }
+    clear() { map.clear(); }
+  };
+  const page = (map, who, title = 'Игра') => {
+    const Storage = make(map);
+    const $dataSystem = { gameTitle: title };
+    const window = { Storage, localStorage: new Storage(), $dataSystem };
+    new Function('window', 'Storage', '$dataSystem', 'GAME_ID', 'WHO', 'cloudApi', 'LZString', 'let gameStorage = null;' + text + ';setupGameStorage(); return gameStorage;')(window, Storage, $dataSystem, 'G', who, null, LZString);
+    return window.localStorage;
+  };
+  const map = new Map();
+  const ANNA = 'u0123456789abcdef';
+  const owner = page(map, '');
+  owner.setItem('RPG File1', 'OWNER');
+  owner.setItem('Plugin', 'shared-looking');
+  assert.deepStrictEqual([...map.keys()].sort(), ['rpgm:G:Plugin', 'rpgm:G:RPG File1', 'rpgm:G:~seen'].sort(), 'владелец: ключи под названием игры, как всегда');
+
+  const anna = page(map, ANNA);
+  assert.strictEqual(anna.getItem('RPG File1'), null, 'человек не видит сейв владельца из общего хранилища');
+  anna.setItem('RPG File1', 'ANNA');
+  anna.setItem('Plugin', 'anna-value');
+  assert.strictEqual(map.get(`rpgm:${ANNA}/G:RPG File1`), 'ANNA');
+  assert.strictEqual(map.get('rpgm:G:RPG File1'), 'OWNER', 'сейв владельца не затёрт');
+  assert.strictEqual(owner.getItem('RPG File1'), 'OWNER');
+  assert.strictEqual(owner.getItem('Plugin'), 'shared-looking');
+  assert.strictEqual(anna.getItem('Plugin'), 'anna-value');
+  anna.removeItem('RPG File1');
+  assert.strictEqual(owner.getItem('RPG File1'), 'OWNER', 'удалённое у человека у владельца остаётся');
+  anna.clear();
+  assert.strictEqual(owner.getItem('RPG File1'), 'OWNER', 'clear у человека стирает только его часть');
+  assert.ok(![...map.keys()].some((k) => k.startsWith(`rpgm:${ANNA}/G:`) && !k.includes('~')), 'и его часть стёрта');
+
+  // Прежние общие ключи MV (до пространств имён): забирает владелец; человек их не берёт
+  const pack = (v) => LZString.compressToBase64(JSON.stringify(v));
+  const old = new Map([['RPG Global', pack([null, { title: 'Игра' }])], ['RPG File1', 'OLD-SAVE']]);
+  assert.strictEqual(page(old, ANNA).getItem('RPG File1'), null, 'человек старый общий сейв не усыновляет');
+  assert.strictEqual(old.get('RPG File1'), 'OLD-SAVE', 'и не уносит из общего');
+  assert.strictEqual(page(old, '').getItem('RPG File1'), 'OLD-SAVE', 'владелец — усыновляет, как раньше');
+  assert.strictEqual(old.get('rpgm:G:RPG File1'), 'OLD-SAVE');
+  // Общий ключ не-сейва: владелец забирает один раз, человек — нет
+  const shared = new Map([['Volume', '80']]);
+  assert.strictEqual(page(shared, ANNA).getItem('Volume'), null);
+  assert.strictEqual(page(shared, '').getItem('Volume'), '80');
+});
+
 test('перевод на экране (rpg-fixes): точное совпадение, шаблоны с подстановками, слово в рамке; без зависаний и ложных срабатываний', () => {
   // Функцию берём прямо из rpg-fixes.js и запускаем с заглушками браузера и движка
   const src = fs.readFileSync(path.join(__dirname, 'public', 'rpg-fixes.js'), 'utf8');
@@ -7754,7 +10143,8 @@ test('перевести картинки: очередь, кэш по хэшу,
   await db.run("UPDATE picture_jobs SET state = 'running' WHERE game_id = 'G'");
   const t0 = Date.now();
   await down.recover({ waitMs: 60, stepMs: 20 });
-  assert.ok(Date.now() - t0 >= 60);
+  // Таймеры libuv считают от усечённого до мс времени и срабатывают на ~1 мс раньше: запас на это
+  assert.ok(Date.now() - t0 >= 50);
   await down.running;
   assert.strictEqual((await down.status('G')).error, 'ocr-down');
   // Службы нет совсем — не ждём, задача остаётся на паузе
@@ -8170,6 +10560,355 @@ test('чит-меню: «В комнату воспоминаний» — сво
     ['go', 2, 9, 3, 2, 0], ['go', 2, 9, 16, 8, 0]]);
 });
 
+// --- Чит-меню: все карты одним ответом (data/mimikin-maps.json, routes/play.js и readMaps в cheats.js) ---
+// Папка игр у этих тестов своя, временная: рядом с настоящими играми тест ничего не кладёт. GAMES_DIR читается при
+// загрузке модуля, поэтому — своя копия routes/play.js, и память ответа у каждого теста тоже своя
+async function mapsRig(t) {
+  const http = require('http');
+  const zlib = require('zlib');
+  const express = require('express');
+  const compression = require('compression');
+  require('./src/routes/play.js');   // всё, что он тянет, — уже загружено с настоящими настройками
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'maps-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const files = ['./src/config/index.js', './src/routes/play.js'].map((f) => require.resolve(f));
+  const kept = files.map((f) => require.cache[f]);
+  const env = process.env.GAMES_DIR;
+  process.env.GAMES_DIR = root;
+  files.forEach((f) => delete require.cache[f]);
+  let play;
+  try {
+    play = require('./src/routes/play.js');
+  } finally {
+    if (env === undefined) delete process.env.GAMES_DIR; else process.env.GAMES_DIR = env;
+    files.forEach((f, i) => { require.cache[f] = kept[i]; });
+  }
+  const listen = async (app) => {
+    const server = http.createServer(app);
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    t.after(() => server.close());
+    return `http://127.0.0.1:${server.address().port}`;
+  };
+  // Сервер игр (GAME_ISOLATION по умолчанию) и игры на адресе библиотеки (GAME_ISOLATION=off), с compression() как в server.js
+  const isolated = await listen(play.createGameApp({ secret: () => 's1', store: { list: async () => ({}) }, publicDir: __dirname }));
+  const pageApp = express();
+  pageApp.use(compression());
+  pageApp.get('*', (req, res, next) => play.serveGameFile(req, res, next, { rel: play.relFrom(req.path), prefix: '', inject: { id: 'x' } }));
+  const prefixed = await listen(pageApp);
+  // Не глобальный fetch: его подменяют другие тесты. Ответ не разжимаем сами — смотрим, что пришло на самом деле
+  const raw = (url, headers = { 'accept-encoding': 'gzip' }) => new Promise((resolve, reject) => {
+    http.get(url, { headers }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+  const parsed = (r) => JSON.parse((r.headers['content-encoding'] === 'gzip' ? zlib.gunzipSync(r.body) : r.body).toString());
+  const gameUrl = async (id) => `${isolated}/g/${play.gameKey('s1', id, await play.revOf(id))}/${encodeURIComponent(id)}`;
+  return { play, root, isolated, prefixed, raw, parsed, gameUrl, zlib };
+}
+
+// Всё в папке: путь, размер, время изменения
+async function folderPrint(dir) {
+  const out = [];
+  for (const e of await fsp.readdir(dir, { withFileTypes: true, recursive: true })) {
+    const full = path.join(e.parentPath || e.path, e.name);
+    const st = await fsp.stat(full);
+    out.push([path.relative(dir, full), st.size, st.mtimeMs]);
+  }
+  return out.sort((a, b) => a[0].localeCompare(b[0]));
+}
+
+test('чит-меню: карты одним ответом — без плиток, события целы, регистр имён, битых нет, оба пути к игре, папка игры не тронута', async (t) => {
+  const { root, isolated, prefixed, raw, parsed, gameUrl } = await mapsRig(t);
+  const data = path.join(root, 'Game', 'www', 'Data');
+  await fsp.mkdir(path.join(data, 'Map009.json'), { recursive: true });
+  await fsp.mkdir(path.join(root, 'Other', 'data'), { recursive: true });
+  const map1 = { width: 3, height: 2, data: [1, 2, 3], events: [null, { id: 1, name: 'door', data: 'поле события', pages: [{ trigger: 0, conditions: {}, list: [{ code: 201, parameters: [0, 2, 1, 1] }] }] }] };
+  const write = (name, body) => fsp.writeFile(path.join(data, name), body);
+  await Promise.all([
+    write('Map001.json', JSON.stringify(map1)),
+    write('map002.JSON', JSON.stringify({ width: 1, data: [9], events: [] })),
+    write('MAP1000.json', JSON.stringify({ width: 2, data: [9], events: [] })),
+    write('Map003.json', '{битый'),
+    write('Map004.json', ''),
+    write('Map005.json', 'null'),
+    write('Map006.json', `﻿${JSON.stringify({ width: 6, data: [9], events: [] })}`),
+    // Такой файл игра не спросит: она просит Map007.json
+    write('Map7.json', JSON.stringify({ width: 7, events: [] })),
+    // Два файла в разном регистре: игра получит точное имя
+    write('MAP008.json', JSON.stringify({ width: 80, events: [] })),
+    write('Map008.json', JSON.stringify({ width: 8, events: [] })),
+    write('MapInfos.json', '[null]'),
+    write('System.json', '{}'),
+    write('Map.json', '{}'),
+  ]);
+  const before = await folderPrint(root);
+  const expected = {
+    1: { width: 3, height: 2, events: map1.events },
+    2: { width: 1, events: [] },
+    6: { width: 6, events: [] },
+    8: { width: 8, events: [] },
+    1000: { width: 2, events: [] },
+  };
+  const base = await gameUrl('Game');
+  const urlIn = `${base}/www/data/mimikin-maps.json`;
+  // Сервер игр: сжато один раз (двойное сжатие не разобралось бы), «спросить заново» — чтобы обновление игры дошло
+  const gz = await raw(urlIn);
+  assert.strictEqual(gz.status, 200);
+  assert.strictEqual(gz.headers['content-encoding'], 'gzip');
+  assert.strictEqual(gz.headers['cache-control'], 'no-cache');
+  assert.match(gz.headers.vary, /accept-encoding/i);
+  assert.match(gz.headers['content-type'], /application\/json/);
+  assert.deepStrictEqual(parsed(gz), expected);
+  assert.ok(!parsed(gz)[1].data && parsed(gz)[1].events[1].data === 'поле события', 'поле data снято только с самой карты');
+  // Клиент без gzip — разжатый ответ; без заголовка — тоже
+  for (const headers of [{ 'accept-encoding': 'identity' }, {}]) {
+    const plain = await raw(urlIn, headers);
+    assert.strictEqual(plain.headers['content-encoding'], undefined);
+    assert.deepStrictEqual(JSON.parse(plain.body.toString()), expected);
+  }
+  // Адрес библиотеки (GAME_ISOLATION=off)
+  const page = await raw(`${prefixed}/Game/www/data/mimikin-maps.json`);
+  assert.strictEqual(page.headers['content-encoding'], 'gzip');
+  assert.deepStrictEqual(parsed(page), expected);
+  // Проверки — как у любого файла игры: чужой ключ, чужая игра, выход из папки
+  assert.strictEqual((await raw(`${isolated}/g/${'0'.repeat(32)}/Game/www/data/mimikin-maps.json`)).status, 403);
+  assert.strictEqual((await raw(urlIn.replace('/Game/', '/Other/'))).status, 403);
+  assert.strictEqual((await raw(`${base}/..%2fOther/data/mimikin-maps.json`)).status, 403);
+  assert.strictEqual((await raw(`${prefixed}/..%2f..%2fdata/mimikin-maps.json`)).status, 403);
+  // Папки данных нет — 404; карт в ней нет — пустой ответ
+  assert.strictEqual((await raw(`${base}/nope/data/mimikin-maps.json`)).status, 404);
+  assert.strictEqual((await raw(`${prefixed}/Game/nope/data/mimikin-maps.json`)).status, 404);
+  assert.deepStrictEqual(parsed(await raw(`${await gameUrl('Other')}/data/mimikin-maps.json`)), {});
+  assert.deepStrictEqual(await folderPrint(root), before, 'в папке игры ничего не появилось и не изменилось');
+});
+
+test('чит-меню: карты одним ответом — при включённом переводе 404, карты читаются по одной', async (t) => {
+  const { play, root, raw, parsed, gameUrl } = await mapsRig(t);
+  const data = path.join(root, 'Game', 'data');
+  await fsp.mkdir(data, { recursive: true });
+  await fsp.writeFile(path.join(data, 'Map001.json'), JSON.stringify({ width: 1, data: [1], events: [] }));
+  let lang = '';
+  play.setTranslation({ langOf: async () => lang, overlay: async () => null, langs: ['en'] });
+  const url = `${await gameUrl('Game')}/data/mimikin-maps.json`;
+  assert.deepStrictEqual(parsed(await raw(url)), { 1: { width: 1, events: [] } });
+  lang = 'en';
+  const off = await raw(url);
+  assert.strictEqual(off.status, 404);
+  assert.strictEqual(off.headers['cache-control'], 'no-cache', 'выключили перевод — следующий запрос снова получит ответ');
+  lang = '';
+  assert.strictEqual((await raw(url)).status, 200);
+});
+
+test('чит-меню: карты одним ответом — одна сборка на все запросы, новая после обновления игры и после другой игры, сбой не запоминается', async (t) => {
+  const { root, raw, parsed, gameUrl, zlib } = await mapsRig(t);
+  const data = path.join(root, 'Game', 'data');
+  await fsp.mkdir(data, { recursive: true });
+  await fsp.mkdir(path.join(root, 'Second', 'data'), { recursive: true });
+  const map = path.join(data, 'Map001.json');
+  const infos = path.join(data, 'MapInfos.json');
+  await fsp.writeFile(map, JSON.stringify({ width: 1, events: [] }));
+  await fsp.writeFile(infos, '[null]');
+  let reads = 0;
+  const realRead = fsp.readFile;
+  t.mock.method(fsp, 'readFile', function (file, ...rest) {
+    if (String(file) === map) reads++;
+    return realRead.call(this, file, ...rest);
+  });
+  const url = `${await gameUrl('Game')}/data/mimikin-maps.json`;
+  const answers = await Promise.all(Array.from({ length: 6 }, () => raw(url)));
+  assert.strictEqual(reads, 1, 'запросы разом — одна сборка');
+  for (const a of answers) assert.deepStrictEqual(parsed(a), { 1: { width: 1, events: [] } });
+  await raw(url);
+  assert.strictEqual(reads, 1, 'следующий запрос — из памяти');
+  // Обновление игры: MapInfos.json с другим временем — собираем заново
+  await fsp.writeFile(map, JSON.stringify({ width: 2, events: [] }));
+  await fsp.utimes(infos, new Date(), new Date(Date.now() + 5000));
+  assert.deepStrictEqual(parsed(await raw(url)), { 1: { width: 2, events: [] } });
+  assert.strictEqual(reads, 2);
+  // В памяти — только последняя игра
+  await raw(`${await gameUrl('Second')}/data/mimikin-maps.json`);
+  await raw(url);
+  assert.strictEqual(reads, 3);
+  // Сборка не удалась: 500, и в памяти этого нет. Прежний ответ — для прежней версии игры — тоже не отдаём
+  await fsp.utimes(infos, new Date(), new Date(Date.now() + 10000));
+  const gzip = t.mock.method(zlib, 'gzip', (body, cb) => cb(new Error('нет памяти')));
+  assert.strictEqual((await raw(url)).status, 500);
+  gzip.mock.restore();
+  const again = await raw(url);
+  assert.strictEqual(again.status, 200);
+  assert.strictEqual(reads, 5);
+});
+
+test('чит-меню: карты одним ответом — патч сменил только карту: собираем заново; не прочитался файл: 500, не запоминается', async (t) => {
+  const { root, raw, parsed, gameUrl } = await mapsRig(t);
+  const data = path.join(root, 'Game', 'data');
+  await fsp.mkdir(data, { recursive: true });
+  const map1 = path.join(data, 'Map001.json');
+  const map2 = path.join(data, 'Map002.json');
+  const long = new Date('2020-01-01T00:00:00Z');
+  const body = (width) => JSON.stringify({ width, events: [] });
+  await fsp.writeFile(path.join(data, 'MapInfos.json'), '[null]');
+  await fsp.writeFile(map1, body(1));
+  // Недораспакованная игра: файл ещё не дописан, в ответ не попал. Дописался — карта появилась
+  await fsp.writeFile(map2, '{"width":');
+  const url = `${await gameUrl('Game')}/data/mimikin-maps.json`;
+  assert.deepStrictEqual(parsed(await raw(url)), { 1: { width: 1, events: [] } });
+  await fsp.writeFile(map2, body(2));
+  assert.deepStrictEqual(parsed(await raw(url)), { 1: { width: 1, events: [] }, 2: { width: 2, events: [] } });
+  // Патч из архива: размер тот же, время старое — и старше остальных файлов
+  await fsp.writeFile(map1, body(3));
+  await fsp.utimes(map1, long, long);
+  assert.deepStrictEqual(parsed(await raw(url))[1], { width: 3, events: [] });
+  // Новая карта и удалённая карта
+  await fsp.writeFile(path.join(data, 'Map003.json'), body(4));
+  assert.deepStrictEqual(Object.keys(parsed(await raw(url))), ['1', '2', '3']);
+  await fsp.rm(map2);
+  assert.deepStrictEqual(Object.keys(parsed(await raw(url))), ['1', '3']);
+  // Нет прав или сбой диска — не «карты нет»: 500 и в памяти этого нет (chmod не годится: тесты идут под root)
+  await fsp.writeFile(map2, body(2));
+  const realRead = fsp.readFile;
+  const denied = t.mock.method(fsp, 'readFile', function (file, ...rest) {
+    if (String(file) === map2) return Promise.reject(Object.assign(new Error('нет прав'), { code: 'EACCES' }));
+    return realRead.call(this, file, ...rest);
+  });
+  assert.strictEqual((await raw(url)).status, 500);
+  denied.mock.restore();
+  assert.deepStrictEqual(Object.keys(parsed(await raw(url))), ['1', '2', '3']);
+});
+
+// Настоящая cheats.js с игрой из переданных данных; fetch — чужой, у каждой загрузки свой разбор карт
+function cheatsWith({ infos, ces = [null], names = [''], fetch, abort = globalThis.AbortSignal }) {
+  const src = fs.readFileSync(path.join(__dirname, 'public', 'cheats.js'), 'utf8');
+  const win = { addEventListener() {} };
+  const off = { value: () => false };
+  new Function('window', 'location', 'localStorage', 'fetch', 'AbortSignal', '$dataMapInfos', '$dataCommonEvents', '$dataSystem', '$gameSwitches', '$gameVariables', '$gameSelfSwitches', src)(
+    win, { search: '' }, { getItem: () => null }, fetch, abort, infos, ces, { switches: names, variables: [''] }, off, { value: () => 0 }, off);
+  return win.__rpgCheats;
+}
+
+test('чит-меню: карты одним ответом и по одной дают одно и то же; фоном и при сбое ответа — по одной', async (t) => {
+  const { root, raw, gameUrl } = await mapsRig(t);
+  const data = path.join(root, 'Game', 'data');
+  await fsp.mkdir(data, { recursive: true });
+  const cmd = (code, parameters = [], indent = 0) => ({ code, parameters, indent });
+  const page = (conditions, list, trigger = 0) => ({ conditions, trigger, list: [...list, cmd(0)] });
+  const sc = [cmd(231, [1, 'cg'])];
+  const tiles = Array.from({ length: 3000 }, (_, i) => i % 7);
+  const room = { width: 10, height: 10, data: tiles, events: [null,
+    { id: 1, name: 'Сцена', pages: [page({}, []), page({ switch1Valid: true, switch1Id: 2 }, sc)] },
+    { id: 2, name: 'Сцена', pages: [page({ switch1Valid: true, switch1Id: 3 }, sc)] },
+    { id: 3, name: 'Сцена', pages: [page({ switch1Valid: true, switch1Id: 4 }, sc)] },
+  ] };
+  // Город: вход в комнату — воспоминание, и автозапуск, который держит переключатель 3 (безопасный план его не откроет)
+  const town = { width: 5, height: 5, data: tiles, events: [null,
+    { id: 1, name: '回想部屋へ', pages: [page({}, [cmd(201, [0, 1, 4, 4, 2, 0])])] },
+    { id: 2, name: 'auto', pages: [page({}, []), page({ switch1Valid: true, switch1Id: 3 }, [cmd(101)], 3)] },
+  ] };
+  await fsp.writeFile(path.join(data, 'Map001.json'), JSON.stringify(room));
+  await fsp.writeFile(path.join(data, 'map002.json'), JSON.stringify(town));
+  await fsp.writeFile(path.join(data, 'Map003.json'), '{битый');
+  const infos = [null, { id: 1, name: '回想部屋' }, { id: 2, name: '町' }, { id: 3, name: 'Битая' }, { id: 4, name: 'Нет файла' }];
+  const names = ['', '', 'シーン1', 'シーン2', 'シーン3'];
+  const base = `${await gameUrl('Game')}/`;
+  const load = (over = {}) => {
+    const asked = [];
+    const cheats = cheatsWith({ infos, names, fetch: async (url, opts) => {
+      asked.push(url);
+      if (url in over) return over[url](opts);
+      const r = await raw(base + url);
+      const text = (r.headers['content-encoding'] === 'gzip' ? require('zlib').gunzipSync(r.body) : r.body).toString();
+      return { ok: r.status >= 200 && r.status < 300, status: r.status, text: async () => text };
+    } });
+    return { cheats, asked };
+  };
+  const COMPACT = 'data/mimikin-maps.json';
+  // Плитки есть только при чтении по одной. Сравнивать без них можно, пока меню их не читает: начнёт — упадёт эта проверка
+  assert.doesNotMatch(fs.readFileSync(path.join(__dirname, 'public', 'cheats.js'), 'utf8'), /\.data\b/);
+  const without = (maps) => Object.fromEntries(Object.entries(maps).map(([id, { data: _tiles, ...m }]) => [id, m]));
+  // Что в итоге видит меню: решатель, безопасный план, вход в комнату, счёт «Ещё не видели»
+  const seen = async ({ cheats }) => {
+    const { maps, failed, rooms } = await cheats.scanMaps();
+    const args = { names, vnames: [''], infos, maps, ces: [null], roomList: rooms };
+    return { failed, rooms, maps: without(maps), scenes: cheats.findScenes(args), safe: cheats.safeScenes(args, maps),
+      entry: cheats.findRoomEntry({ infos, ces: [null], rooms, maps }), status: await cheats.roomStatus() };
+  };
+
+  const one = load();
+  const viaOne = await seen(one);
+  assert.deepStrictEqual(one.asked, [COMPACT], 'один запрос вместо чтения всех карт');
+  assert.strictEqual(viaOne.failed, 0, 'битый файл и нет файла — не сбой');
+  assert.deepStrictEqual(Object.keys(viaOne.maps), ['1', '2']);
+  assert.ok(viaOne.scenes.count.total >= 3, `сцены нашлись: ${JSON.stringify(viaOne.scenes.count)}`);
+  assert.deepStrictEqual(viaOne.scenes.scenes.map((x) => x.id).sort(), [2, 3, 4]);
+  assert.deepStrictEqual(viaOne.safe.scenes.map((x) => x.id).sort(), [2, 4], 'безопасный план видит автозапуск в городе');
+  assert.strictEqual(viaOne.entry.kind, 'event');
+
+  // Перевод включён (404): по одной, результат тот же
+  const byMap = load({ [COMPACT]: async () => ({ ok: false, status: 404, text: async () => '{}' }) });
+  assert.deepStrictEqual(await seen(byMap), viaOne);
+  assert.deepStrictEqual(byMap.asked, [COMPACT, 'data/Map001.json', 'data/Map002.json', 'data/Map003.json', 'data/Map004.json']);
+
+  // Сбой ответа, битый JSON, не тот вид, отказ сети — молча по одной и без «не все карты»
+  for (const bad of [
+    async () => ({ ok: false, status: 500, text: async () => '{}' }),
+    async () => ({ ok: true, status: 200, text: async () => '<html>' }),
+    async () => ({ ok: true, status: 200, text: async () => '[1]' }),
+    async () => { throw new Error('сеть'); },
+    async () => ({ ok: true, status: 200, text: async () => { throw new Error('оборвалось'); } }),
+  ]) {
+    const fell = load({ [COMPACT]: bad });
+    assert.deepStrictEqual(await seen(fell), viaOne);
+    assert.strictEqual(fell.asked.length, 5);
+  }
+
+  // Фоном («Ещё не видели») — по карте: большой разбор разом остановил бы игру. Один разбор на игру, дальше считает по нему
+  const bg = load();
+  const status = await bg.cheats.roomStatus({ pace: 1 });
+  assert.deepStrictEqual(bg.asked, ['data/Map001.json', 'data/Map002.json', 'data/Map003.json', 'data/Map004.json']);
+  assert.deepStrictEqual(status, viaOne.status);
+});
+
+test('чит-меню: карта странного вида — сбой одной этой карты при обоих способах чтения', async () => {
+  const odd = { events: 5 };
+  const fine = { width: 1, events: [] };
+  const infos = [null, { id: 1, name: 'Странная' }, { id: 2, name: 'Город' }];
+  const reply = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+  const whole = await cheatsWith({ infos, fetch: async () => reply({ 1: odd, 2: fine }) }).scanMaps();
+  const single = await cheatsWith({ infos, fetch: async (url) => (url.includes('mimikin-maps') ? { ok: false, status: 404 } : reply(url.includes('Map001') ? odd : fine)) }).scanMaps();
+  for (const r of [whole, single]) {
+    assert.strictEqual(r.failed, 1);
+    assert.deepStrictEqual(Object.keys(r.maps), ['2']);
+  }
+});
+
+test('чит-меню: зависший запрос карты — через 30 с считается сбоем, следующий заход читает заново', async (t) => {
+  const limits = [];
+  // Предел времени срабатывает сразу, чтобы тест не ждал настоящие 30 с
+  const abort = { timeout: (ms) => { limits.push(ms); const c = new AbortController(); setImmediate(() => c.abort(new Error('timeout'))); return c.signal; } };
+  const stuck = (signal) => new Promise((_, no) => signal.addEventListener('abort', () => no(signal.reason)));
+  let healthy = false;
+  const asked = [];
+  const cheats = cheatsWith({ abort, infos: [null, { id: 1, name: 'Город' }, { id: 2, name: 'Лес' }], fetch: async (url, { signal } = {}) => {
+    asked.push(url);
+    if (url === 'data/mimikin-maps.json') return stuck(signal);
+    if (healthy) return { ok: true, status: 200, text: async () => JSON.stringify({ width: 1, events: [] }) };
+    // Карта 1 зависла до ответа, карта 2 — посреди чтения тела
+    if (url === 'data/Map001.json') return stuck(signal);
+    return { ok: true, status: 200, text: () => stuck(signal) };
+  } });
+  const first = await cheats.scanMaps();
+  assert.strictEqual(first.failed, 2, 'обе карты — сбой: сообщение «Не все карты…»');
+  assert.deepStrictEqual(limits, [60000, 30000, 30000]);
+  await assert.rejects(cheats.roomStatus(), /maps/);
+  // Сбой не запомнен: следующий заход на вкладку читает снова, и всё находится
+  healthy = true;
+  const second = await cheats.scanMaps();
+  assert.strictEqual(second.failed, 0);
+  assert.deepStrictEqual(Object.keys(second.maps), ['1', '2']);
+});
+
 test('чит-меню (cheats.js): бессмертие только у выбранного героя, скорость держится, сквозь стены, без боёв, переменные, бой', () => {
   const src = fs.readFileSync(path.join(__dirname, 'public', 'cheats.js'), 'utf8');
   class Game_BattlerBase {
@@ -8308,13 +11047,17 @@ test('перевод: одна игра разбирается один раз �
   let release;
   const gate = new Promise((r) => { release = r; });
   let calls = 0;
-  svc.engines = { deepl: async (texts) => { calls++; await gate; return texts.map((s) => `[RU] ${s}`); } };
+  let firstCall;
+  const asked = new Promise((r) => { firstCall = r; });
+  svc.engines = { deepl: async (texts) => { calls++; firstCall(); await gate; return texts.map((s) => `[RU] ${s}`); } };
   const { BATCH } = require('./src/services/translate.js');
   const prev = BATCH.deepl.lines;
   BATCH.deepl.lines = 2;
   t.after(() => { BATCH.deepl.lines = prev; });
   await svc.setLang('G', 'ru');
-  for (let i = 0; i < 100 && !calls; i++) await new Promise((r) => setTimeout(r, 5));
+  // Ждём сам первый вызов, а не опрашиваем полсекунды: на медленном раннере чтение карт дольше, и
+  // выключение приходило бы раньше первого вызова (тогда calls = 0)
+  await asked;
   await svc.setLang('G', '');
   release();
   await svc.running;
@@ -8416,6 +11159,28 @@ test('галерея: сценарий сцены — картинки, репл
   assert.strictEqual(speech(['\\V[5]'], '', { 5: '\\V[5]' }).text, '', 'самоссылка не вешает разбор');
   // Перед окном имени — любые коды с номером («\OC[31]», «\CE[83]»), не только «\C»
   assert.deepStrictEqual(speech(['\\CE[83]\\C[13]\\OC[31]\\N<\\N[1]>Ah'], '', {}, [null, 'Ann']), { who: 'Ann', text: 'Ah' });
+  // Окно имени по центру и справа (YEP «\nc<…>», «\nr<…>») и пустое окно: имя — говорящий, в тексте ни «c<>», ни имени
+  assert.deepStrictEqual(speech(['\\nc<Студентка>Привет'], ''), { who: 'Студентка', text: 'Привет' });
+  assert.deepStrictEqual(speech(['\\nc<>Текст'], ''), { who: '', text: 'Текст' });
+  assert.deepStrictEqual(speech(['\\C[2]\\nr<Bob>Hi', 'there'], ''), { who: 'Bob', text: 'Hi there' });
+  assert.deepStrictEqual(speech(['\\nc<>Текст'], 'Анна'), { who: 'Анна', text: 'Текст' }, 'имя из MZ, а окно в тексте пустое');
+  // Имя одно в первой строке, реплика в кавычках — во второй: имя не приклеивается к реплике
+  assert.deepStrictEqual(speech(['Fumika Ichijo', '"Ah..."'], ''), { who: 'Fumika Ichijo', text: '"Ah..."' });
+  assert.deepStrictEqual(speech(['\\C[3]Monica\\C[0]', '「はい」'], ''), { who: 'Monica', text: '「はい」' });
+  assert.deepStrictEqual(speech(['◆Rina', '(Hm...)'], ''), { who: 'Rina', text: '(Hm...)' });
+  // Не имя: знаки предложения, слова со строчной, одна строка, ♡ в первой строке, вторая не в кавычках, одна цифра
+  assert.deepStrictEqual(speech(['Suddenly, the door.', '"Hey"'], ''), { who: '', text: 'Suddenly, the door.\n"Hey"' });
+  assert.strictEqual(speech(['Recall the memories of', '"the past"'], '').who, '');
+  assert.deepStrictEqual(speech(['Monica'], ''), { who: '', text: 'Monica' });
+  assert.strictEqual(speech(['Monica♡', '"Ah"'], '').who, '');
+  assert.deepStrictEqual(speech(['Monica', 'smiles.'], ''), { who: '', text: 'Monica smiles.' });
+  assert.strictEqual(speech(['2', '「…」'], '').who, '');
+  // Концовка и заголовок игры над репликой — не говорящий, строка остаётся в тексте
+  assert.deepStrictEqual(speech(['\\C[27]Paradise End\\C[0]', '『Too Late』'], ''), { who: '', text: 'Paradise End\n『Too Late』' });
+  assert.strictEqual(speech(['BAD END 4', '"No…"'], '').who, '');
+  assert.strictEqual(speech(['【TIPS】Нажмите Shift'], '').who, '');
+  assert.strictEqual(speech(['Legend', '"x"'], '').who, 'Legend');
+  assert.strictEqual(speech(['Rikill:', '"Sea"'], '').who, 'Rikill', '«Имя:» — как раньше');
   // Строка в скрипте события: «\x1b» — настоящий знак, а не «x1b»
   assert.strictEqual(require('./src/services/galleryScenes.js').tokenize("'\\x1bN[14]'")[0].v, '\x1bN[14]');
 
@@ -8976,6 +11741,7 @@ const langFix = () => {
   const wanted = (extra = {}) => ({ msgs: new Map(zh.map((l) => [l, [l]])), optSets: new Set(), opts: new Set(), names: new Set(), ...extra });
   return { N, zh, ja, en, ru, wanted };
 };
+
 // Игра во временной папке: files — путь → содержимое (строка или объект в JSON), plugins — имена включённых плагинов или их записи
 const langGame = async (t, files, plugins = []) => {
   const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'scene-langs-'));
@@ -9329,6 +12095,128 @@ test('галерея: сцена с выбором языка — таблица
   // Перевод Mimikin упал — сцена открывается с оригиналом
   const broke = await ask({ ui: 'ru', client: true, mt: 'en' }, 'P', async () => { throw new Error('mt'); });
   assert.strictEqual(broke.steps[1].text, '你好');
+});
+
+test('сцены: кто в сцене — имена, роли, пороги реплик, главный герой скрыт', () => {
+  const SC = require('./src/services/sceneCast.js');
+  // Имя: теги, хвосты, вопросы, обёртки, буква или номер роли — к основе; мусор — не имя
+  assert.deepStrictEqual(['Man A', 'Lucy (lv.?)', '凌华？？？', 'Rayleigh (Young Girl', '【Freya】', 'Студент 2', 'Guard①', '村人A', 'Bob<e1>', 'Heroｔ', 'Upper District Resident Pipin'].map(SC.norm),
+    ['Man', 'Lucy', '凌华', 'Rayleigh', 'Freya', 'Студент', 'Guard', '村人', 'Bob', 'Hero', 'Upper District Resident Pipin']);
+  assert.deepStrictEqual(['???', '\\V[201', '…', '・', '', null, '<???>', '0', '12'].map(SC.norm), ['', '', '', '', '', '', '', '', '']);
+  // Заголовки игры в окне имени — концовки, достижения, подсказки — тоже не имена; похожие имена остаются
+  assert.deepStrictEqual(['BAD END 4', 'HAPPY END', 'Nobuo End', 'Достижение 27', 'TIPS', 'Difficulty', 'About Starfall', 'Legend', 'Wendy', 'Endo'].map(SC.norm),
+    ['', '', '', '', '', '', '', 'Legend', 'Wendy', 'Endo']);
+  // Реплика на двоих — обеим
+  assert.deepStrictEqual(SC.split('Mina & Syrup'), ['Mina', 'Syrup']);
+  assert.deepStrictEqual(SC.split('Аня и Боря'), ['Аня', 'Боря']);
+  assert.deepStrictEqual(SC.split('ミナ、シロップ'), ['ミナ', 'シロップ']);
+  const n = (name, k) => Array(k).fill(name);
+  // Пороги: не меньше трёх реплик и 15 % реплик с именем; реплики без имени не в счёт; не больше трёх на сцену
+  assert.deepStrictEqual(SC.sceneCast([...n('A', 3), ...n('', 40), ...n('B', 2)]).present, ['A'], 'две реплики — эпизод');
+  assert.deepStrictEqual(SC.sceneCast([...n('A', 20), ...n('B', 3)]).present, ['A'], '3 из 23 — меньше 15 %');
+  assert.deepStrictEqual(SC.sceneCast([...n('A', 17), ...n('B', 3)]).present, ['A', 'B'], '3 из 20 — ровно 15 %');
+  assert.deepStrictEqual(SC.sceneCast([...n('D', 3), ...n('C', 4), ...n('B', 4), ...n('A', 5)]).present, ['A', 'C', 'B']);
+  assert.deepStrictEqual(SC.sceneCast([...n('Mina & Syrup', 3), 'Man A']).present, ['Mina', 'Syrup']);
+  assert.deepStrictEqual(SC.sceneCast(['Man A', ...n('Mina', 3), 'Man B', 'Bob']).top, ['Mina', 'Man'], 'подпись плитки — двое главных, по тем же именам');
+  // Вкладка: кто в 90 % сцен с именами — главный, его нет; лидер отряда — уже с 50 %; лидер в 40 % остаётся
+  const row = (key, ...who) => ({ key, says: who.flatMap((w) => n(w, 3)) });
+  const ten = (lead) => [...Array(10)].map((_, i) => row(`s${i}\n0`, ...(i < 9 ? ['Hero'] : []), ...(i < lead ? ['Lead'] : []), i % 2 ? 'Anna' : 'Bea'));
+  // При равенстве — кто появился раньше
+  assert.deepStrictEqual(SC.tabCast(ten(5), 'Lead').names, [['Bea', 5], ['Anna', 5]], 'Hero в 9 из 10, лидер в 5 из 10 — скрыты');
+  assert.deepStrictEqual(SC.tabCast(ten(4), 'Lead (Young Girl)').names.map(([x]) => x), ['Bea', 'Anna', 'Lead'], 'лидер в 4 из 10 — в ряду');
+  assert.deepStrictEqual(SC.tabCast(ten(5), '').names.map(([x]) => x), ['Lead', 'Bea', 'Anna'], 'не лидер в 5 из 10 — в ряду');
+  // Только имена из двух сцен и больше, по числу сцен; сцены без имён — без строки; номера — в ряду этой вкладки
+  const tab = SC.tabCast([row('a\n0', 'Zed'), row('b\n0', 'Ann', 'Zed'), row('c\n0', 'Ann'), row('d\n0', 'Ann', 'Solo'), { key: 'e\n0', says: ['', ''] }, row('f\n0', 'Bob'), row('g\n0', 'Bob')]);
+  assert.deepStrictEqual(tab.names, [['Ann', 3], ['Zed', 2], ['Bob', 2]]);
+  assert.deepStrictEqual(tab.rows, { 'a\n0': [1], 'b\n0': [0, 1], 'c\n0': [0], 'd\n0': [0], 'f\n0': [2], 'g\n0': [2] });
+  assert.deepStrictEqual(tab.w['d\n0'], ['Ann', 'Solo']);
+  assert.ok(!('e\n0' in tab.w));
+  // Вкладки считаются отдельно
+  const all = SC.build({ scenes: [row('a\n0', 'Ann'), row('b\n0', 'Ann')], dialogue: [row('d\n0', 'Bob'), row('e\n0', 'Bob'), row('f\n0', 'Bob', 'Cid'), row('g\n0', 'Cid')] });
+  assert.strictEqual(all.v, SC.CAST_VERSION);
+  assert.deepStrictEqual([all.scenes.names, all.dialogue.names], [[], [['Bob', 3], ['Cid', 2]]], 'Ann — в каждой сцене; у диалогов свой счёт: Bob в 3 из 4');
+});
+
+test('галерея: кто в сценах — таблица рядом со сценариями, кэш, гости, одна сборка на запросы разом', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const SC = require('./src/services/sceneCast.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'gallery-cast-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  for (const d of ['img', 'data']) await fsp.mkdir(path.join(root, 'C', d), { recursive: true });
+  await fsp.writeFile(path.join(root, 'C', 'data', 'System.json'), JSON.stringify({ partyMembers: [1] }));
+  await fsp.writeFile(path.join(root, 'C', 'data', 'Actors.json'), JSON.stringify([null, { name: 'Hero' }, { name: 'Anna' }]));
+  const svc = new GalleryService();
+  svc.setDependencies({ gamesDir: root, mediaDir: path.join(root, '_media') });
+  const V = Number(fs.readFileSync(path.join(__dirname, 'src/services/gallery.js'), 'utf8').match(/const INDEX_VERSION = (\d+)/)[1]);
+  const say = (who, k = 3) => Array(k).fill(0).map(() => (who === 'Hero' ? { k: 'say', l: ['\\N[1]', '"Hi"'] } : { k: 'say', l: ['Hi'], n: who }));
+  const albums = [
+    { key: 'e/1', kind: 'cg', files: ['a.png'], script: true },
+    { key: 'e/2', kind: 'cg', files: ['a.png'], script: true },
+    { key: 'e/3', kind: 'cg', files: ['a.png'], script: true, scenes: [{ t: 'g0', f: [0] }, { t: 'g1', f: [0] }] },
+    { key: 'd/1', kind: 'dialogue', files: ['a.png'], script: true },
+    { key: 'p/1', kind: 'cg', files: ['a.png'] },
+  ];
+  const scripts = {
+    'e/1': [...say('Hero'), ...say('Anna')], 'e/2': [...say('Hero'), ...say('Anna'), ...say('Boris')],
+    'e/3': [...say('Hero'), ...say('Boris')], 'e/3\n1': [...say('Anna'), ...say('Boris', 1)], 'd/1': say('Mina & Syrup'),
+  };
+  const put = async (dir) => {
+    await fsp.mkdir(path.join(root, '_media', 'C', dir), { recursive: true });
+    await fsp.writeFile(svc.indexPath('C'), JSON.stringify({ v: V, builtAt: 1, scripts: dir, screen: { w: 816, h: 624 }, counts: { cg: 3 }, albums }));
+    for (const [k, steps] of Object.entries(scripts)) await fsp.writeFile(svc.scriptPath('C', dir, k), JSON.stringify({ steps, sounds: [], actors: ['', 'Hero', 'Anna'] }));
+    svc.memo.delete('C');
+  };
+  await put('scripts-1');
+  const first = await svc.cast('C');
+  // Hero — первый в отряде и в 3 из 4 сцен с именами: его нет; у гостя альбома — свой ключ «ключ\n1»; Boris с одной репликой во втором госте — не в нём
+  assert.deepStrictEqual(first.scenes.names, [['Anna', 3], ['Boris', 2]]);
+  assert.deepStrictEqual(first.scenes.rows, { 'e/1\n0': [0], 'e/2\n0': [0, 1], 'e/3\n0': [1], 'e/3\n1': [0] });
+  assert.deepStrictEqual(first.scenes.w['e/3\n0'], ['Hero', 'Boris']);
+  assert.deepStrictEqual([first.dialogue.names, first.dialogue.w], [[], { 'd/1\n0': ['Mina', 'Syrup'] }]);
+  const file = path.join(root, '_media', 'C', 'scripts-1', 'cast.json');
+  assert.strictEqual(JSON.parse(await fsp.readFile(file, 'utf8')).v, SC.CAST_VERSION);
+
+  // Кэш: файл читается, а не считается; другая версия — заново; второй раз — из памяти; новая папка — новая таблица
+  let builds = 0;
+  const build = SC.build;
+  t.after(() => { SC.build = build; });
+  SC.build = (...a) => { builds++; return build(...a); };
+  svc.castMemo.clear();
+  assert.deepStrictEqual(await svc.cast('C'), first);
+  assert.strictEqual(builds, 0, 'cast.json прочитан с диска');
+  await fsp.writeFile(file, JSON.stringify({ v: 0 }));
+  svc.castMemo.clear();
+  assert.deepStrictEqual((await svc.cast('C')).scenes, first.scenes);
+  assert.strictEqual(builds, 1, 'другая версия — заново');
+  await fsp.writeFile(file, JSON.stringify({ v: 0 }));
+  await svc.cast('C');
+  assert.strictEqual(builds, 1, 'из памяти');
+  await put('scripts-2');
+  await svc.cast('C');
+  assert.strictEqual(builds, 2, 'новая папка сценариев — новая таблица');
+  assert.ok(fs.existsSync(path.join(root, '_media', 'C', 'scripts-2', 'cast.json')));
+  await svc.forget('C');
+  assert.ok(!svc.castMemo.has('C'), 'forget сбрасывает память');
+
+  // Три запроса разом — один расчёт; папку тем временем удалили — cast.json её не воскрешает
+  await put('scripts-3');
+  builds = 0;
+  SC.build = (...a) => {
+    builds++;
+    fs.rmSync(path.join(root, '_media', 'C', 'scripts-3'), { recursive: true, force: true });
+    return build(...a);
+  };
+  const three = await Promise.all([1, 2, 3].map(() => svc.cast('C')));
+  assert.strictEqual(builds, 1);
+  assert.ok(three.every((x) => x === three[0]) && three[0].scenes.names.length === 2);
+  assert.ok(!fs.existsSync(path.join(root, '_media', 'C', 'scripts-3')));
+  SC.build = build;
+
+  // Без сценариев — null
+  await fsp.writeFile(svc.indexPath('C'), JSON.stringify({ v: V, builtAt: 1, screen: { w: 816, h: 624 }, counts: {}, albums: [] }));
+  svc.memo.delete('C');
+  svc.castMemo.clear();
+  assert.strictEqual(await svc.cast('C'), null);
 });
 
 test('галерея: в сценарии сцены — и кадры анимации, которых нет в альбоме сцены', async (t) => {
@@ -10892,7 +13780,7 @@ test('rpg-fixes: ошибка игры попадает в журнал, даж�
 const spineHelpers = () => {
   const c = (code, parameters = [], indent = 0) => ({ code, parameters, indent });
   const say = (t, indent = 0) => [c(101, ['', 0, 0, 2, ''], indent), c(401, [t], indent)];
-  const sets = ['img/spines/piston03/piston03.json', 'img/pSpineAssets/chapter1_scene1/chapter1_scene1.json', 'img/pSpineAssets/reina_trap/reina_trap.json'];
+  const sets = ['img/spines/gate03/gate03.json', 'img/pSpineAssets/chapter1_scene1/chapter1_scene1.json', 'img/pSpineAssets/reina_trap/reina_trap.json'];
   const ctx = { names: ['cg1'], has: (n) => n === 'cg1', movies: [], audio: null, spines: sets };
   const sp = (r) => r.scenario.filter((x) => x.k === 'spine');
   const strip = (sc) => sc.filter((x) => x.k !== 'spine');
@@ -10915,22 +13803,22 @@ test('галерея: Spine в сценах — runList: PictureSpine на ка�
   // PictureSpine: номер картинки — переменная; цепочка в двух строках 355 + 655; список анимаций в очереди
   let r = same([c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(122, [146, 146, 0, 0, 64]),
     c(355, ['$gameScreen.showPicture($gameVariables.value(146),"",0,500,30,60,60,255,0)']),
-    c(355, ["$gameScreen.spine($gameVariables.value(146)).setSkeleton('piston03')"]), c(655, [".setAnimation(0, 'insert', 'none').setSkin('human');"]), ...say('a'),
-    c(355, ["$gameScreen.spine($gameVariables.value(146)).setAnimation(0, ['ejaculation','election'], 'continue', false)"]), ...say('b'),
+    c(355, ["$gameScreen.spine($gameVariables.value(146)).setSkeleton('gate03')"]), c(655, [".setAnimation(0, 'swing', 'none').setSkin('human');"]), ...say('a'),
+    c(355, ["$gameScreen.spine($gameVariables.value(146)).setAnimation(0, ['attack','recoil'], 'continue', false)"]), ...say('b'),
     c(355, ['$gameScreen.erasePicture($gameVariables.value(146))']), ...say('c')]);
-  const base = { k: 'spine', id: 'p64', s: 'img/spines/piston03/piston03.json', q: true, skin: ['human'], at: [500, 30, 0.6, 0.6] };
-  assert.deepStrictEqual(sp(r), [{ ...base, a: ['insert'], loop: false, t: 1 }, { ...base, a: ['ejaculation', 'election'], loop: true, t: 2 }, { k: 'spine', id: 'p64', off: true }]);
+  const base = { k: 'spine', id: 'p64', s: 'img/spines/gate03/gate03.json', q: true, skin: ['human'], at: [500, 30, 0.6, 0.6] };
+  assert.deepStrictEqual(sp(r), [{ ...base, a: ['swing'], loop: false, t: 1 }, { ...base, a: ['attack', 'recoil'], loop: true, t: 2 }, { k: 'spine', id: 'p64', off: true }]);
   // Номер потерян (общее событие, что зовёт само себя, переменные стёрло): то же выражение — тот же слой, стирание тоже
   r = same([c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(122, [146, 146, 0, 0, 64]),
     c(355, ['$gameScreen.showPicture($gameVariables.value(146),"",0,500,30,60,60,255,0)']),
-    c(355, ["$gameScreen.spine($gameVariables.value(146)).setSkeleton('piston03').setAnimation(0,'piston01')"]), ...say('a'), c(117, [5]),
-    c(355, ["$gameScreen.spine($gameVariables.value(146)).setAnimation(0,'piston01/timeScale=2')"]), ...say('b'),
+    c(355, ["$gameScreen.spine($gameVariables.value(146)).setSkeleton('gate03').setAnimation(0,'gate01')"]), ...say('a'), c(117, [5]),
+    c(355, ["$gameScreen.spine($gameVariables.value(146)).setAnimation(0,'gate01/timeScale=2')"]), ...say('b'),
     c(355, ['$gameScreen.erasePicture($gameVariables.value(146))']), ...say('c')], [null, null, null, null, null, { id: 5, list: [c(117, [5])] }]);
   assert.deepStrictEqual(sp(r).map((x) => [x.id, x.ats, !!x.off]), [['p64', undefined, false], ['p64', [2], false], ['p64', undefined, true]], 'слой найден по выражению, стирание его убрало');
   // Два живых слоя с разными выражениями, потом переменные потеряли: вызов с тем же выражением трогает свой слой, с чужим — ничего
   r = same([c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(122, [1, 1, 0, 0, 64]), c(122, [2, 2, 0, 0, 65]),
     c(355, ['$gameScreen.showPicture($gameVariables.value(1),"",0,10,10,100,100,255,0)']), c(355, ['$gameScreen.showPicture($gameVariables.value(2),"",0,20,20,100,100,255,0)']),
-    c(355, ["$gameScreen.spine($gameVariables.value(1)).setSkeleton('piston03').setAnimation(0,'a')"]), c(355, ["$gameScreen.spine($gameVariables.value(2)).setSkeleton('piston03').setAnimation(0,'b')"]), ...say('x'), c(117, [5]),
+    c(355, ["$gameScreen.spine($gameVariables.value(1)).setSkeleton('gate03').setAnimation(0,'a')"]), c(355, ["$gameScreen.spine($gameVariables.value(2)).setSkeleton('gate03').setAnimation(0,'b')"]), ...say('x'), c(117, [5]),
     c(355, ["$gameScreen.spine($gameVariables.value(3)).setAnimation(0,'zzz')"]), c(355, ["$gameScreen.spine($gameVariables.value(2)).setAnimation(0,'c')"]), ...say('y')], [null, null, null, null, null, { id: 5, list: [c(117, [5])] }]);
   assert.deepStrictEqual(sp(r).map((x) => [x.id, x.a[0]]), [['p64', 'a'], ['p65', 'b'], ['p65', 'c']]);
 
@@ -10947,7 +13835,7 @@ test('галерея: Spine в сценах — runList: PictureSpine на ка�
     c(111, [1, 31, 0, 2, 0]), ...say('fail1', 1), c(355, ['SAnim("t").setAnimation("idle3", true)'], 1), ...say('fail2', 1), c(355, ['RemoveSAnim("t")'], 1), c(0, [], 1), c(412), ...say('end')];
   assert.deepStrictEqual(brief(same(trap)), ['idle', 'start', 'ok', 'fail1', 'idle3', 'fail2', 'off', 'end'], 'между «ok» и «fail1» off нет');
   // Картинка-носитель уходит из-под скелета: новая «Показать картинку» на тот же номер, «Стереть» (235) и «Стереть все» — слой убран
-  const host = (end) => [c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(231, [64, 'cg1', 0, 0, 5, 5, 100, 100, 255, 0]), c(355, ["$gameScreen.spine(64).setSkeleton('piston03').setAnimation(0,'go')"]), ...say('a'), ...end, ...say('b')];
+  const host = (end) => [c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(231, [64, 'cg1', 0, 0, 5, 5, 100, 100, 255, 0]), c(355, ["$gameScreen.spine(64).setSkeleton('gate03').setAnimation(0,'go')"]), ...say('a'), ...end, ...say('b')];
   for (const end of [[c(231, [64, 'cg1', 0, 0, 5, 5, 100, 100, 255, 0])], [c(235, [64])], [c(355, ['$gameScreen.clearPictures()'])]]) {
     assert.deepStrictEqual(brief(same(host(end))).filter((x) => x !== 'pics'), ['go', 'a', 'off', 'b']);
   }
@@ -10961,7 +13849,7 @@ test('галерея: Spine в сценах — runList: PictureSpine на ка�
   assert.deepStrictEqual(sp(r), []);
   // Сбой в разборе Spine (ctx.spines бросает) выключает Spine только в этом событии
   const bad = { length: 1, filter() { throw new Error('boom'); } };
-  const list = [c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(355, ["$gameScreen.spine(64).setSkeleton('piston03').setAnimation(0,'a')"]), ...say('a')];
+  const list = [c(231, [1, 'cg1', 0, 0, 0, 0, 100, 100, 255, 0]), c(355, ["$gameScreen.spine(64).setSkeleton('gate03').setAnimation(0,'a')"]), ...say('a')];
   const guarded = runList(list, [], { ...ctx, spines: bad });
   assert.deepStrictEqual(guarded.frames, runList(list, [], ctx0).frames);
   assert.deepStrictEqual(strip(guarded.scenario), runList(list, [], ctx0).scenario);
@@ -11396,3 +14284,2005 @@ test('галерея: Live2D в сценах — метки движений и 
   assert.deepStrictEqual(pic.motions.map((m) => [m.name, m.base, m.mname]), [['a', 'a', 'Happy']]);
   assert.strictEqual(pic.tags, undefined);
 });
+
+// ============================================================================
+// Поиск по репликам сцен (services/sceneLines.js): свой файл-кэш в _media, FTS5 по общей fold()
+// ============================================================================
+test('реплики: fold и разбор запроса — регистр, ё, диакритика латиницы, NFKC, CJK по знаку; синтаксис FTS не протекает', () => {
+  const { fold, parseQuery, hits, snippet } = require('./src/services/sceneLines.js');
+  assert.strictEqual(fold('Ёлка NAÏVE ＡＢＣ'), 'елка naive abc');
+  // Дакутэн каны не отрывается (NFD — только у латиницы); знаки без пробелов — каждый словом
+  assert.strictEqual(fold('が'), 'が');
+  assert.strictEqual(fold('旦那様', true), ' 旦  那  様 ');
+  assert.strictEqual(parseQuery('муж').match, '"муж"*');
+  assert.strictEqual(parseQuery('旦那').match, '"旦 那"');
+  assert.strictEqual(parseQuery('夫').match, '"夫"');
+  assert.strictEqual(parseQuery("won't").match, '"won"*', 'однобуквенное «t» выпадает');
+  assert.strictEqual(parseQuery('" OR * NEAR( -x').match, '"or"* "near"*', 'всё в кавычках');
+  for (const short of ['он', 'a b', '…!?', '']) assert.strictEqual(parseQuery(short), null, short);
+  // Подсветка: слово от начала до конца (запрос — приставка), середина слова — не совпадение
+  assert.deepStrictEqual(hits('Мой муж — мужем. Замужем', parseQuery('муж').terms), [[4, 7], [10, 15]]);
+  assert.deepStrictEqual(hits('Ёлка', parseQuery('елк').terms), [[0, 4]]);
+  assert.deepStrictEqual(hits('彼は旦那です', parseQuery('旦那').terms), [[2, 4]]);
+  const long = `${'а'.repeat(200)} муж ${'б'.repeat(200)}`;
+  const cut = snippet(long, hits(long, parseQuery('муж').terms));
+  assert.ok(cut.text.startsWith('…') && cut.text.endsWith('…') && cut.text.length <= 162, 'окно до 160 знаков с «…»');
+  assert.strictEqual(cut.text.slice(cut.hl[0][0], cut.hl[0][1]), 'муж');
+});
+
+test('реплики: индекс — коды, остановки как в плеере, языки, повторы, поиск, отпечаток, сброс, битый файл', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { SceneLines } = require('./src/services/sceneLines.js');
+  const SL = require('./src/services/sceneLangs.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'rpg-lines-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const media = path.join(root, '_media');
+  const gal = new GalleryService();
+  gal.setDependencies({ gamesDir: root, mediaDir: media });
+  const V = Number(fs.readFileSync(path.join(__dirname, 'src/services/gallery.js'), 'utf8').match(/const INDEX_VERSION = (\d+)/)[1]);
+  const put = async (id, dir, albums, scripts) => {
+    await fsp.mkdir(path.join(media, id, dir), { recursive: true });
+    await fsp.writeFile(gal.indexPath(id), JSON.stringify({ v: V, builtAt: 1, scripts: dir, screen: { w: 816, h: 624 }, counts: {}, albums }));
+    for (const [key, data] of Object.entries(scripts)) await fsp.writeFile(gal.scriptPath(id, dir, key), JSON.stringify(data));
+    gal.memo.delete(id);
+  };
+  const CG = 'events/00001/Bath';
+  const TALK = 'dialogue/00002';
+  const cgSteps = [
+    { k: 'pic', i: 0 },
+    { k: 'say', l: ['\\C[2]Мой муж\\I[5] дома\\FS[24]'] },
+    { k: 'say', l: ['……!?'] },
+    { k: 'pic', i: 1 },
+    { k: 'say', l: ['\\n<Алиса>Привет, \\N[1]! У меня \\V[3] монет'], v: { 3: 42 } },
+    { k: 'choice', o: ['Да', 'Нет, муж'], i: 0 },
+    { k: 'say', l: ['Ёлка и NAÏVE ＡＢＣ'] },
+    { k: 'say', l: ['旦那様は夫です'] },
+    { k: 'say', l: ['Он с мужем'] },
+    { k: 'say', l: ['Муж ушёл'] },
+  ];
+  const albums = [
+    { key: CG, kind: 'cg', files: ['img/pictures/a.png', 'img/pictures/b.png'], script: true, title: 'Ванная' },
+    { key: TALK, kind: 'dialogue', files: ['img/faces/f.png'], script: true },
+  ];
+  await put('A', 'scripts-1', albums, {
+    [CG]: { steps: cgSteps, sounds: [], actors: ['', 'Борис'] },
+    [TALK]: { steps: [{ k: 'pic', i: 0 }, { k: 'say', l: ['Мой муж дома'] }, { k: 'say', l: ['Только в диалоге муж'] }], sounds: [] },
+  });
+  // Одно имя без слов и системная строка «■…» в индекс не идут: найти в них нечего; имя со словами — идёт
+  await put('B', 'scripts-1', [{ key: CG, kind: 'cg', files: ['img/pictures/c.png'], script: true }], { [CG]: { steps: [{ k: 'pic', i: 0 }, { k: 'say', l: ['Чужой муж'] },
+    { k: 'say', l: ['Мужчина А: …'] }, { k: 'say', l: ['■Мужественность +3'] }, { k: 'say', l: ['Мужчина Б: Пока'] }, { k: 'say', l: ['Мужу скажи:'] }], sounds: [] } });
+  // Таблица игры (langs.json) — заглушкой: английский у двух реплик, у одной — тот же текст; перевод Mimikin — немецкий
+  gal.sceneLangs = async (id) => (id === 'A' ? { v: SL.VERSION, orig: '', langs: [{ code: 'en', n: 2 }], text: { en: { 'Он с мужем': 'He is with her husband', 'Ёлка и NAÏVE ＡＢＣ': 'Ёлка и NAÏVE ＡＢＣ' } } } : null);
+  const translate = { langOf: async (id) => (id === 'A' ? 'de' : ''), lookup: async (id, strings) => new Map(strings.filter((s) => s === 'Он с мужем').map((s) => [s, 'Er ist mit dem Ehemann'])) };
+  const lines = new SceneLines();
+  lines.setDependencies({ gallery: gal, translate, mediaDir: media });
+  t.after(() => lines.close());
+  const ids = ['A', 'B'];
+  assert.strictEqual(await lines.indexGame('A'), true);
+  assert.strictEqual(await lines.indexGame('B'), true);
+  const db = await lines.open();
+  const rows = await db.all("SELECT l.stop, l.lang, l.who, l.text, l.choice, s.kind FROM line l JOIN scene s ON s.id = l.scene WHERE s.game = 'A' ORDER BY s.kind, l.stop, l.lang");
+  const cg = rows.filter((r) => r.kind === 'cg');
+  // (1) коды убраны, \N — имя героя, \V — значение, окно имени — в who; (2) «……!?» не в индексе, но номер занимает
+  assert.deepStrictEqual(cg.filter((r) => r.lang === 'orig').map((r) => [r.stop, r.who, r.text, r.choice]), [
+    [0, '', 'Мой муж дома', 0], [2, 'Алиса', 'Привет, Борис! У меня 42 монет', 0], [3, '', 'Да\nНет, муж', 1], [4, '', 'Ёлка и NAÏVE ＡＢＣ', 0], [5, '', '旦那様は夫です', 0], [6, '', 'Он с мужем', 0], [7, '', 'Муж ушёл', 0],
+  ]);
+  // Номер остановки — как у плеера: say и choice по порядку в ответе gallery.scene()
+  const played = (await gal.scene('A', CG, null, { want: ['orig'], client: true })).steps.filter((x) => x.k === 'say' || x.k === 'choice');
+  for (const r of cg.filter((x) => x.lang === 'orig')) assert.strictEqual(played[r.stop].k === 'say' ? played[r.stop].text : played[r.stop].o.join('\n'), r.text);
+  // (11) таблица игры — строка с её кодом, перевод Mimikin — с 'de'; тот же текст на остановке — один раз
+  assert.deepStrictEqual(cg.filter((r) => r.lang !== 'orig').map((r) => [r.stop, r.lang, r.text]), [[6, 'de', 'Er ist mit dem Ehemann'], [6, 'en', 'He is with her husband']]);
+
+  const find = (q, extra = {}) => lines.search(q, { ids, limit: 24, ...extra });
+  // (4) приставкой: «муж» находит «мужем»; (7) одна реплика в CG и в диалоге — один раз, на сцене с CG
+  const muzh = await find('муж');
+  const texts = muzh.scenes.flatMap((s) => s.lines.map((l) => `${s.game}|${s.kind}|${l.text}`));
+  assert.strictEqual(texts.filter((x) => x.endsWith('|Мой муж дома')).length, 1);
+  assert.ok(texts.includes('A|cg|Мой муж дома') && texts.includes('A|dialogue|Только в диалоге муж') && texts.includes('B|cg|Чужой муж'), texts.join('; '));
+  assert.deepStrictEqual((await find('мужем')).scenes.map((s) => s.lines.map((l) => l.text)), [['Он с мужем']], 'приставка: «муж» находит и «мужем»');
+  const bath = muzh.scenes.find((s) => s.game === 'A' && s.key === CG);
+  assert.strictEqual(bath.title, 'Ванная');
+  assert.strictEqual(bath.cover, 'img/pictures/a.png');
+  assert.strictEqual(bath.lines.length, 3, 'до трёх реплик на сцену');
+  assert.strictEqual(bath.more, 1, 'четыре реплики с «муж»: три показаны, остальное числом');
+  const first = bath.lines.find((l) => l.text === 'Мой муж дома');
+  assert.deepStrictEqual([first.stop, first.lang, first.pic, first.hl], [0, 'orig', 'img/pictures/a.png', [[4, 7]]]);
+  // Выбор ищется; картинка — та, что на экране к этой реплике
+  const choice = (await find('нет')).scenes[0].lines[0];
+  assert.deepStrictEqual([choice.choice, choice.stop, choice.pic, choice.hl], [true, 3, 'img/pictures/b.png', [[3, 6]]]);
+  assert.deepStrictEqual(muzh.games.map((g) => g.id).sort(), ['A', 'B']);
+  assert.deepStrictEqual([muzh.indexed, muzh.library], [2, 2]);
+  assert.strictEqual(muzh.total, muzh.games.reduce((s, g) => s + g.lines, 0));
+  // (3) ё/е, регистр, диакритика, NFKC; (4) фраза CJK и один знак; перевод тоже ищется
+  for (const q of ['ЕЛКА', 'naive', 'abc', '旦那', '夫', 'Ehemann', 'husband']) assert.strictEqual((await find(q)).total >= 1, true, q);
+  assert.strictEqual((await find('husband')).scenes[0].lines[0].lang, 'en');
+  // (5) синтаксис FTS из запроса не ломает поиск; (6) короткий — short
+  assert.strictEqual((await find('" OR * NEAR( -x')).total, 0);
+  assert.deepStrictEqual(await find('он'), { error: 'short' });
+  // (8) только эта игра; только игры библиотеки
+  assert.deepStrictEqual((await find('муж', { game: 'B' })).scenes.map((s) => s.lines.map((l) => l.text)), [['Чужой муж', 'Мужчина Б: Пока', 'Мужу скажи:']]);
+  assert.deepStrictEqual((await find('муж', { ids: ['B'] })).games.map((g) => g.id), ['B']);
+  assert.strictEqual((await find('муж', { ids: [] })).total, 0);
+  assert.strictEqual((await find('муж', { limit: 1 })).scenes.length, 1);
+
+  // (9) отпечаток тот же — ничего не переписывается; новая папка сценариев — заново
+  assert.strictEqual(await lines.indexGame('A'), false);
+  await put('B', 'scripts-2', [{ key: CG, kind: 'cg', files: ['img/pictures/c.png'], script: true }], { [CG]: { steps: [{ k: 'pic', i: 0 }, { k: 'say', l: ['Новый муж'] }], sounds: [] } });
+  assert.strictEqual(await lines.sweep(ids), true);
+  assert.deepStrictEqual((await find('муж', { game: 'B' })).scenes[0].lines.map((l) => l.text), ['Новый муж']);
+  assert.strictEqual(await lines.sweep(ids), false, 'второй проход — без изменений');
+  // Отпечаток прежних правил отбора (до RULES, как на prod) — проход переиндексирует игру, остальные не трогает
+  const { SCHEMA } = require('./src/services/sceneLines.js');
+  await db.run("UPDATE game SET stamp = ? WHERE id = 'A'", [`${SCHEMA}|${SL.VERSION}|scripts-1|de`]);
+  assert.strictEqual(await lines.sweep(ids), true);
+  assert.notStrictEqual((await db.get("SELECT stamp FROM game WHERE id = 'A'")).stamp, `${SCHEMA}|${SL.VERSION}|scripts-1|de`);
+  assert.strictEqual(await lines.sweep(ids), false);
+  // (10) сброс галереи (forget) убирает игру из поиска; игры нет в библиотеке — проход её выкидывает
+  gal.onForget = (id) => { lines.dropGame(id); };
+  await gal.forget('B');
+  await lines.chain;
+  assert.deepStrictEqual((await find('муж')).games.map((g) => g.id), ['A']);
+  assert.strictEqual(await lines.sweep([]), true);
+  assert.strictEqual((await db.get('SELECT count(*) c FROM game')).c, 0);
+  assert.strictEqual((await db.get('SELECT count(*) c FROM line')).c, 0);
+
+  // (12) битый файл индекса — пересоздаётся
+  await lines.close();
+  await fsp.writeFile(path.join(media, 'scene-lines.db'), 'не база данных'.repeat(100));
+  await fsp.rm(path.join(media, 'scene-lines.db-wal'), { force: true });
+  await fsp.rm(path.join(media, 'scene-lines.db-shm'), { force: true });
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => { console.warn = warn; });
+  const again = new SceneLines();
+  again.setDependencies({ gallery: gal, translate, mediaDir: media });
+  t.after(() => again.close());
+  assert.strictEqual(await again.indexGame('A'), true);
+  assert.ok((await again.search('муж', { ids })).total >= 3);
+});
+
+test('сцены библиотеки: строки как у вкладок галереи, отбор, ряд на игру, вся игра, очередь; новое оглавление — заново', async (t) => {
+  const { LibraryScenes, tabRows } = require('./src/services/libraryScenes.js');
+  // Как galleryView.sceneRows: гости альбома — по строке, одинаковые названия — с номером, обложка гостя — его кадр; диалоги отдельно
+  const albums = [
+    { key: 'events/1/Bath', kind: 'cg', files: ['a.png', 'b.png'], script: true, sum: { l: 5, v: 1 } },
+    { key: 'events/2/Bath', kind: 'cg', files: ['c.png'], script: true, title: 'Bath', sum: { l: 2, a: 1 } },
+    { key: 'events/3/Room#par', kind: 'cg', files: ['d.png', 'e.png'], script: true, scenes: [{ t: 'Night', f: [1], sum: { l: 3 } }, { t: '', f: [0] }] },
+    { key: 'dialogue/4', kind: 'dialogue', files: ['f.png'], script: true, sum: { l: 4, v: 1 } },
+    { key: 'pics/5', kind: 'cg', files: ['g.png'] },
+  ];
+  assert.deepStrictEqual(tabRows(albums, false).map((r) => [r.key, r.n, r.title, r.cover]), [
+    ['events/1/Bath', 0, 'Bath 1', 'a.png'], ['events/2/Bath', 0, 'Bath 2', 'c.png'], ['events/3/Room#par', 0, 'Night', 'e.png'], ['events/3/Room#par', 1, 'Room', 'd.png'],
+  ]);
+  assert.deepStrictEqual(tabRows(albums, true).map((r) => r.key), ['dialogue/4']);
+
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'rpg-libscenes-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  const idx = { A: albums, B: [{ key: 'events/9/X', kind: 'cg', files: ['x.png'], script: true, sum: { l: 1 } }] };
+  let reads = 0;
+  const gallery = { indexPath: (id) => path.join(dir, `${id}.json`), cached: async (id) => { reads++; return { albums: idx[id] }; } };
+  for (const id of ['A', 'B']) await fsp.writeFile(gallery.indexPath(id), '{}');
+  const ls = new LibraryScenes();
+  ls.setDependencies({ gallery });
+  // Игры без оглавления (C) — нет; per — первых строк на игру, count — все подошедшие
+  const all = await ls.list(['A', 'B', 'C'], { per: 2 });
+  assert.deepStrictEqual([all.total, all.counts], [6, { all: 6, scenes: 5, dialogue: 1 }]);
+  assert.deepStrictEqual(all.games.map((g) => [g.id, g.count, g.rows.length]), [['A', 5, 2], ['B', 1, 1]]);
+  // Отбор: числа на чипах — с голосом, но без вкладки
+  const v = await ls.list(['A', 'B'], { kind: 'scenes', voice: true });
+  assert.deepStrictEqual([v.total, v.counts], [1, { all: 2, scenes: 1, dialogue: 1 }]);
+  assert.deepStrictEqual((await ls.list(['A', 'B'], { anim: true })).games.map((g) => g.rows.map((r) => r.title)), [['Bath 2']]);
+  // «Ещё N сцен» — вся игра, per не в счёт
+  assert.strictEqual((await ls.list(['A', 'B'], { game: 'A', per: 1 })).games[0].rows.length, 5);
+  assert.strictEqual(reads, 2, 'оглавление каждой игры прочитано один раз');
+  // Очередь: по играм и по порядку; вперемешку — те же сцены
+  const order = await ls.queue(['A', 'B'], { kind: 'scenes' });
+  assert.deepStrictEqual(order.queue.map((x) => `${x.game}|${x.title}|${x.n}`), ['A|Bath 1|0', 'A|Bath 2|0', 'A|Night|0', 'A|Room|1', 'B|X|0']);
+  assert.strictEqual(order.more, false);
+  // Следующая порция «подряд» — с from
+  assert.deepStrictEqual((await ls.queue(['A', 'B'], { kind: 'scenes', from: 3 })).queue.map((x) => x.title), ['Room', 'X']);
+  const random = await ls.queue(['A', 'B'], { kind: 'scenes', random: true, from: 3 });
+  assert.deepStrictEqual(random.queue.map((x) => x.title).sort(), order.queue.map((x) => x.title).sort(), 'вперемешку — вся выборка, from не в счёт');
+  // Галерею пересобрали (файл оглавления новый) — читаем заново; оглавления больше нет — игры нет
+  idx.B = [];
+  const later = new Date(Date.now() + 5000);
+  await fsp.utimes(gallery.indexPath('B'), later, later);
+  await fsp.rm(gallery.indexPath('A'));
+  assert.deepStrictEqual((await ls.list(['A', 'B'])).games, []);
+  assert.strictEqual(reads, 3);
+});
+
+test('прокси: TRUST_PROXY, GAME_ORIGIN и адрес страницы игры', () => {
+  const express = require('express');
+  const { parseTrustProxy, applyTrustProxy, parseGameOrigin, isGameOrigin } = require('./src/utils/proxy.js');
+  for (const off of [undefined, '', ' ', '0', 'off', 'false', 'FALSE', 'no']) assert.strictEqual(parseTrustProxy(off), false, String(off));
+  assert.strictEqual(parseTrustProxy('2'), 2);
+  assert.strictEqual(parseTrustProxy('true'), true);
+  assert.strictEqual(parseTrustProxy('10.0.0.0/8, loopback'), '10.0.0.0/8, loopback');
+
+  // Опечатка не роняет сервер и не включает доверие
+  const app = express();
+  const noise = [console.error, console.warn];
+  console.error = console.warn = () => {};
+  try {
+    assert.strictEqual(applyTrustProxy(app, 'не адрес'), false);
+    assert.strictEqual(app.get('trust proxy fn')('1.2.3.4', 0), false);
+    assert.strictEqual(applyTrustProxy(app, '1'), 1);
+    assert.strictEqual(app.get('trust proxy fn')('1.2.3.4', 0), true);
+    assert.strictEqual(app.get('trust proxy fn')('1.2.3.4', 1), false, 'второму по цепочке уже не верим');
+    assert.strictEqual(applyTrustProxy(app, '10.0.0.0/8'), '10.0.0.0/8');
+    assert.strictEqual(app.get('trust proxy fn')('1.2.3.4', 0), false);
+
+    // В том же виде, что браузер пишет Origin и e.origin
+    assert.strictEqual(parseGameOrigin('HTTPS://Games.Example.com/'), 'https://games.example.com');
+    assert.strictEqual(parseGameOrigin('https://example.com:443'), 'https://example.com');
+    assert.strictEqual(parseGameOrigin('http://example.com:8443/'), 'http://example.com:8443');
+    assert.strictEqual(parseGameOrigin(''), '');
+    assert.strictEqual(parseGameOrigin('games.example.com'), '', 'без схемы');
+    assert.strictEqual(parseGameOrigin('ftp://games.example.com'), '');
+  } finally {
+    [console.error, console.warn] = noise;
+  }
+
+  const direct = { gameOrigin: '', gamePort: '8081' };
+  assert.strictEqual(isGameOrigin('http://192.168.1.5:8081', direct), true);
+  assert.strictEqual(isGameOrigin('http://192.168.1.5', direct), false);
+  assert.strictEqual(isGameOrigin('null', direct), true, 'песочница');
+  const proxied = { gameOrigin: 'https://games.example.com', gamePort: '8081' };
+  assert.strictEqual(isGameOrigin('https://games.example.com', proxied), true);
+  assert.strictEqual(isGameOrigin('https://library.example.com', proxied), false);
+  assert.strictEqual(isGameOrigin('http://192.168.1.5:8081', proxied), true, 'порт игр напрямую — тоже игры');
+});
+
+// ============================================================================
+// «Во что поиграть?»: подбор (services/recommend.js)
+// ============================================================================
+const recommendNow = Date.parse('2026-10-31T12:00:00Z');
+
+const recommendDay = 86400000;
+
+// Строка как в базе; теги — списком, в JSON её превращает сама
+const recRow = (id, { tags = [], ...over } = {}) => ({
+  id, title: id, developer: '', playtime: 0, lastPlayed: 0, rating: 0, status: '', favorite: 0,
+  shelved_at: 0, ready: 1, text_lang: null, language: '', addedAt: recommendNow - recommendDay, link: '', meta_locked: '',
+  ...over, tags: JSON.stringify(tags),
+});
+
+const recPlayed = (hours) => ({ playtime: hours * 3600, lastPlayed: recommendNow - recommendDay });
+
+const recIds = (list) => list.items.map((x) => x.id);
+
+test('подбор: вкус идёт от наигранного — десятки не запущенных игр с другим тегом его не перевешивают', () => {
+  const { buildTaste, rankLibrary } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Played', { tags: ['dungeon', 'rpg'], ...recPlayed(20) }),
+    recRow('Want', { tags: ['dungeon', 'rpg'] }),
+    recRow('Other', { tags: ['romance', 'rpg'] }),
+    ...Array.from({ length: 30 }, (_, i) => recRow(`Idle${i}`, { tags: ['romance', 'rpg'] })),
+    // Иначе «romance» оказался бы на большей части библиотеки и выпал бы сам по себе
+    ...Array.from({ length: 30 }, (_, i) => recRow(`Pad${i}`)),
+  ];
+  const taste = buildTaste(rows);
+  assert.ok(taste.tags.get('dungeon') > taste.tags.get('romance') * 5, 'один настоящий тег весит много больше');
+  assert.ok(!taste.tags.has('rpg'), 'теги формата вкуса не выдают');
+  const list = rankLibrary(rows, { now: recommendNow });
+  assert.strictEqual(list.cold, false);
+  assert.ok(recIds(list).indexOf('Want') < recIds(list).indexOf('Other'));
+  assert.strictEqual(list.items[0].id, 'Want');
+  assert.deepStrictEqual(list.items[0].reasons[0], { code: 'tags-like', params: { tags: ['dungeon'], game: 'Played', gameId: 'Played' } });
+  // Тег на большей части библиотеки — тоже мимо, даже у наигранных игр
+  const most = buildTaste(Array.from({ length: 12 }, (_, i) => recRow(`M${i}`, { tags: ['puzzle'], ...recPlayed(5) })));
+  assert.ok(!most.tags.has('puzzle'), 'тег у всех вкуса не выдаёт');
+});
+
+test('подбор: бросил или поставил единицу — тег падает, понравилась — растёт, спорные сигналы — ноль', () => {
+  const { buildTaste, rankLibrary, gameSignal } = require('./src/services/recommend.js');
+  const base = [recRow('Fine', { tags: ['romance'], ...recPlayed(5) }), recRow('A', { tags: ['dungeon'] }), recRow('B', { tags: ['romance'] })];
+  const dropped = [recRow('Bad', { tags: ['dungeon'], status: 'dropped', ...recPlayed(5) }), ...base];
+  assert.ok(buildTaste(dropped).tags.get('dungeon') < 0, 'брошенная игра тянет тег вниз');
+  assert.deepStrictEqual(recIds(rankLibrary(dropped, { now: recommendNow, seed: 'x' })), ['B', 'A']);
+  assert.ok(buildTaste([recRow('Bad', { tags: ['dungeon'], rating: 2 }), ...base]).tags.get('dungeon') < 0, 'двойка — тоже');
+  assert.ok(gameSignal({ playtime: 3600, lastPlayed: 1, rating: 5 }).weight > gameSignal({ playtime: 3600, lastPlayed: 1 }).weight, 'пятёрка поднимает');
+  assert.ok(gameSignal({ playtime: 3600, lastPlayed: 1, status: 'done' }).weight > gameSignal({ playtime: 3600, lastPlayed: 1 }).weight, 'пройдена — поднимает');
+  assert.strictEqual(gameSignal({ playtime: 3600, lastPlayed: 1, rating: 5, status: 'dropped' }).weight, 0, 'пятёрка и «бросил» спорят');
+  assert.ok(gameSignal({ playtime: 60, lastPlayed: 1 }).weight < 0.1, 'минута «посмотреть» — почти ничего');
+});
+
+test('подбор: кого предлагать — не начатые и «в планы»; что оставлено — отдельным списком', () => {
+  const { rankLibrary, resumeList } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Never'),
+    recRow('Looked', { playtime: 120, lastPlayed: recommendNow - recommendDay }),
+    recRow('Wish', { status: 'wish', playtime: 7200, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('WishBad', { status: 'wish', rating: 1 }),
+    recRow('Rated', { rating: 5 }),
+    recRow('Started', { playtime: 7200, lastPlayed: recommendNow - 30 * recommendDay }),
+    recRow('MoreStarted', { playtime: 9000, lastPlayed: recommendNow - 15 * recommendDay }),
+    recRow('NoDate', { playtime: 3000 }),
+    recRow('Recent', { playtime: 9000, lastPlayed: recommendNow - 13 * recommendDay }),
+    recRow('ManualPlaying', { status: 'playing', playtime: 1000, lastPlayed: recommendNow - 40 * recommendDay }),
+    recRow('Done', { status: 'done', playtime: 9000, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('Dropped', { status: 'dropped', playtime: 9000, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('Hated', { rating: 1, playtime: 9000, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('Disliked', { rating: 2, status: 'playing', playtime: 9000, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('Shelved', { shelved_at: 5 }),
+    recRow('ShelvedLeft', { shelved_at: 5, playtime: 9000, lastPlayed: recommendNow - 90 * recommendDay }),
+    recRow('Unready', { ready: 0 }),
+  ];
+  assert.deepStrictEqual(recIds(rankLibrary(rows, { now: recommendNow })).sort(), ['Looked', 'Never', 'Wish']);
+  const left = resumeList(rows, { now: recommendNow });
+  assert.deepStrictEqual(left.map((x) => x.id), ['MoreStarted', 'Started', 'NoDate', 'ManualPlaying'], 'больше наиграно — выше');
+  assert.deepStrictEqual(left[0].reasons, [{ code: 'left', params: { playtime: 9000, at: recommendNow - 15 * recommendDay } }]);
+  assert.strictEqual(left[2].reasons[0].params.at, 0, 'когда играли, неизвестно — так и сказано');
+  assert.deepStrictEqual(resumeList(rows, { now: recommendNow, dismissed: ['Started'] }).map((x) => x.id), ['MoreStarted', 'NoDate', 'ManualPlaying']);
+});
+
+test('подбор: скрытый тег не даёт вкуса, не называется и убирает игру из предложений', () => {
+  const { buildTaste, rankLibrary, resumeList } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Played', { tags: ['dungeon', 'romance'], ...recPlayed(20) }),
+    recRow('HasHidden', { tags: ['dungeon', 'romance'] }),
+    recRow('Clean', { tags: ['romance'] }),
+    recRow('LeftHidden', { tags: ['dungeon'], playtime: 3600, lastPlayed: recommendNow - 30 * recommendDay }),
+  ];
+  const hidden = ['Dungeon'];
+  const taste = buildTaste(rows, { hidden, favorites: ['dungeon', 'romance'] });
+  assert.ok(!taste.tags.has('dungeon') && !taste.favorites.has('dungeon'), 'и любимым скрытый не становится');
+  const list = rankLibrary(rows, { now: recommendNow, hidden, favorites: ['dungeon', 'romance'] });
+  assert.deepStrictEqual(recIds(list), ['Clean']);
+  assert.ok(!JSON.stringify(list).includes('dungeon'));
+  assert.deepStrictEqual(resumeList(rows, { now: recommendNow, hidden }).map((x) => x.id), [], 'и оставленную с ним не напоминаем');
+  // Теги кадров: скрытый не считается и через подчёркивание
+  const picTaste = buildTaste(rows, { hidden: ['red_hair'], pictures: { Played: ['red_hair', 'sword'], Clean: ['sword'] } });
+  assert.ok(!picTaste.pictureTags.has('red_hair') && picTaste.pictureTags.has('sword'));
+});
+
+test('подбор: скрытый тег с кадров находит и игру, у которой словарь зовёт его иначе', () => {
+  const { buildTaste, rankLibrary, resumeList } = require('./src/services/recommend.js');
+  // «pure love» словарь (data/tagmap.json) сводит к «romance»
+  const rows = [
+    recRow('Played', { tags: ['pure love', 'comedy'], ...recPlayed(20) }),
+    recRow('Raw', { tags: ['Pure Love', 'comedy'] }),
+    recRow('Canon', { tags: ['romance'] }),
+    recRow('Clean', { tags: ['comedy'] }),
+    recRow('LeftRaw', { tags: ['Pure Love'], playtime: 3600, lastPlayed: recommendNow - 30 * recommendDay }),
+  ];
+  const hidden = ['pure_love'];
+  const favorites = ['romance', 'comedy'];
+  const list = rankLibrary(rows, { now: recommendNow, hidden, favorites });
+  assert.deepStrictEqual(recIds(list), ['Clean']);
+  assert.ok(!JSON.stringify(list).includes('romance'), 'и в причинах его нет');
+  assert.deepStrictEqual(resumeList(rows, { now: recommendNow, hidden }), []);
+  const taste = buildTaste(rows, { hidden, favorites });
+  assert.ok(!taste.tags.has('romance') && !taste.favorites.has('romance'));
+  // Тег, который словарь разворачивает в два: скрыть его не значит скрыть всё с любой из частей
+  assert.deepStrictEqual(recIds(rankLibrary([recRow('Fantasy', { tags: ['fantasy'] })], { now: recommendNow, hidden: ['dark_fantasy'] })), ['Fantasy']);
+});
+
+test('подбор: теги в базе не списком не роняют ответ', () => {
+  const { rankLibrary, resumeList } = require('./src/services/recommend.js');
+  for (const bad of ['{"a":1}', '5', 'true', '"text"', 'null', null, '{oops']) {
+    const rows = [
+      { ...recRow('Fresh'), tags: bad },
+      { ...recRow('Left', { playtime: 3600, lastPlayed: recommendNow - 30 * recommendDay }), tags: bad },
+    ];
+    assert.deepStrictEqual(recIds(rankLibrary(rows, { now: recommendNow })), ['Fresh'], String(bad));
+    assert.deepStrictEqual(resumeList(rows, { now: recommendNow }).map((x) => x.id), ['Left'], String(bad));
+  }
+});
+
+test('подбор: теги кадров — небольшая добавка, у игры без них балл тот же', () => {
+  const { rankLibrary } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Played', { tags: ['romance'], ...recPlayed(10) }),
+    recRow('Match', { tags: ['romance'] }),
+    recRow('Miss', { tags: ['romance'] }),
+    recRow('NoPictures', { tags: ['romance'] }),
+  ];
+  const score = (list, id) => list.items.find((x) => x.id === id).score;
+  const without = rankLibrary(rows, { now: recommendNow });
+  const pictures = { Played: ['red_hair', 'sword'], Match: ['red_hair', 'sword'], Miss: ['blue_sky', 'tree', 'cat', 'dog'] };
+  const withThem = rankLibrary(rows, { now: recommendNow, pictures });
+  assert.strictEqual(score(withThem, 'NoPictures'), score(without, 'NoPictures'), 'разметка других игр её не трогает');
+  assert.ok(score(withThem, 'Match') > score(withThem, 'NoPictures') && score(withThem, 'Miss') < score(withThem, 'NoPictures'));
+  assert.ok(score(withThem, 'Match') - score(without, 'Match') <= 0.2 + 1e-9, 'меньше, чем теги игры');
+  assert.ok(!JSON.stringify(withThem).includes('red_hair'), 'причиной не называем');
+});
+
+test('подбор: причина всегда правда про эту игру (случайные библиотеки)', () => {
+  const { rankLibrary, resumeList } = require('./src/services/recommend.js');
+  const { normalizeTags } = require('./src/utils/tags.js');
+  // Автор бывает составным («Ann/Bob»): сверяем по частям, как сам подбор
+  const devKeys = (name) => String(name || '').split('/').map((x) => x.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '')).filter((k) => k.length >= 3);
+  const TAGS = ['dungeon', 'romance', 'comedy', 'horror', 'tragedy', 'mystery', 'monsters', 'fantasy', 'farming', 'pixel art', 'rpg'];
+  const DEVS = ['Moon Studio', 'Pine', 'Ann/Bob', 'Bob', 'Solo', ''];
+  const LANGS = [null, '', '{"main":"en","langs":["en"]}', '{"main":"ja","langs":["ja"]}', '{"main":"ja","langs":["ja","ru"]}'];
+  let state = 12345;
+  const rand = (n) => { state = (state * 1103515245 + 12345) % 2147483648; return Math.floor(state / 65536) % n; };
+  const seen = new Set();
+  for (let round = 0; round < 40; round++) {
+    const rows = Array.from({ length: 5 + rand(30) }, (_, i) => recRow(`G${i}`, {
+      tags: TAGS.filter(() => rand(3) === 0),
+      developer: DEVS[rand(DEVS.length)],
+      playtime: [0, 0, 0, 60, 900, 3600, 72000][rand(7)],
+      lastPlayed: rand(2) ? recommendNow - rand(60) * recommendDay : 0,
+      rating: [0, 0, 0, 0, 1, 2, 3, 4, 5][rand(9)],
+      status: ['', '', '', 'wish', 'done', 'dropped', 'playing'][rand(7)],
+      text_lang: LANGS[rand(LANGS.length)],
+    }));
+    const favorites = rand(2) ? ['romance'] : [];
+    const known = rand(2) ? ['en', 'ru'] : [];
+    const translated = Object.fromEntries(rows.filter(() => rand(4) === 0).map((r) => [r.id, 'ru']));
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    const tagsOf = (id) => normalizeTags(JSON.parse(byId.get(id).tags));
+    const devsOf = (id) => devKeys(byId.get(id).developer);
+    const list = rankLibrary(rows, { now: recommendNow, favorites, known, translated });
+    for (const item of list.items) {
+      const row = byId.get(item.id);
+      assert.ok(item.reasons.length <= 3);
+      for (const { code, params } of item.reasons) {
+        seen.add(code);
+        const label = `${code} ${item.id} ${JSON.stringify(params)}`;
+        if (code === 'tags-like') {
+          assert.ok(params.tags.length && params.tags.every((t) => tagsOf(item.id).includes(t) && tagsOf(params.gameId).includes(t)), label);
+          assert.notStrictEqual(params.gameId, item.id, label);
+          const source = byId.get(params.gameId);
+          assert.ok(source.playtime >= 600 || source.rating >= 3 || source.status === 'done' || source.status === 'playing', label);
+          assert.ok(!(source.rating >= 1 && source.rating <= 2) && source.status !== 'dropped', label);
+        } else if (code === 'favorite-tags') {
+          assert.ok(params.tags.every((t) => favorites.includes(t) && tagsOf(item.id).includes(t)), label);
+        } else if (code === 'same-dev') {
+          assert.ok(devKeys(params.dev).some((k) => devsOf(item.id).includes(k) && devsOf(params.gameId).includes(k)), label);
+          const source = byId.get(params.gameId);
+          assert.ok(source.playtime >= 3600 || source.rating >= 4 || source.status === 'done', label);
+          assert.strictEqual(params.playtime, source.playtime, label);
+          assert.notStrictEqual(params.gameId, item.id, label);
+        } else if (code === 'planned') {
+          assert.ok(row.status === 'wish' && params.at === row.addedAt, label);
+        } else if (code === 'known-lang') {
+          assert.ok(known.includes(params.lang) && JSON.parse(row.text_lang).langs.includes(params.lang), label);
+        } else if (code === 'translation') {
+          assert.ok(known.includes(params.lang) && params.site === 'mimikin', label);
+          assert.strictEqual(translated[item.id], params.lang, label);
+          seen.add('translation-here');
+        } else assert.fail(`неизвестная причина: ${label}`);
+      }
+    }
+    for (const item of resumeList(rows, { now: recommendNow })) {
+      const row = byId.get(item.id);
+      assert.ok(row.playtime >= 600 && !['done', 'dropped', 'wish'].includes(row.status));
+      assert.ok(!(row.rating >= 1 && row.rating <= 2));
+      assert.deepStrictEqual(item.reasons[0].params, { playtime: row.playtime, at: row.lastPlayed });
+    }
+  }
+  assert.deepStrictEqual([...seen].sort(), ['favorite-tags', 'known-lang', 'planned', 'same-dev', 'tags-like', 'translation', 'translation-here'], 'проверены все причины');
+});
+
+test('подбор: без наигранного — по любимым тегам, с честными причинами и cold', () => {
+  const { rankLibrary } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Plain', { tags: ['dungeon'], developer: 'Moon Studio' }),
+    recRow('Favorite', { tags: ['romance'] }),
+    recRow('Twin', { tags: ['dungeon'], developer: 'Moon Studio' }),
+  ];
+  const seed = { now: recommendNow, seed: 'a' };
+  const plain = rankLibrary(rows, seed);
+  assert.strictEqual(plain.cold, true);
+  const codes = (list, id) => list.items.find((x) => x.id === id).reasons.map((r) => r.code);
+  assert.deepStrictEqual(codes(plain, 'Plain'), []);
+  const fav = rankLibrary(rows, { ...seed, favorites: ['romance'] });
+  assert.strictEqual(fav.items[0].id, 'Favorite');
+  assert.deepStrictEqual(fav.items[0].reasons, [{ code: 'favorite-tags', params: { tags: ['romance'] } }]);
+  // Любимые теги уже дают порядок и причину: «вкус не учтён» было бы неправдой. Скрытый любимый тег вкуса не даёт
+  assert.strictEqual(fav.cold, false);
+  assert.strictEqual(rankLibrary(rows, { ...seed, favorites: ['romance'], hidden: ['romance'] }).cold, true);
+  assert.ok(!JSON.stringify([plain, fav]).match(/tags-like|same-dev/), 'похожих на сыгранные нет: играть было не во что');
+  assert.deepStrictEqual(rankLibrary([], seed), { cold: true, total: 0, items: [] });
+  // Минуты «посмотреть» — ещё не вкус
+  assert.strictEqual(rankLibrary([...rows, recRow('Look', { playtime: 60, lastPlayed: recommendNow - recommendDay })], seed).cold, true);
+  assert.strictEqual(rankLibrary([...rows, recRow('Done', { status: 'done' })], seed).cold, false);
+});
+
+test('подбор: тот же автор — сильная причина и первая; почти одинаковые игры не занимают весь верх', () => {
+  const { rankLibrary } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Played', { tags: ['dungeon', 'horror', 'comedy'], developer: 'Moon Studio', ...recPlayed(30) }),
+    ...Array.from({ length: 6 }, (_, i) => recRow(`Same${i}`, { tags: ['dungeon', 'horror', 'comedy'], developer: 'moon studio' })),
+    ...Array.from({ length: 6 }, (_, i) => recRow(`Twin${i}`, { tags: ['dungeon', 'horror', 'romance'], developer: `Dev ${i}` })),
+    recRow('Far1', { tags: ['dungeon', 'farming'], developer: 'Far One' }),
+    recRow('Far2', { tags: ['horror', 'fantasy'], developer: 'Far Two' }),
+    // Без этих теги оказались бы на большей части библиотеки и вкуса бы не выдавали
+    ...Array.from({ length: 20 }, (_, i) => recRow(`Pad${i}`)),
+  ];
+  for (const seed of ['a', 'b', 'c', 'd', 'e']) {
+    const list = rankLibrary(rows, { now: recommendNow, seed });
+    const top = list.items.slice(0, 4).map((x) => x.id);
+    assert.ok(top.filter((x) => x.startsWith('Same')).length <= 2, `одного автора немного: ${top}`);
+    assert.ok(top.filter((x) => x.startsWith('Twin')).length <= 2, `почти одинаковых немного: ${top}`);
+    assert.ok(list.items.some((x) => x.id === 'Same0') && list.total === 34, 'никого не выбросили, только отодвинули');
+    const same = list.items.find((x) => x.id === 'Same0');
+    assert.strictEqual(same.reasons[0].code, 'same-dev');
+    assert.deepStrictEqual(same.reasons[0].params, { dev: 'moon studio', game: 'Played', gameId: 'Played', playtime: 108000 });
+  }
+  // Минута у автора или игра, что не понравилась, — не «тот же автор»
+  const weak = rankLibrary([
+    recRow('Peek', { developer: 'Moon Studio', playtime: 60, lastPlayed: recommendNow - recommendDay }),
+    recRow('Hated', { developer: 'Pine', status: 'dropped', ...recPlayed(10) }),
+    recRow('Kind', { developer: 'Pine' }),
+    recRow('Next', { developer: 'Moon Studio' }),
+    recRow('Calm'),
+  ], { now: recommendNow, seed: 'a' });
+  assert.ok(!JSON.stringify(weak).includes('same-dev'));
+  const score = (id) => weak.items.find((x) => x.id === id).score;
+  assert.ok(score('Kind') < score('Calm'), 'автор брошенной игры — ниже');
+});
+
+test('подбор: один день — один порядок, день сменился — верх другой, а баллы те же', () => {
+  const { rankLibrary, dayKey } = require('./src/services/recommend.js');
+  const rows = [
+    recRow('Played', { tags: ['dungeon'], ...recPlayed(5) }),
+    ...Array.from({ length: 30 }, (_, i) => recRow(`G${i}`, { tags: ['dungeon'], developer: `Dev ${i}` })),
+  ];
+  const on = (time) => rankLibrary(rows, { now: time });
+  assert.deepStrictEqual(on(recommendNow), on(recommendNow + 3600 * 1000), 'в тот же день — то же');
+  const tops = new Set();
+  for (let d = 0; d < 7; d++) tops.add(recIds(on(recommendNow + d * recommendDay)).slice(0, 3).join());
+  assert.ok(tops.size >= 5, `верх меняется: ${tops.size}`);
+  const scores = (list) => list.items.map((x) => [x.id, x.score]).sort();
+  assert.deepStrictEqual(scores(on(recommendNow)), scores(on(recommendNow + recommendDay)));
+  assert.strictEqual(dayKey(recommendNow), '2026-10-31');
+});
+
+test('подбор: язык — незнакомый понижает, но не убирает; перевод и незнание языка — честно', () => {
+  const { rankLibrary } = require('./src/services/recommend.js');
+  const text = (main, langs = [main]) => JSON.stringify({ main, langs });
+  const rows = [
+    recRow('Known', { text_lang: text('ru') }),
+    recRow('Foreign', { text_lang: text('ja') }),
+    recRow('Unread'),
+    recRow('Build', { text_lang: text('ja', ['ja', 'ru']) }),
+    recRow('Here', { text_lang: text('ja') }),
+    recRow('Typed', { language: 'Russian' }),
+  ];
+  const list = rankLibrary(rows, { now: recommendNow, known: ['ru', 'en'], translated: { Here: 'en' } });
+  const item = (id) => list.items.find((x) => x.id === id);
+  assert.ok(item('Foreign'), 'не исключена');
+  assert.ok(item('Foreign').score < item('Unread').score && item('Unread').score < item('Known').score, 'чужой < не определён < знакомый');
+  assert.deepStrictEqual(item('Foreign').reasons, []);
+  assert.deepStrictEqual(item('Known').reasons, [{ code: 'known-lang', params: { lang: 'ru' } }]);
+  assert.deepStrictEqual(item('Build').reasons, [{ code: 'known-lang', params: { lang: 'ru' } }], 'в сборке есть знакомый язык');
+  assert.deepStrictEqual(item('Here').reasons, [{ code: 'translation', params: { lang: 'en', site: 'mimikin' } }]);
+  assert.deepStrictEqual(item('Typed').reasons, [{ code: 'known-lang', params: { lang: 'ru' } }], 'язык вписан руками, текст не читали');
+  // Какие языки знает — не указано: никто не «чужой»
+  const open = rankLibrary(rows, { now: recommendNow });
+  assert.ok(open.items.every((x) => x.score === open.items[0].score && !x.reasons.length));
+});
+
+// Подбор с поддельной базой: настройки — в памяти
+function recService({ rows = [], settings = {}, ...opts } = {}) {
+  const store = new Map(Object.entries(settings).map(([k, v]) => [k, JSON.stringify(v)]));
+  const db = { get: () => ({
+    all: async (sql) => (/game_translation/.test(sql) ? [] : rows),
+    get: async (sql, [key]) => (/FROM games/.test(sql) ? rows.find((r) => r.id === key) : store.has(key) ? { value: store.get(key) } : undefined),
+    run: async (_sql, [key, value]) => { store.set(key, value); },
+  }) };
+  const { createRecommend } = require('./src/services/recommend.js');
+  const service = createRecommend({
+    db, gallery: { libraryTags: async () => { throw new Error('разбор выключен'); } }, pictureGames: async () => [],
+    hiddenTags: async () => opts.hidden || [], isGameId: (id) => /^[A-Za-z0-9_]+$/.test(id), ...opts,
+  });
+  return { service, store };
+}
+
+const noWarn = (t) => t.mock.method(console, 'warn', () => {});
+
+test('подбор: что знаем о вкусе — стадия приходит в шапке, любимые теги считаются, хотя cold про них не знает', async () => {
+  const stage = async (options) => (await recService(options).service.modes()).taste;
+  assert.deepStrictEqual(await stage({}), { stage: 'new', games: 0 });
+  assert.deepStrictEqual(await stage({ settings: { favorite_tags: ['romance'] } }), { stage: 'known', games: 0 }, 'выбрал тег — вкус есть и без игр');
+  assert.deepStrictEqual(await stage({ rows: [recRow('A'), recRow('B', { playtime: 60, lastPlayed: recommendNow })] }), { stage: 'collection', games: 2 }, 'пара минут — ещё не игра');
+  assert.deepStrictEqual(await stage({ rows: [recRow('A', recPlayed(1))] }), { stage: 'known', games: 1 });
+  assert.deepStrictEqual(await stage({ rows: [recRow('A')], settings: { favorite_tags: ['romance'] } }), { stage: 'known', games: 1 });
+  assert.deepStrictEqual(await stage({ rows: [recRow('A')], settings: { favorite_tags: ['horror'] }, hidden: ['horror'] }), { stage: 'collection', games: 1 }, 'скрытый любимый тег вкуса не даёт');
+});
+
+test('подбор: режим один — свои игры; без сети ответ тот же, но сказано offline', async () => {
+  const full = await recService().service.modes();
+  assert.deepStrictEqual(full, { offline: false, taste: { stage: 'new', games: 0 }, modes: ['list'] });
+  const off = await recService({ offline: true }).service.modes();
+  assert.deepStrictEqual(off, { offline: true, taste: { stage: 'new', games: 0 }, modes: ['list'] });
+});
+
+test('подбор: «не интересно» и отмена — в настройках; игра уходит из списков; чужой ключ — код причины; два нажатия сразу', async (t) => {
+  noWarn(t);
+  const rows = [recRow('Keep'), recRow('Hide_Me'), recRow('Left', { playtime: 3600, lastPlayed: recommendNow - 30 * recommendDay })];
+  const { service, store } = recService({ rows });
+  assert.deepStrictEqual(await service.dismiss('Hide_Me'), { ok: true, dismissed: 1 });
+  assert.deepStrictEqual(JSON.parse(store.get('recommend_dismissed')), ['Hide_Me']);
+  await service.dismiss('Left');
+  let list = await service.library({ now: recommendNow });
+  assert.deepStrictEqual([recIds(list), list.resume, list.total], [['Keep'], [], 1]);
+  assert.deepStrictEqual(await service.dismiss('Hide_Me', { undo: true }), { ok: true, dismissed: 1 });
+  await service.dismiss('Left', { undo: true });
+  list = await service.library({ now: recommendNow });
+  assert.deepStrictEqual([recIds(list).sort(), list.resume.map((x) => x.id)], [['Hide_Me', 'Keep'], ['Left']]);
+  assert.deepStrictEqual(await service.dismiss('Hide_Me', { undo: true }), { ok: true, dismissed: 0 }, 'отмена того, чего нет, — не ошибка');
+
+  await Promise.all([service.dismiss('itch:123'), service.dismiss('itch:456'), service.dismiss('itch:789')]);
+  assert.deepStrictEqual(JSON.parse(store.get('recommend_dismissed')), ['itch:123', 'itch:456', 'itch:789'], 'ни одно не потерялось');
+  await service.dismiss('itch:123');
+  assert.strictEqual(JSON.parse(store.get('recommend_dismissed')).length, 3, 'второй раз — не второй ключ');
+
+  for (const bad of ['', null, 42, 'itch:abc', 'itch:0123', 'itch:../x', 'evil:1', 'a b', 'No_Such_Game']) {
+    await assert.rejects(service.dismiss(bad), (e) => e.status === 400 && e.reason === 'bad-key', String(bad));
+  }
+  assert.deepStrictEqual(await service.dismiss('Gone_Game', { undo: true }), { ok: true, dismissed: 3 }, 'отменить можно и то, чего уже нет');
+  // Испорченная настройка — как пустая, запись работает дальше
+  store.set('recommend_dismissed', '{oops');
+  assert.deepStrictEqual(await service.dismiss('Keep'), { ok: true, dismissed: 1 });
+});
+
+test('подбор: список «не интересно» не прочитался — запись не затирает его, сбой виден', async (t) => {
+  noWarn(t);
+  let saved = JSON.stringify(['itch:1', 'itch:2']);
+  let broken = true;
+  const { service } = recService({
+    db: { get: () => ({
+      all: async () => [],
+      get: async () => { if (broken) throw new Error('база занята'); return { value: saved }; },
+      run: async (_sql, [, value]) => { saved = value; },
+    }) },
+  });
+  await assert.rejects(service.dismiss('itch:3'), /база занята/);
+  assert.deepStrictEqual(JSON.parse(saved), ['itch:1', 'itch:2']);
+  assert.deepStrictEqual((await service.library({ now: recommendNow })).items, [], 'показ работает и без настройки');
+  broken = false;
+  assert.deepStrictEqual(await service.dismiss('itch:3'), { ok: true, dismissed: 3 }, 'очередь записей после сбоя не встала');
+  assert.deepStrictEqual(JSON.parse(saved), ['itch:1', 'itch:2', 'itch:3']);
+});
+
+test('подбор: разметка кадров недоступна — список всё равно есть; настройки подхватываются', async (t) => {
+  noWarn(t);
+  const rows = [recRow('Played', { tags: ['romance'], ...recPlayed(5) }), recRow('Fav', { tags: ['horror'], text_lang: '{"main":"ru","langs":["ru"]}' }), recRow('Other', { tags: ['comedy'], text_lang: '{"main":"ja","langs":["ja"]}' })];
+  const { service } = recService({ rows, settings: { favorite_tags: ['horror'], known_langs: ['ru'] } });
+  const list = await service.library({ now: recommendNow });
+  assert.strictEqual(list.cold, false);
+  assert.strictEqual(list.items[0].id, 'Fav');
+  assert.deepStrictEqual(list.items[0].reasons.map((r) => r.code), ['favorite-tags', 'known-lang']);
+  // С разметкой: пары «номер имени, кадров» из gallery.libraryTags превращаются в имена
+  const seen = [];
+  const { createRecommend } = require('./src/services/recommend.js');
+  const db = { get: () => ({ all: async (sql) => (/game_translation/.test(sql) ? [] : rows), get: async () => undefined, run: async () => {} }) };
+  const withPictures = createRecommend({
+    db, pictureGames: async () => ['Played', 'Fav', 'Other'], hiddenTags: async () => ['hidden_one'],
+    gallery: { libraryTags: async (ids, opts) => { seen.push(ids, opts); return { covered: 2, tags: ['red_hair', 'sword'], games: { Played: [0, 5, 1, 3], Fav: [0, 2], Other: [] } }; } },
+  });
+  const pictured = await withPictures.library({ now: recommendNow });
+  assert.deepStrictEqual(seen, [['Played', 'Fav', 'Other'], { hide: ['hidden_one'] }]);
+  assert.strictEqual(pictured.total, 2);
+});
+
+// Как в контейнере: сервер — под обычным пользователем (root прошёл бы мимо любых прав на папку), папка своя, сети нет
+const asPlainUser = process.getuid?.() === 0 ? { uid: 1000, gid: 1000 } : {};
+
+const giveToPlainUser = (dir) => {
+  if (asPlainUser.uid === undefined) return;
+  const fs = require('fs');
+  fs.chownSync(dir, asPlainUser.uid, asPlainUser.gid);
+  for (const e of fs.readdirSync(dir, { withFileTypes: true, recursive: true })) fs.chownSync(require('path').join(e.parentPath, e.name), asPlainUser.uid, asPlainUser.gid);
+};
+
+function tempLibrary(t) {
+  const fs = require('fs');
+  const dir = fs.mkdtempSync(require('path').join(require('os').tmpdir(), 'mimikin-real-'));
+  t.after(() => { fs.chmodSync(dir, 0o700); fs.rmSync(dir, { recursive: true, force: true }); });
+  return dir;
+}
+
+const freePort = () => new Promise((resolve) => {
+  const s = require('net').createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); });
+});
+
+async function startRealServer(t, games, { env = {}, preload = null } = {}) {
+  const port = await freePort();
+  const child = require('child_process').spawn(process.execPath, [...(preload ? ['-r', preload] : []), 'server.js'], {
+    cwd: __dirname, ...asPlainUser, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: games, GAMES_DIR: games, PORT: String(port), REDIS_URL: 'memory', OFFLINE: '1', GAME_ISOLATION: 'off', PICTURE_PASS: '0', GALLERY_VISION: '0', ...env },
+  });
+  const server = { child, port, url: `http://127.0.0.1:${port}`, log: '', exited: false };
+  child.stdout.on('data', (d) => { server.log += d; });
+  child.stderr.on('data', (d) => { server.log += d; });
+  child.on('exit', () => { server.exited = true; });
+  t.after(() => { if (!server.exited) child.kill('SIGKILL'); });
+  for (let i = 0; i < 200; i++) {
+    assert.ok(!server.exited, `сервер вышел сам:\n${server.log}`);
+    if (await nativeFetch(`${server.url}/api/setup/status`).then(() => true, () => false)) return server;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.fail(`сервер не открыл порт:\n${server.log}`);
+}
+
+// Сам скрипт сброса, как его запускает docker exec: под root, если тесты идут под root
+function runReset(games, { args = [], input = null } = {}) {
+  return require('child_process').spawnSync(process.execPath, ['scripts/reset-password.js', ...args], {
+    cwd: __dirname, input: input ?? undefined, encoding: 'utf8', stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, GAMES_DIR: games, REDIS_URL: 'memory' },
+  });
+}
+
+const sessionCookie = (res) => (res.headers.getSetCookie?.() || []).map((c) => c.split(';')[0]).find((c) => c.startsWith('auth_token='));
+
+const postJson = (url, body) => nativeFetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+test('сброс пароля: скрипт при работающем сервере меняет пароль, выводит все устройства и снимает лимит попыток', async (t) => {
+  const fs = require('fs');
+  const path = require('path');
+  const games = tempLibrary(t);
+  giveToPlainUser(games);
+  const server = await startRealServer(t, games);
+  const login = (username, password) => postJson(`${server.url}/api/login`, { username, password });
+  assert.strictEqual((await postJson(`${server.url}/api/setup/init`, { username: 'owner', password: 'old-pass-1' })).status, 200);
+  const cookie = sessionCookie(await login('owner', 'old-pass-1'));
+  assert.ok(cookie);
+  const withOld = () => nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: cookie } });
+  const phone = sessionCookie(await login('owner', 'old-pass-1'));
+  assert.strictEqual((await withOld()).status, 200);
+  // Человек перебирал пароли, пока не упёрся в лимит
+  let last;
+  for (let i = 0; i < 11; i++) last = await login('owner', 'wrong');
+  assert.strictEqual(last.status, 429);
+
+  // Пароль в аргументах не берём, ничего не меняем и этим паролем не отвечаем
+  const inArgs = runReset(games, { args: ['new-pass-22'] });
+  assert.strictEqual(inArgs.status, 1);
+  assert.ok(!inArgs.stderr.includes('new-pass-22') && !inArgs.stdout.includes('new-pass-22'));
+  assert.match(inArgs.stderr, /no such account/, 'единственный аргумент — имя, а не пароль');
+  assert.strictEqual(runReset(games, { args: ['a', 'b'] }).status, 1);
+  // То же правило длины, что у маршрута смены пароля
+  const short = runReset(games, { input: 'abc\n' });
+  assert.strictEqual(short.status, 1);
+  assert.match(short.stderr, /at least 4/);
+  assert.strictEqual((await withOld()).status, 200, 'отказ скрипта ничего не меняет');
+
+  const ok = runReset(games, { input: 'new-pass-22\n' });
+  assert.strictEqual(ok.status, 0, ok.stderr);
+  assert.strictEqual(ok.stdout.trim().split('\n').length, 1, ok.stdout);
+  assert.match(ok.stdout, /Password changed for "owner"/);
+  assert.doesNotMatch(ok.stdout, /Other accounts/, 'других записей нет — не упоминаем');
+  assert.ok(!ok.stdout.includes('new-pass-22') && !ok.stderr.includes('new-pass-22'));
+
+  // Сервер не перезапускали: входы стёрты в базе — старые куки не пускают сразу, оба устройства; лимит снимается следующей
+  // сверкой (до 5 с), вход — только с новым паролем
+  assert.strictEqual((await withOld()).status, 401, 'старая кука всё ещё пускает');
+  assert.strictEqual((await nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: phone } })).status, 401);
+  let fresh;
+  for (let i = 0; i < 40; i++) {
+    fresh = await login('owner', 'new-pass-22');
+    if (fresh.status !== 429) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  assert.strictEqual(fresh.status, 200, 'лимит попыток не снялся');
+  assert.strictEqual((await login('owner', 'old-pass-1')).status, 401);
+  assert.strictEqual((await nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: sessionCookie(fresh) } })).status, 200);
+
+  // Маршрут смены пароля в «Настройках» — на тех же правилах: короткий не берёт, верный меняет и выводит остальных
+  const account = (cookieNow, body) => nativeFetch(`${server.url}/api/account/password`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: cookieNow }, body: JSON.stringify(body) });
+  const inside = sessionCookie(fresh);
+  const second = sessionCookie(await login('owner', 'new-pass-22'));
+  assert.strictEqual((await account(inside, { current: 'new-pass-22', next: 'abc' })).status, 400);
+  const changed = await account(inside, { current: 'new-pass-22', next: 'route-pass-5' });
+  assert.strictEqual(changed.status, 200);
+  assert.deepStrictEqual(await changed.json(), { success: true, otherDevicesSignedOut: true });
+  assert.strictEqual((await nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: second } })).status, 401, 'другое устройство вышло');
+  assert.strictEqual((await nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: inside } })).status, 200, 'это осталось во входе, с той же кукой');
+  // Сверка раз в пять секунд видит смену пароля и эпоху, но входы, выданные после, не трогает
+  await new Promise((r) => setTimeout(r, 5500));
+  assert.strictEqual((await nativeFetch(`${server.url}/api/settings`, { headers: { Cookie: inside } })).status, 200);
+
+  // Запуск под root не оставил файлов, которые сервер под своим пользователем не прочитает
+  if (asPlainUser.uid !== undefined) {
+    for (const f of fs.readdirSync(games, { recursive: true })) assert.strictEqual(fs.statSync(path.join(games, f)).uid, asPlainUser.uid, f);
+  }
+
+  // С терминала: два раза и без эха. script даёт настоящий терминал; нет его — эта часть проверена только вручную
+  if (require('child_process').spawnSync('script', ['--version']).status !== 0) return;
+  const typed = async (first, second) => {
+    const tty = require('child_process').spawn('script', ['-qec', `${process.execPath} scripts/reset-password.js`, '/dev/null'], {
+      cwd: __dirname, stdio: ['pipe', 'pipe', 'pipe'], env: { PATH: process.env.PATH, GAMES_DIR: games, REDIS_URL: 'memory', TERM: 'dumb' },
+    });
+    t.after(() => tty.kill('SIGKILL'));
+    let out = '';
+    const waitFor = async (text) => { for (let i = 0; i < 200 && !out.includes(text); i++) await new Promise((r) => setTimeout(r, 50)); assert.ok(out.includes(text), out); };
+    tty.stdout.on('data', (d) => { out += d; });
+    const closed = new Promise((resolve) => tty.on('close', resolve));
+    await waitFor('New password');
+    tty.stdin.write(`${first}\r`);
+    await waitFor('Repeat');
+    tty.stdin.write(`${second}\r`);
+    return { code: await closed, out };
+  };
+  const differ = await typed('typed-pass-3', 'typed-pass-4');
+  assert.strictEqual(differ.code, 1);
+  assert.match(differ.out, /do not match/);
+  const same = await typed('typed-pass-3', 'typed-pass-3');
+  assert.strictEqual(same.code, 0, same.out);
+  assert.ok(!same.out.includes('typed-pass-3'), `пароль виден на экране: ${same.out}`);
+  assert.strictEqual((await login('owner', 'typed-pass-3')).status, 200);
+});
+
+// База для сброса пароля в памяти: настройки, люди и входы
+async function resetDb(t, { owner = true } = {}) {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  t.after(() => db.close());
+  await db.exec(`CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+    CREATE TABLE users (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, pass_hash TEXT NOT NULL, must_change INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, state TEXT NOT NULL DEFAULT '');
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, user_id TEXT NOT NULL, created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL);`);
+  if (owner) await db.exec("INSERT INTO settings VALUES ('admin_user', 'owner'), ('admin_pass', 'old-hash'), ('legacy_session_until', '99999999999999')");
+  return db;
+}
+
+test('сброс пароля: нет учётной записи или короткий пароль — отказ; владельцу стираются входы и закрывается окно старой куки', async (t) => {
+  const { resetPassword, passwordFits } = require('./src/utils/account.js');
+  await assert.rejects(resetPassword(await resetDb(t, { owner: false }), 'long-enough'), /no account/);
+  const db = await resetDb(t);
+  await assert.rejects(resetPassword(db, 'abc'), /at least 4/);
+  assert.strictEqual(passwordFits('abcd'), true);
+  assert.strictEqual(passwordFits(1234), false);
+  await db.exec("INSERT INTO sessions VALUES ('s1', 'h1', 'owner', 1, 9), ('s2', 'h2', 'owner', 1, 9), ('s3', 'h3', 'uanna', 1, 9)");
+  await db.exec("INSERT INTO users VALUES ('uanna', 'Anna', 'anna-hash', 0, 1, ''), ('ubob', 'Bob', 'bob-hash', 0, 1, '')");
+  assert.deepStrictEqual(await resetPassword(db, 'long-enough'), { login: 'owner', others: ['Anna', 'Bob'], locked: [] });
+  const value = async (key) => (await db.get('SELECT value FROM settings WHERE key = ?', [key]))?.value;
+  assert.ok(require('bcrypt').compareSync('long-enough', await value('admin_pass')));
+  assert.deepStrictEqual((await db.all('SELECT id FROM sessions')).map((r) => r.id), ['s3'], 'входы владельца стёрты, чужие целы');
+  assert.strictEqual(await value('legacy_session_until'), '0');
+  assert.ok(Number(await value('accounts_epoch')) > 0);
+  assert.deepStrictEqual((await db.all('SELECT pass_hash, must_change FROM users ORDER BY name')).map((r) => [r.pass_hash, r.must_change]), [['anna-hash', 0], ['bob-hash', 0]]);
+});
+
+test('сброс пароля: по имени — только этот человек, пароль временный; неизвестное имя — общий отказ, логин владельца годится', async (t) => {
+  const { resetPassword, accountNamed } = require('./src/utils/account.js');
+  const db = await resetDb(t);
+  await db.exec("INSERT INTO sessions VALUES ('s1', 'h1', 'owner', 1, 9), ('s3', 'h3', 'uanna', 1, 9), ('s4', 'h4', 'uanna', 1, 9)");
+  await db.exec("INSERT INTO users VALUES ('uanna', 'Anna', 'anna-hash', 0, 1, ''), ('ubob', 'Bob', 'bob-hash', 0, 1, '')");
+  const refusal = [];
+  for (const name of ['nobody', 'ann', "x' OR '1'='1"]) {
+    await assert.rejects(accountNamed(db, name), (e) => { refusal.push(e.message); return e.told; });
+  }
+  assert.strictEqual(new Set(refusal).size, 1, 'ответ одинаков для любого неизвестного имени');
+  assert.ok(!refusal[0].includes('Anna'), 'имён в отказе нет');
+  await assert.rejects(resetPassword(db, 'temp-1234', 'nobody'), /no such account/);
+  assert.strictEqual((await db.get("SELECT value FROM settings WHERE key = 'admin_pass'")).value, 'old-hash', 'отказ ничего не меняет');
+
+  assert.deepStrictEqual(await resetPassword(db, 'temp-1234', 'aNNa'), { login: 'Anna', others: ['Bob'], locked: [] }, 'имя без учёта регистра');
+  const anna = await db.get("SELECT pass_hash, must_change FROM users WHERE id = 'uanna'");
+  assert.ok(require('bcrypt').compareSync('temp-1234', anna.pass_hash));
+  assert.strictEqual(anna.must_change, 1, 'выберет свой пароль при входе');
+  assert.deepStrictEqual((await db.all('SELECT id FROM sessions')).map((r) => r.id), ['s1'], 'входы Анны стёрты, владельца — нет');
+  assert.strictEqual((await db.get("SELECT value FROM settings WHERE key = 'admin_pass'")).value, 'old-hash', 'пароль владельца тот же');
+  assert.strictEqual((await db.get("SELECT value FROM settings WHERE key = 'legacy_session_until'")).value, '99999999999999', 'окно старой куки — только владельцу');
+  assert.strictEqual((await db.get("SELECT must_change FROM users WHERE id = 'ubob'")).must_change, 0);
+  // Логин владельца с именем «Owner» (регистр иной) — тоже владелец
+  assert.strictEqual((await resetPassword(db, 'owner-new-1', 'OWNER')).login, 'owner');
+});
+
+test('сброс пароля: сбой на записи — пароль прежний, входы на месте: «не изменён» в ответе скрипта правда', async (t) => {
+  const { resetPassword } = require('./src/utils/account.js');
+  const db = await resetDb(t);
+  await db.exec(`INSERT INTO sessions VALUES ('s1', 'h1', 'owner', 1, 9);
+    CREATE TRIGGER no_epoch BEFORE INSERT ON settings WHEN NEW.key = 'accounts_epoch' BEGIN SELECT RAISE(ABORT, 'база занята'); END;`);
+  await assert.rejects(resetPassword(db, 'new-pass-1'), /база занята/);
+  const hash = () => db.get("SELECT value FROM settings WHERE key = 'admin_pass'").then((r) => r.value);
+  assert.strictEqual(await hash(), 'old-hash');
+  assert.strictEqual((await db.get('SELECT COUNT(*) AS n FROM sessions')).n, 1);
+  await db.exec('DROP TRIGGER no_epoch');
+  assert.strictEqual((await resetPassword(db, 'new-pass-1')).login, 'owner');
+  assert.notStrictEqual(await hash(), 'old-hash');
+});
+
+test('сброс пароля: сверка с базой замечает смену эпохи и отключает только сокеты без живого входа', async (t) => {
+  const db = await resetDb(t);
+  const prev = { db: dbService.db, io: dbService.io, pass: dbService.adminPass, epoch: dbService.accountsEpoch, until: dbService.legacyUntil };
+  const gone = [];
+  const socket = (name, data) => [name, { data, disconnect() { gone.push(name); } }];
+  dbService.io = { sockets: { sockets: new Map([
+    socket('alive', { sid: 'live1' }), socket('dead', { sid: 'dead1' }), socket('old-cookie', { legacy: true }),
+  ]) } };
+  Object.assign(dbService, { db });
+  delete dbService.adminPass;
+  delete dbService.accountsEpoch;
+  t.after(() => {
+    Object.assign(dbService, { db: prev.db, io: prev.io, adminPass: prev.pass, accountsEpoch: prev.epoch, legacyUntil: prev.until });
+  });
+  await db.run("INSERT INTO sessions VALUES ('live1', 'h1', 'owner', 1, ?)", [Date.now() + 1e6]);
+  await db.run("INSERT INTO settings VALUES ('accounts_epoch', '1')");
+  assert.strictEqual(await dbService.followAccount(), false, 'первая сверка только запоминает');
+  assert.deepStrictEqual(gone, []);
+  assert.strictEqual(await dbService.followAccount(), false);
+  assert.deepStrictEqual(gone, [], 'эпоха та же — сокеты не трогаем');
+  // Скрипт сброса: пароль другой, эпоха выросла, окно старой куки закрыто
+  await db.run("UPDATE settings SET value = 'h2' WHERE key = 'admin_pass'");
+  await db.run("UPDATE settings SET value = '2' WHERE key = 'accounts_epoch'");
+  await db.run("UPDATE settings SET value = '0' WHERE key = 'legacy_session_until'");
+  assert.strictEqual(await dbService.followAccount(), true);
+  assert.deepStrictEqual(gone.sort(), ['dead', 'old-cookie']);
+  assert.strictEqual(dbService.legacyUntil, 0);
+  // Сброс пароля человека: admin_pass тот же, растёт только эпоха — лимит попыток всё равно забывается
+  await db.run("UPDATE settings SET value = '2b' WHERE key = 'accounts_epoch'");
+  assert.strictEqual(await dbService.followAccount(), true);
+  assert.strictEqual(await dbService.followAccount(), false);
+  // Окно открыто — сокет со старой кукой остаётся, даже если эпоха сдвинулась
+  gone.length = 0;
+  await db.run("UPDATE settings SET value = ? WHERE key = 'legacy_session_until'", [String(Date.now() + 1e6)]);
+  await db.run("UPDATE settings SET value = '3' WHERE key = 'accounts_epoch'");
+  await dbService.followAccount();
+  assert.deepStrictEqual(gone.sort(), ['dead']);
+});
+
+test('база не открылась: причина различается по ошибке, а не по виду страницы', () => {
+  const { diagnose } = require('./src/utils/dbDown.js');
+  const of = (code, free) => diagnose(Object.assign(new Error('x'), { code }), free);
+  assert.strictEqual(of('SQLITE_NOTADB'), 'damaged');
+  assert.strictEqual(of('SQLITE_CORRUPT'), 'damaged');
+  assert.strictEqual(of('SQLITE_FULL'), 'full');
+  assert.strictEqual(of('ENOSPC'), 'full');
+  assert.strictEqual(of('SQLITE_CANTOPEN'), 'denied');
+  assert.strictEqual(of('SQLITE_READONLY'), 'denied');
+  assert.strictEqual(of('EACCES'), 'denied');
+  assert.strictEqual(of('EROFS'), 'denied');
+  // SQLite при нехватке места говорит и «не открыть»: смотрим на свободное место
+  assert.strictEqual(of('SQLITE_CANTOPEN', 4096), 'full');
+  assert.strictEqual(of('SQLITE_IOERR', 4096), 'full');
+  assert.strictEqual(of('SQLITE_IOERR'), 'other');
+  assert.strictEqual(of('SQLITE_BUSY'), 'other');
+  assert.strictEqual(diagnose(new Error('нет кода')), 'other');
+});
+
+test('база не открылась: настоящий сервер с повреждённой базой и с папкой без записи показывает страницу и не трогает файл', async (t) => {
+  const fs = require('fs');
+  const path = require('path');
+  const crypto = require('crypto');
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+
+  // Через время — что осталось в работе: таймеров быть не должно
+  const probeDir = tempLibrary(t);
+  const probe = path.join(probeDir, 'probe.js');
+  // setImmediate: пока срабатывает сам этот таймер, он тоже числится в работе
+  fs.writeFileSync(probe, "setTimeout(() => setImmediate(() => console.error('RESOURCES ' + process.getActiveResourcesInfo().join(','))), 2500);\n");
+  fs.chmodSync(probeDir, 0o755);
+
+  const goodDb = async (file) => {
+    const db = await open({ filename: file, driver: sqlite3.Database });
+    await db.exec("PRAGMA journal_mode = WAL; CREATE TABLE games (id TEXT PRIMARY KEY, title TEXT); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT); INSERT INTO settings VALUES ('admin_user', 'owner');");
+    for (let i = 0; i < 400; i++) await db.run('INSERT INTO games VALUES (?, ?)', [`game${i}`, 'x'.repeat(200)]);
+    await db.close();
+  };
+  const scenarios = {
+    // Вместо базы — мусор, как после неудачного копирования
+    garbage: { kind: 'damaged', make: (dir) => fs.writeFileSync(path.join(dir, 'library.db'), crypto.randomBytes(64 * 1024)) },
+    // Заголовок цел, страницы — нет: такая база открывается и падает позже
+    pages: {
+      kind: 'damaged',
+      make: async (dir) => {
+        const file = path.join(dir, 'library.db');
+        await goodDb(file);
+        const fd = fs.openSync(file, 'r+');
+        fs.writeSync(fd, crypto.randomBytes(fs.fstatSync(fd).size - 4096), 0, undefined, 4096);
+        fs.closeSync(fd);
+      },
+    },
+    // Папка только для чтения: новой базы не завести
+    readonlyEmpty: { kind: 'denied', make: () => {}, lock: true },
+    // И рядом с готовой базой не завести журнал
+    readonlyWithDb: { kind: 'denied', make: (dir) => goodDb(path.join(dir, 'library.db')), lock: true },
+  };
+  for (const [name, sc] of Object.entries(scenarios)) {
+    await t.test(name, async (t) => {
+      const games = tempLibrary(t);
+      await sc.make(games);
+      giveToPlainUser(games);
+      if (sc.lock) fs.chmodSync(games, 0o555);
+      const file = path.join(games, 'library.db');
+      const had = fs.existsSync(file);
+      const state = () => ({ sum: hash(file), mtime: fs.statSync(file).mtimeMs, ...(name === 'pages' ? {} : { mode: fs.statSync(file).mode }) });
+      const before = had ? state() : null;
+      const server = await startRealServer(t, games, { preload: probe });
+
+      const open503 = await nativeFetch(`${server.url}/`, { headers: { 'Accept-Language': 'ru-RU,ru;q=0.9' } });
+      assert.strictEqual(open503.status, 503);
+      const html = await open503.text();
+      assert.match(html, /База библиотеки не открылась/);
+      assert.match(html, /docker logs/);
+      assert.match(html, sc.kind === 'damaged' ? /Не удаляйте его/ : /GAMES_HOST_DIR/);
+      // Ни полного пути, ни текста ошибки: только код
+      assert.ok(!html.includes(games), html);
+      assert.ok(!html.includes(process.cwd()) && !html.includes('/games'), html);
+
+      assert.match(await (await nativeFetch(`${server.url}/any/page`, { headers: { 'Accept-Language': 'de' } })).text(), /hat sich nicht geöffnet/);
+      assert.match(await (await nativeFetch(`${server.url}/`, { headers: { 'Accept-Language': 'fr' } })).text(), /did not open/);
+
+      // API — 503 с JSON, и проверка здоровья из docker-compose.yml видит ответ «не ок»
+      const api = await nativeFetch(`${server.url}/api/setup/status`);
+      assert.strictEqual(api.status, 503);
+      assert.strictEqual(api.ok, false);
+      const body = await api.json();
+      assert.strictEqual(body.reason, sc.kind);
+      assert.ok(!JSON.stringify(body).includes(games));
+      assert.strictEqual((await postJson(`${server.url}/api/login`, { username: 'a', password: 'b' })).status, 503);
+
+      // В журнале — настоящая ошибка, а служб нет
+      assert.match(server.log, /\[DB\] База не открылась/);
+      assert.match(server.log, /SQLITE_/);
+      for (let i = 0; i < 40 && !server.log.includes('RESOURCES'); i++) await new Promise((r) => setTimeout(r, 200));
+      const resources = server.log.split('RESOURCES ')[1]?.split('\n')[0];
+      assert.ok(resources, server.log);
+      assert.ok(!resources.includes('Timeout'), resources);
+      assert.ok(!/Сервер запущен|Наблюдение за/.test(server.log), server.log);
+
+      // Файл на месте и тот же; база не переименована и журналов не осталось. У базы с целым заголовком права 600
+      // ставятся как при обычном старте: первая ошибка в ней случается позже, содержимое при этом то же
+      if (had) {
+        assert.deepStrictEqual(state(), before);
+        // База с целым заголовком открылась: рядом пустые файлы журнала открытого соединения, записей в них нет
+        const beside = fs.readdirSync(games).filter((f) => f.includes('library') || f.includes('corrupt')).sort();
+        assert.deepStrictEqual(beside, name === 'pages' ? ['library.db', 'library.db-shm', 'library.db-wal'] : ['library.db']);
+        if (name === 'pages') assert.strictEqual(fs.statSync(`${file}-wal`).size, 0);
+      } else {
+        assert.deepStrictEqual(fs.readdirSync(games).filter((f) => f.includes('library')), []);
+      }
+
+      // docker stop не ждёт 10 секунд
+      const stopped = new Promise((resolve) => server.child.on('exit', resolve));
+      server.child.kill('SIGTERM');
+      assert.strictEqual(await stopped, 0);
+    });
+  }
+});
+
+test('отчёт о проблеме: очистка строк убирает ключи, куки, пароли, адреса со входом, пути и названия игр', () => {
+  const { redactLine, namesRule } = require('./src/services/problemReport.js');
+  // Имена того же вида, что настоящие папки игр: с пробелами, версией, скобками, подчёркиваниями, японские
+  const ids = ['Dark_Forest_Quest_v1.2.3', 'Sister Of Mine [Full]', 'Moon-Lit Tale (Full)', '魔法少女の冒険', 'Ib', 'A_Very_Long_Name_Of_Game_Ver.2.10_English_Edition'];
+  const titles = ['Dark Forest Quest', 'Лунная сказка', 'Ember & Frost'];
+  const cases = [
+    // [строка, что не должно остаться]
+    ['[Telegram] getUpdates failed 123456789:AAEhBOweik6ad9r_QXMENQjcrGbqwyrPVB', ['AAEhBOweik6', '123456789']],
+    // Игры, которой уже нет ни в базе, ни в корзине: имя в строке держится только на месте после тега
+    ['[Steam] Gone_Game_v1: сайт не ответил', ['Gone_Game']],
+    ['[Узнавание по файлам] Gone Game v1: нет файлов', ['Gone Game']],
+    ['[Queue] Ошибка для Gone Game v1: нет ответа', ['Gone Game']],
+    ['[Telegram] GET https://api.telegram.org/bot123456789:AAEhBOweik6ad9r_QXMENQjcrGbqwyrPVB/getMe 401', ['AAEhBOweik6', 'getMe']],
+    ['[Steam] cookie: user_id=123456%2Cabcdef0123456789abcdef; sess=deadbeefdeadbeefdeadbeef; csrf=qwertyuiop', ['abcdef0123456789', 'deadbeef', 'qwertyuiop']],
+    ['[Steam] отказ: user_id=123456%2Cabcdef0123456789; sess=deadbeefdead', ['abcdef0123456789', 'deadbeefdead']],
+    ["headers: { Cookie: 'member_id=1; pass_hash=0123456789abcdef0123456789abcdef; extra=abc' }", ['0123456789abcdef', 'extra=abc']],
+    ['wordpress_logged_in_0a1b2c=user%7C1700000000%7Cabcdefgh', ['user%7C', 'abcdefgh']],
+    ['Authorization: Bearer abc.def.ghi', ['abc.def.ghi']],
+    ['[ScraperAPI] https://api.scraperapi.com/?api_key=0123456789abcdef&url=https%3A%2F%2Fexample.com%2Fgame%2F1%2F', ['0123456789abcdef', 'game%2F1']],
+    ['[Перевод] DeepL ключ 1a2b3c4d-1111-2222-3333-444455556666:fx не принят', ['1a2b3c4d']],
+    ['password=hunter2 passwd: letmein1 "password":"qwerty12" пароль: секретный', ['hunter2', 'letmein1', 'qwerty12', 'секретный']],
+    ['[Копия] redis://admin:s3cret@10.0.0.5:6379/0 и https://bob:pa55@seedbox.example.com/files/x', ['s3cret', 'pa55', 'bob', 'admin', '10.0.0.5']],
+    ['подключение bob:hunter2@seedbox.example.com', ['hunter2']],
+    ['[Seedbox] enc1:QUJDREVGR0hJ=', ['QUJDREVGR0hJ']],
+    ['[Upload] почта owner@example.com не подошла', ['owner@example.com']],
+    ["Error: ENOENT: no such file or directory, open '/home/bob/games/Dark Forest/www/index.html'", ['bob', 'Dark Forest']],
+    ['Error: EACCES: permission denied, mkdir /Users/alice/Library/Mimikin Games', ['alice', 'Mimikin Games']],
+    ['ошибка в C:\\Users\\Carol\\Documents\\My Games\\x.txt', ['Carol', 'My Games']],
+    ['[Галерея] /games/Dark Forest Quest/www/img/pictures/a.png не читается', ['Dark Forest', 'a.png']],
+    ['[Полка] обложка (/Some%20Game/cover.png)', ['Some%20Game']],
+    ['[Upload] Unknown Archive v1.0.zip: нет места', ['Unknown Archive']],
+    ['[Входящие] Another Unknown Game.part1.rar нет прав', ['Another Unknown']],
+    ['[Галерея] Unlisted_Game_Folder: диалоги не собрались: oops', ['Unlisted_Game']],
+    ['[Подборки] Моя подборка: сайт не ответил', ['Моя подборка']],
+    ['[Saves] Папка сейвов «Old Name» подходит нескольким играм', ['Old Name']],
+    ['ゲームのタイトル 異世界 한국어 게임', ['ゲーム', '異世界', '한국어']],
+    ['запрос /api/games/%E3%81%82%E3%81%84/cover', ['%E3%81']],
+    ...ids.map((id) => [`[Реплики] ${id}: индекс не собран`, [id]]),
+    ...ids.map((id) => [`запрос к игре ${id} не прошёл`, [id]]),
+    ...titles.map((title) => [`нашли ${title} в библиотеке`, [title]]),
+    ['нашли dark_forest_quest и DARK FOREST QUEST', ['dark_forest', 'DARK FOREST']],
+    ['игра Dark%20Forest%20Quest открыта', ['Dark%20Forest']],
+  ];
+  const texts = cases.map(([line]) => line);
+  const names = namesRule([...ids, ...titles], texts);
+  const secrets = ['exact-secret-value-1'];
+  for (const [line, gone] of cases) {
+    const clean = redactLine(line, { secrets, names });
+    for (const piece of gone) assert.ok(!clean.includes(piece), `«${piece}» осталось в: ${clean}`);
+  }
+  assert.ok(!redactLine('ключ exact-secret-value-1 в тексте', { secrets, names }).includes('exact-secret-value-1'));
+
+  // И польза осталась: тег, код ошибки, файл программы, адрес сайта
+  const keep = (line, ...parts) => { const clean = redactLine(line, { secrets, names }); for (const p of parts) assert.ok(clean.includes(p), `нет «${p}» в: ${clean}`); };
+  keep('[Redis] Ошибка: connect ECONNREFUSED 172.18.0.3:6379', '[Redis]', 'ECONNREFUSED');
+  keep(`TypeError: x is not a function\n    at run (${require('path').resolve(__dirname, 'src/services/gallery.js')}:10:5)`, 'TypeError', '<app>/api/src/services/gallery.js:10:5');
+  keep('[ScraperAPI] Cloudflare не пропустил: ответ 500', 'Cloudflare не пропустил', 'ответ 500');
+  keep('[Галерея] сверка с облаком: fetch failed', 'сверка с облаком', 'fetch failed');
+  keep('[Telegram] Не ответил (https://api.telegram.org/x) — продолжим', 'https://api.telegram.org/');
+  keep('[Реплики] Ib: индекс', '[Реплики]', 'индекс');
+});
+
+test('отчёт о проблеме: журнал ограничен, console работает как раньше и обёртка ничего не ломает', () => {
+  const serverLog = require('./src/utils/serverLog.js');
+  const { MAX_LINES, MAX_CHARS } = serverLog;
+  serverLog.capture();
+  const wrapped = console.warn;
+  serverLog.capture();
+  assert.strictEqual(console.warn, wrapped, 'второй раз не оборачиваем');
+  const start = serverLog.recent().total;
+  // Подмена в тесте поверх обёртки и возврат — как в http.test.js
+  const seen = [];
+  const inner = console.error;
+  console.error = (...a) => { seen.push(a); };
+  console.error('подмена');
+  console.error = inner;
+  assert.deepStrictEqual(seen, [['подмена']]);
+  assert.strictEqual(serverLog.recent().total, start, 'подмена журнал не трогает');
+  // .catch(console.warn) зовёт метод без this. Сквозь обёртку доходит до настоящей консоли — её заглушаем на время
+  const out = process.stderr.write;
+  process.stderr.write = () => true;
+  try {
+    const bare = console.warn;
+    bare('[Тест] без this', { a: 1 });
+    const huge = 'x'.repeat(MAX_CHARS * 5);
+    console.error('длинная', huge);
+    for (let i = 0; i < MAX_LINES + 50; i++) console.warn(`[Тест] строка ${i}`);
+    // Объект, который пишет в консоль из своего inspect, не зацикливает журнал
+    console.warn({ [require('util').inspect.custom]: () => { console.warn('изнутри'); return 'снаружи'; } });
+  } finally {
+    process.stderr.write = out;
+  }
+  const { lines, total } = serverLog.recent();
+  assert.strictEqual(lines.length, MAX_LINES);
+  assert.ok(total >= start + MAX_LINES + 50);
+  assert.ok(lines.every((l) => l.text.length <= MAX_CHARS));
+  assert.ok(lines.slice(-3).some((l) => /снаружи/.test(l.text)), 'запись о самом вызове на месте');
+  serverLog.remember('warn', ['x'.repeat(MAX_CHARS + 10)]);
+  assert.strictEqual(serverLog.recent().lines.at(-1).cut, true);
+});
+
+test('отчёт о проблеме: настоящий сервер отдаёт его только со входом, и в нём нет ключей, куки и настоящих папок игр', async (t) => {
+  const fs = require('fs');
+  const path = require('path');
+  const games = tempLibrary(t);
+  const ids = ['Dark_Forest_Quest_v1.2.3', 'Sister Of Mine [Full]', '魔法少女の冒険', 'Ember Frost'];
+  for (const id of ids) {
+    fs.mkdirSync(path.join(games, id, 'www', 'data'), { recursive: true });
+    fs.writeFileSync(path.join(games, id, 'index.html'), '<html></html>');
+  }
+  const telegram = '123456789:AAEhBOweik6ad9r_QXMENQjcrGbqwyrPVB';
+  const siteCookie = 'user_id=123456%2Cabcdef0123456789abcdef; sess=deadbeefdeadbeefdeadbeef';
+  const scraper = 'abcd1234efgh5678ijkl';
+  const lines = [
+    ...ids.flatMap((id) => [`[Реплики] ${id}: индекс не собран`, `[Перевод] ошибка в игре ${id}, повтор`, `ENOENT: open '${games}/${id}/www/data/Map001.json'`]),
+    `[Telegram] GET https://api.telegram.org/bot${telegram}/getMe`,
+    `[Steam] запрос с куками ${siteCookie}`,
+    `[ScraperAPI] https://api.scraperapi.com/?api_key=${scraper}&url=x`,
+    'password=hunter2',
+    'https://bob:pa55word@example.com/x',
+    '/home/bob/Mimikin/api/server.js',
+  ];
+  // Строки попадают в журнал через настоящий console.warn и console.error запущенного сервера
+  const preloadDir = tempLibrary(t);
+  const preload = path.join(preloadDir, 'feed.js');
+  fs.writeFileSync(preload, `process.on('SIGUSR2', () => { for (const l of ${JSON.stringify(lines)}) { console.warn(l); console.error(l); } });\n`);
+  fs.chmodSync(preloadDir, 0o755);
+  giveToPlainUser(games);
+  const server = await startRealServer(t, games, { preload, env: { TELEGRAM_BOT_TOKEN: telegram, SITE_COOKIE: siteCookie, SCRAPER_API_KEY: scraper } });
+
+  const url = `${server.url}/api/settings/problem-report`;
+  assert.strictEqual((await nativeFetch(url)).status, 401, 'без входа не отдаём');
+  await postJson(`${server.url}/api/setup/init`, { username: 'report_owner', password: 'pass-1234' });
+  const cookie = sessionCookie(await postJson(`${server.url}/api/login`, { username: 'report_owner', password: 'pass-1234' }));
+  server.child.kill('SIGUSR2');
+  for (let i = 0; i < 40 && !server.log.includes('/home/bob'); i++) await new Promise((r) => setTimeout(r, 100));
+
+  const res = await nativeFetch(url, { headers: { Cookie: cookie, 'User-Agent': 'TestBrowser/1.0' } });
+  assert.strictEqual(res.status, 200);
+  const data = await res.json();
+  assert.ok(data.lines.length >= lines.length * 2, JSON.stringify(data.lines.length));
+  // Весь ответ целиком — и строки для чтения, и текст отчёта
+  const everything = JSON.stringify(data);
+  for (const piece of [...ids, 'Dark_Forest', 'Sister Of Mine', '魔法', telegram, 'AAEhBOweik6', 'abcdef0123456789', 'deadbeef', scraper, 'hunter2', 'pa55word', 'bob', games, 'report_owner', 'Map001']) {
+    assert.ok(!everything.includes(piece), `«${piece}» в ответе: ${data.report.slice(0, 3000)}`);
+  }
+  // Что нужно для разбора — на месте
+  const { version } = require('./package.json');
+  for (const part of [`Version: ${version}`, 'OS: ', `Architecture: ${process.arch}`, 'CPUs: ', 'Memory: ', 'Free disk: ', 'Docker: ', 'Optional services found: ', 'Telegram', 'Browser: TestBrowser/1.0', 'Recent warnings and errors', '[Реплики]', 'WARN', 'ERROR']) {
+    assert.ok(data.report.includes(part), `нет «${part}» в отчёте: ${data.report.slice(0, 2000)}`);
+  }
+  assert.ok(data.report.length < 40000);
+});
+
+test('игры на адресе библиотеки (GAME_ISOLATION=off): library.db и сейвы не отдаются, ни прямо, ни через «..»; игра и обложки из _media — как раньше', async (t) => {
+  const fs = require('fs');
+  const path = require('path');
+  const games = tempLibrary(t);
+  const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  fs.mkdirSync(path.join(games, 'Game', 'www'), { recursive: true });
+  fs.writeFileSync(path.join(games, 'Game', 'www', 'index.html'), '<!doctype html><title>Mine</title><body></body>');
+  fs.writeFileSync(path.join(games, 'Game', 'cover.png'), PNG);
+  fs.mkdirSync(path.join(games, '_media', 'Game'), { recursive: true });
+  fs.writeFileSync(path.join(games, '_media', 'Game', 'cover-1.png'), PNG);
+  fs.mkdirSync(path.join(games, '_saves', 'Game'), { recursive: true });
+  fs.writeFileSync(path.join(games, '_saves', 'Game', 'shot.png'), PNG);
+  fs.writeFileSync(path.join(games, '_saves', 'Game', 'file1.rpgsave'), 'SAVE-SECRET');
+  giveToPlainUser(games);
+  const server = await startRealServer(t, games);
+  assert.strictEqual((await postJson(`${server.url}/api/setup/init`, { username: 'owner', password: 'old-pass-1' })).status, 200);
+  const cookie = sessionCookie(await postJson(`${server.url}/api/login`, { username: 'owner', password: 'old-pass-1' }));
+  // Запрос с путём как есть: fetch схлопнул бы «..» ещё до отправки
+  const raw = (urlPath) => new Promise((resolve, reject) => {
+    require('http').get({ host: '127.0.0.1', port: server.port, path: urlPath, headers: { Cookie: cookie } }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }));
+    }).on('error', reject);
+  });
+
+  const page = await raw('/Game/www/index.html');
+  assert.strictEqual(page.status, 200);
+  assert.ok(page.body.toString().includes('<title>Mine</title>'), 'страница игры отдаётся');
+  assert.ok(page.body.toString().includes('window.__RPG'), 'и получает окружение библиотеки');
+  assert.deepStrictEqual((await raw('/Game/cover.png')).body, PNG, 'картинка из папки игры');
+  assert.deepStrictEqual((await raw('/_media/Game/cover-1.png')).body, PNG, 'обложка из _media');
+
+  for (const p of ['/library.db', '/library.db-wal', '/Game/../library.db', '/Game/%2e%2e/library.db', '/_media/../library.db', '/_saves/Game/file1.rpgsave', '/Game/../_saves/Game/file1.rpgsave', '/_saves/Game/shot.png', '/Game/../_saves/Game/shot.png', '/_media/../_saves/Game/shot.png']) {
+    const res = await raw(p);
+    assert.ok(!res.body.toString('latin1').includes('SQLite format 3'), `${p}: база`);
+    assert.ok(!res.body.toString().includes('SAVE-SECRET'), `${p}: сейв`);
+    assert.ok(!res.body.equals(PNG), `${p}: снимок сейва`);
+    assert.ok([302, 403, 404].includes(res.status), `${p}: ${res.status}`);
+  }
+});
+
+test('учётные записи включены в программе: выключатель true, а маршруты /users отвечают владельцу', async (t) => {
+  const games = tempLibrary(t);
+  giveToPlainUser(games);
+  assert.strictEqual(require('./src/utils/access.js').flags.accountsOn, true);
+  const server = await startRealServer(t, games);
+  assert.strictEqual((await postJson(`${server.url}/api/setup/init`, { username: 'owner', password: 'old-pass-1' })).status, 200);
+  const owner = sessionCookie(await postJson(`${server.url}/api/login`, { username: 'owner', password: 'old-pass-1' }));
+  const list = await nativeFetch(`${server.url}/api/users`, { headers: { Cookie: owner } });
+  assert.strictEqual(list.status, 200);
+  assert.deepStrictEqual((await list.json()).map((u) => [u.id, u.name, u.role, u.state]), [['owner', 'owner', 'owner', '']], 'людей нет — в списке один главный администратор');
+});
+
+test('игры на адресе библиотеки (GAME_ISOLATION=off): человеку страница называет его (who), владельцу нет', async (t) => {
+  const fs = require('fs');
+  const path = require('path');
+  const games = tempLibrary(t);
+  fs.mkdirSync(path.join(games, 'Game', 'www'), { recursive: true });
+  fs.writeFileSync(path.join(games, 'Game', 'www', 'index.html'), '<!doctype html><title>Mine</title><body></body>');
+  giveToPlainUser(games);
+  const server = await startRealServer(t, games);
+  assert.strictEqual((await postJson(`${server.url}/api/setup/init`, { username: 'owner', password: 'old-pass-1' })).status, 200);
+  const owner = sessionCookie(await postJson(`${server.url}/api/login`, { username: 'owner', password: 'old-pass-1' }));
+  // Человека заводит владелец, как в программе; временный пароль меняют при первом входе — страница игры нужна после него
+  const made = await nativeFetch(`${server.url}/api/users`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: owner }, body: JSON.stringify({ name: 'Anna', password: 'temp-pass-1' }) });
+  assert.strictEqual(made.status, 200);
+  const { id } = await made.json();
+  const anna = sessionCookie(await postJson(`${server.url}/api/login`, { username: 'Anna', password: 'temp-pass-1' }));
+  assert.strictEqual((await nativeFetch(`${server.url}/api/account/password`, { method: 'POST', headers: { 'Content-Type': 'application/json', Cookie: anna }, body: JSON.stringify({ current: 'temp-pass-1', next: 'anna-pass-2' }) })).status, 200);
+  const configOf = async (cookie) => {
+    const html = await (await nativeFetch(`${server.url}/Game/www/index.html`, { headers: { Cookie: cookie } })).text();
+    return JSON.parse(/window\.__RPG=(\{.*?\})<\/script>/.exec(html)[1]);
+  };
+  assert.strictEqual((await configOf(anna)).who, id);
+  const ownerConfig = await configOf(owner);
+  assert.ok(!('who' in ownerConfig));
+  assert.strictEqual(ownerConfig.saves, '/api/saves');
+});
+
+// ============================================================================
+// Личное у людей (services/personal.js): таблицы user_*, наложение на список, запись, перенос при слиянии
+// ============================================================================
+async function withPersonalDb(t) {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec(`CREATE TABLE games (id TEXT PRIMARY KEY, rating INTEGER DEFAULT 0, lastPlayed INTEGER DEFAULT 0, status TEXT DEFAULT '', favorite INTEGER DEFAULT 0,
+    notes TEXT DEFAULT '', lists TEXT DEFAULT '[]', playtime INTEGER DEFAULT 0, progress TEXT DEFAULT '');
+    CREATE TABLE user_games (user_id TEXT NOT NULL, game_id TEXT NOT NULL, playtime INTEGER NOT NULL DEFAULT 0, lastPlayed INTEGER NOT NULL DEFAULT 0,
+      rating INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT '', favorite INTEGER NOT NULL DEFAULT 0, notes TEXT NOT NULL DEFAULT '',
+      lists TEXT NOT NULL DEFAULT '[]', progress TEXT NOT NULL DEFAULT '', at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, game_id));
+    CREATE TABLE user_gallery_favorites (user_id TEXT NOT NULL, game_id TEXT NOT NULL, file TEXT NOT NULL, PRIMARY KEY (user_id, game_id, file));
+    CREATE TABLE users (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '', games_limited INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE user_game_access (user_id TEXT NOT NULL, game_id TEXT NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, game_id));
+    CREATE TABLE user_requests (user_id TEXT NOT NULL, key TEXT NOT NULL, game_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, key));
+    CREATE TABLE play_days (user_id TEXT NOT NULL, game_id TEXT NOT NULL, day TEXT NOT NULL, seconds INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, game_id, day));
+    INSERT INTO users (id) VALUES ('uanna'), ('uboris'), ('uvera');`);
+  const prev = dbService.db;
+  dbService.db = db;
+  t.after(async () => { dbService.db = prev; await db.close(); });
+  return db;
+}
+
+test('личное: владельцу — те же объекты и тот же UPDATE games; человеку — его строка, пустые значения без неё, чужой shelfMatch убран', async (t) => {
+  const db = await withPersonalDb(t);
+  const personal = require('./src/services/personal.js');
+  const owner = { id: 'owner', isOwner: true };
+  const anna = { id: 'uanna', isOwner: false };
+  const boris = { id: 'uboris', isOwner: false };
+  await db.run("INSERT INTO games (id, rating, notes, lists, playtime) VALUES ('A', 5, 'owner note', '[\"X\"]', 600), ('B', 0, '', '[]', 0)");
+
+  const games = [{ id: 'A', rating: 5, notes: 'owner note', lists: ['X'], playtime: 600, status: 'done', favorite: true, lastPlayed: 9, progress: { p: 1 }, shelfMatch: { id: 'Z' }, title: 'A' }];
+  assert.strictEqual(await personal.overlay(games, owner), games, 'владельцу тот же список');
+  assert.strictEqual(await personal.overlay(games, undefined), games, 'без человека — как владельцу');
+
+  assert.strictEqual(await personal.write(anna, 'A', { rating: 2, notes: 'anna note', lists: '["Mine"]', favorite: 1 }), true);
+  const [shown] = await personal.overlay(games, anna);
+  assert.deepStrictEqual([shown.rating, shown.notes, shown.lists, shown.favorite, shown.status, shown.playtime, shown.lastPlayed, shown.progress, shown.shelfMatch, shown.title],
+    [2, 'anna note', ['Mine'], true, '', 0, 0, null, null, 'A']);
+  assert.deepStrictEqual((await personal.overlay(games, boris))[0].notes, '', 'у другого человека строки нет');
+  // Строки таблицы games (подбор) — теми же столбцами
+  const [raw] = await personal.overlay([{ id: 'A', rating: 5, notes: 'owner note', title: 'A' }], anna, { raw: true });
+  assert.deepStrictEqual([raw.rating, raw.notes, raw.lists, raw.favorite, raw.title], [2, 'anna note', '["Mine"]', 1, 'A']);
+  assert.deepStrictEqual(await db.get("SELECT rating, notes, lists, playtime FROM games WHERE id = 'A'"), { rating: 5, notes: 'owner note', lists: '["X"]', playtime: 600 }, 'строка владельца не тронута');
+
+  // Повторная запись меняет только названные поля; неизвестное имя поля в SQL не попадает
+  await personal.write(anna, 'A', { status: 'done', 'rating = 99, notes': 'x' });
+  const mine = await db.get("SELECT rating, status, notes FROM user_games WHERE user_id = 'uanna' AND game_id = 'A'");
+  assert.deepStrictEqual(mine, { rating: 2, status: 'done', notes: 'anna note' });
+  assert.strictEqual(await personal.write(anna, 'A', {}), false);
+  // Владелец: игра обновлена, чужая таблица пуста
+  assert.strictEqual(await personal.write(owner, 'B', { rating: 4, status: 'playing' }), false);
+  assert.deepStrictEqual(await db.get("SELECT rating, status FROM games WHERE id = 'B'"), { rating: 4, status: 'playing' });
+  assert.strictEqual((await db.get('SELECT COUNT(*) AS n FROM user_games')).n, 1);
+});
+
+test('личное: время и прогресс человека — в его user_games; первая запись не раньше минуты игры, время только вперёд, строка владельца не меняется', async (t) => {
+  const db = await withPersonalDb(t);
+  const { notePlaytime, updateProgress, gameHooks } = require('./src/utils/saveprogress.js');
+  const personStores = require('./src/utils/personStores.js');
+  const { redisClient } = require('./src/utils/cache.js');
+  t.mock.method(redisClient, 'del', async () => 1);
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'person-progress-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  // Папка сейвов человека — во временной: настоящий SAVES_DIR тест не трогает
+  t.mock.method(personStores, 'storesFor', () => ({ root: dir }));
+  await db.run("INSERT INTO games (id, playtime) VALUES ('G', 0)");
+  const anna = { id: 'u0123456789abcdef', isOwner: false };
+  const mine = () => db.get("SELECT playtime, progress FROM user_games WHERE user_id = ? AND game_id = 'G'", [anna.id]);
+  const owners = () => db.get("SELECT playtime, progress FROM games WHERE id = 'G'");
+
+  // Строки ещё нет: меньше минуты игры не пишем (как у владельца — его UPDATE на пустом времени ничего не меняет)
+  await notePlaytime('G', 59, anna);
+  assert.strictEqual(await mine(), undefined);
+  await notePlaytime('G', 60, anna);
+  assert.strictEqual((await mine()).playtime, 60);
+  await notePlaytime('G', 100, anna);
+  assert.strictEqual((await mine()).playtime, 60, 'меньше минуты сверх записанного — не пишем');
+  await notePlaytime('G', 30, anna);
+  assert.strictEqual((await mine()).playtime, 60, 'назад — нет');
+  await notePlaytime('G', 7200, anna);
+  assert.strictEqual((await mine()).playtime, 7200);
+  assert.deepStrictEqual(await owners(), { playtime: 0, progress: '' }, 'строка владельца не тронута');
+
+  // Сейв в папке человека: время берётся из него, а меньший сейв позже время не откатывает
+  const slot = (seconds) => JSON.stringify({ system: { _framesOnSave: seconds * 60 }, party: { _gold: 5 }, map: { _mapId: 0 }, actors: { _data: [] } });
+  await fsp.mkdir(path.join(dir, 'G'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'G', 'MZ_file1.json'), slot(9000));
+  await updateProgress('G', anna);
+  assert.strictEqual((await mine()).playtime, 9000);
+  assert.strictEqual(JSON.parse((await mine()).progress).playtime, 9000);
+  await fsp.writeFile(path.join(dir, 'G', 'MZ_file1.json'), slot(500));
+  await updateProgress('G', anna);
+  assert.strictEqual((await mine()).playtime, 9000, 'откатили сейв — время игры остаётся наибольшим');
+  assert.deepStrictEqual(await owners(), { playtime: 0, progress: '' }, 'и после сейва строка владельца не тронута');
+  // Папки нет — ничего не пишем и не падаем
+  await updateProgress('Нет такой', anna);
+  assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM user_games WHERE game_id = 'Нет такой'")).n, 0);
+
+  // Те же вызовы, что делает сервер игр после записи слота и момента: id человека доходит до его строки
+  await db.run('DELETE FROM user_games');
+  await fsp.writeFile(path.join(dir, 'G', 'MZ_file1.json'), slot(3000));
+  gameHooks.onSaved('G', 'MZ_file1', anna.id);
+  for (let i = 0; i < 40 && !(await mine()); i++) await new Promise((r) => setTimeout(r, 25));
+  assert.strictEqual((await mine())?.playtime, 3000);
+  gameHooks.onMarked('G', 6000, anna.id);
+  for (let i = 0; i < 40 && (await mine()).playtime !== 6000; i++) await new Promise((r) => setTimeout(r, 25));
+  assert.strictEqual((await mine()).playtime, 6000);
+  assert.deepStrictEqual(await owners(), { playtime: 0, progress: '' });
+});
+
+test('дни игры: прибавляется разница, меньшее и пустое не считается, владелец и человек отдельно, сбой таблицы не мешает времени', async (t) => {
+  const db = await withPersonalDb(t);
+  const { notePlaytime, updateProgress } = require('./src/utils/saveprogress.js');
+  const personStores = require('./src/utils/personStores.js');
+  const { redisClient } = require('./src/utils/cache.js');
+  t.mock.method(redisClient, 'del', async () => 1);
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'play-days-'));
+  t.after(() => fsp.rm(dir, { recursive: true, force: true }));
+  t.mock.method(personStores, 'storesFor', () => ({ root: dir }));
+  await db.run("INSERT INTO games (id, playtime) VALUES ('G', 1000)");
+  const anna = { id: 'uanna', isOwner: false };
+  const owner = { id: 'owner', isOwner: true };
+  const seconds = async (user) => (await db.all("SELECT seconds FROM play_days WHERE user_id = ? AND game_id = 'G'", [user])).reduce((sum, r) => sum + r.seconds, 0);
+
+  // Прежнее время не считается игрой сегодня, только то, что прибавилось
+  await notePlaytime('G', 1100, owner);
+  assert.strictEqual(await seconds('owner'), 100);
+  await notePlaytime('G', 1130, owner);
+  assert.strictEqual(await seconds('owner'), 100, 'меньше минуты сверх записанного время не менялось — и день тоже');
+  await notePlaytime('G', 500, owner);
+  await notePlaytime('G', undefined, owner);
+  assert.strictEqual(await seconds('owner'), 100, 'меньшее и пустое ничего не прибавляют');
+  await notePlaytime('G', 1200, owner);
+  assert.strictEqual(await seconds('owner'), 200, 'то, что не записали за прошлый раз, не теряется');
+  assert.strictEqual(await seconds('uanna'), 0);
+
+  await notePlaytime('G', 300, anna);
+  assert.strictEqual(await seconds('uanna'), 300);
+  assert.strictEqual(await seconds('owner'), 200);
+
+  // Сейв: тоже разница. Сейв и точка разом не считают один кусок дважды
+  const slot = (s) => JSON.stringify({ system: { _framesOnSave: s * 60 }, party: { _gold: 5 }, map: { _mapId: 0 }, actors: { _data: [] } });
+  await fsp.mkdir(path.join(dir, 'G'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'G', 'MZ_file1.json'), slot(1000));
+  await Promise.all([updateProgress('G', anna), notePlaytime('G', 1000, anna), notePlaytime('G', 900, anna)]);
+  assert.strictEqual(await seconds('uanna'), 1000);
+  await fsp.writeFile(path.join(dir, 'G', 'MZ_file1.json'), slot(50));
+  await updateProgress('G', anna);
+  assert.strictEqual(await seconds('uanna'), 1000, 'откатили сейв — ничего');
+
+  const now = new Date();
+  const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  assert.deepStrictEqual((await db.all('SELECT DISTINCT day FROM play_days')).map((r) => r.day), [today], 'день — по часам сервера');
+
+  // Несуществующая игра владельца: строки нет, день не появляется
+  await notePlaytime('Нет такой', 5000, owner);
+  assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM play_days WHERE game_id = 'Нет такой'")).n, 0);
+
+  // Игру загрузили заново к старым сейвам: 40 часов — не сегодняшний день, время при этом записано. Дальше считается как обычно
+  await db.run("INSERT INTO games (id, playtime) VALUES ('Old', 0)");
+  const oldDays = async (user) => (await db.all("SELECT seconds FROM play_days WHERE user_id = ? AND game_id = 'Old'", [user])).map((r) => r.seconds);
+  for (const who of [owner, anna]) {
+    await notePlaytime('Old', 40 * 3600, who);
+    assert.deepStrictEqual(await oldDays(who.id), []);
+    await notePlaytime('Old', 40 * 3600 + 120, who);
+    assert.deepStrictEqual(await oldDays(who.id), [120]);
+  }
+  assert.strictEqual((await db.get("SELECT playtime FROM games WHERE id = 'Old'")).playtime, 40 * 3600 + 120);
+  await fsp.mkdir(path.join(dir, 'Old'), { recursive: true });
+  await fsp.writeFile(path.join(dir, 'Old', 'MZ_file1.json'), slot(100 * 3600));
+  await updateProgress('Old', anna);
+  assert.deepStrictEqual(await oldDays('uanna'), [120], 'и через сейв');
+
+  t.mock.method(console, 'warn', () => {});
+  await db.exec('DROP TABLE play_days');
+  await notePlaytime('G', 9000, owner);
+  assert.strictEqual((await db.get("SELECT playtime FROM games WHERE id = 'G'")).playtime, 9000, 'время записано, ошибка наружу не вышла');
+});
+
+test('дни игры: при слиянии уезжают к оставшейся и складываются, и у владельца, и у человека', async (t) => {
+  const db = await withPersonalDb(t);
+  const personal = require('./src/services/personal.js');
+  await db.run(`INSERT INTO play_days VALUES ('owner', 'drop', '2026-11-01', 10), ('owner', 'keep', '2026-11-01', 5), ('uanna', 'drop', '2026-11-02', 7), ('uanna', 'other', '2026-11-02', 1)`);
+  await personal.carry('drop', 'keep');
+  assert.deepStrictEqual(await db.all('SELECT user_id, game_id, day, seconds FROM play_days ORDER BY user_id, game_id'), [
+    { user_id: 'owner', game_id: 'keep', day: '2026-11-01', seconds: 15 },
+    { user_id: 'uanna', game_id: 'keep', day: '2026-11-02', seconds: 7 },
+    { user_id: 'uanna', game_id: 'other', day: '2026-11-02', seconds: 1 },
+  ]);
+});
+
+test('дни игры: корзина держит их при игре, стирание навсегда убирает', async (t) => {
+  const { lib, trash, folder } = await libraryRig(t);
+  folder('Doomed', 'Doomed');
+  await lib.get().run("INSERT INTO games (id, title) VALUES ('Doomed', 'Doomed')");
+  await lib.get().run("INSERT INTO play_days VALUES ('owner', 'Doomed', '2026-11-01', 60), ('uanna', 'Doomed', '2026-11-01', 30), ('owner', 'Stays', '2026-11-01', 5)");
+  const left = async () => (await lib.get().all('SELECT game_id FROM play_days')).map((r) => r.game_id).sort();
+  const { key } = await trash.trashGame('Doomed');
+  assert.deepStrictEqual(await left(), ['Doomed', 'Doomed', 'Stays'], 'пока в корзине, игру можно вернуть');
+  await trash.remove(key);
+  assert.deepStrictEqual(await left(), ['Stays']);
+});
+
+test('личное: перенос при слиянии — у принимающей игры время складывается, подборки объединяются; progress только по просьбе; владельца не касается', async (t) => {
+  const db = await withPersonalDb(t);
+  const personal = require('./src/services/personal.js');
+  await db.run("INSERT INTO games (id, rating, notes) VALUES ('drop', 3, 'owner'), ('keep', 0, '')");
+  const put = (user, game, row) => db.run('INSERT INTO user_games (user_id, game_id, playtime, lastPlayed, rating, status, favorite, notes, lists, progress, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)',
+    [user, game, row.playtime || 0, row.lastPlayed || 0, row.rating || 0, row.status || '', row.favorite || 0, row.notes || '', row.lists || '[]', row.progress || '']);
+  await put('uanna', 'drop', { playtime: 100, lastPlayed: 5, rating: 4, notes: 'from drop', lists: '["A","B"]', progress: '{"map":1}' });
+  await put('uanna', 'keep', { playtime: 50, lastPlayed: 9, notes: 'kept', lists: '["B","C"]' });
+  await put('uboris', 'drop', { playtime: 30, status: 'done', favorite: 1, progress: '{"map":2}' });
+  await db.run("INSERT INTO user_gallery_favorites VALUES ('uanna', 'drop', 'a.png'), ('uanna', 'drop', 'b.png'), ('uanna', 'keep', 'b.png')");
+  await personal.carry('drop', 'keep');
+  assert.deepStrictEqual(await db.all("SELECT game_id, file FROM user_gallery_favorites ORDER BY game_id, file"),
+    [{ game_id: 'drop', file: 'b.png' }, { game_id: 'keep', file: 'a.png' }, { game_id: 'keep', file: 'b.png' }], 'избранные картинки человека переехали к keep, дубль остался');
+  const rows = await db.all("SELECT user_id, game_id, playtime, lastPlayed, rating, status, favorite, notes, lists, progress FROM user_games ORDER BY user_id, game_id");
+  assert.deepStrictEqual(rows, [
+    { user_id: 'uanna', game_id: 'drop', playtime: 0, lastPlayed: 5, rating: 4, status: '', favorite: 0, notes: 'from drop', lists: '["A","B"]', progress: '{"map":1}' },
+    { user_id: 'uanna', game_id: 'keep', playtime: 150, lastPlayed: 9, rating: 4, status: '', favorite: 0, notes: 'kept', lists: '["B","C","A"]', progress: '' },
+    { user_id: 'uboris', game_id: 'drop', playtime: 0, lastPlayed: 0, rating: 0, status: 'done', favorite: 1, notes: '', lists: '[]', progress: '{"map":2}' },
+    { user_id: 'uboris', game_id: 'keep', playtime: 30, lastPlayed: 0, rating: 0, status: 'done', favorite: 1, notes: '', lists: '[]', progress: '' },
+  ], 'у drop остаётся всё, кроме времени (оно у keep); progress не перенесён');
+  await put('uanna', 'drop2', { progress: '{"map":3}', playtime: 7 });
+  await put('uboris', 'drop2', { progress: '{"map":4}' });
+  await personal.carry('drop2', 'keep', { progress: new Set(['uanna']) });
+  assert.strictEqual((await db.get("SELECT progress FROM user_games WHERE user_id = 'uanna' AND game_id = 'keep'")).progress, '{"map":3}', 'Set с id: progress только тем, кто в нём');
+  assert.strictEqual((await db.get("SELECT progress FROM user_games WHERE user_id = 'uboris' AND game_id = 'keep'")).progress, '', 'остальным — нет');
+  await put('uanna', 'drop3', { progress: '{"map":9}' });
+  await personal.carry('drop3', 'keep', { progress: true });
+  assert.strictEqual((await db.get("SELECT progress FROM user_games WHERE user_id = 'uanna' AND game_id = 'keep'")).progress, '{"map":3}', 'свой progress у принимающей не затирается');
+  await personal.carry('keep', 'keep');
+  assert.strictEqual((await db.get("SELECT COUNT(*) AS n FROM user_games WHERE game_id = 'keep'")).n, 2, 'сама в себя — не трогает');
+  assert.deepStrictEqual(await db.get("SELECT rating, notes FROM games WHERE id = 'drop'"), { rating: 3, notes: 'owner' }, 'строки games перенос не касается');
+});
+
+test('личное: подбор человеку — его оценки и играно, настройки владельца пусты; владельцу всё как было', async (t) => {
+  noWarn(t);
+  const db = await withPersonalDb(t);
+  const rows = [recRow('Played', { tags: ['dungeon', 'horror'], developer: 'Moon Studio', ...recPlayed(10), rating: 5 }), recRow('Fresh', { tags: ['dungeon'] }), recRow('Shown', { tags: ['dungeon'] })];
+  const settings = { favorite_tags: ['romance'], known_langs: ['ru'], recommend_dismissed: ['Fresh'] };
+  const hidden = ['horror'];
+  const owner = recService({ rows, settings, hidden });
+  const person = { id: 'uvera', isOwner: false };
+
+  // Владелец: «не интересно» действует, играно учитывается
+  const ownerList = await owner.service.library({ now: recommendNow });
+  assert.deepStrictEqual(recIds(ownerList), ['Shown']);
+  assert.strictEqual(ownerList.cold, false);
+
+  // Человек без своих игр: вкус пустой, настройки владельца не его — «не интересно» владельца ему не прячет
+  const user = recService({ rows, settings, hidden });
+  const lib = await user.service.library({ person, now: recommendNow });
+  assert.deepStrictEqual(recIds(lib).sort(), ['Fresh', 'Played', 'Shown'], 'его оценок и времени нет, все три не начаты');
+  assert.strictEqual(lib.cold, true);
+  assert.deepStrictEqual(lib.resume, []);
+  assert.deepStrictEqual((await user.service.modes({ person })).taste, { stage: 'collection', games: 3 }, 'играно у него нет: игры есть, вкуса нет');
+
+  // Свои оценки человека вкус дают
+  await db.run("INSERT INTO user_games (user_id, game_id, playtime, lastPlayed, rating, status) VALUES ('uvera', 'Fresh', 7200, ?, 5, 'done')", [recommendNow - recommendDay]);
+  assert.strictEqual((await user.service.modes({ person })).taste.stage, 'known');
+});
+
+test('склейка и люди: сейвы друга решаются отдельно — у кого они только у копии, переезжают с личным; у кого у обеих — остаются; сейвы владельца стоят', async (t) => {
+  const { lib, put, savesDir, copies, fs } = await copiesRig(t);
+  const [A, B, C] = ['a', 'b', 'c'].map((c) => `u${c.repeat(16)}`);
+  const base = (uid, ...rest) => path.join(savesDir, '.people', uid, ...rest);
+  const friend = (uid, rel, text) => { fs.mkdirSync(path.dirname(base(uid, rel)), { recursive: true }); fs.writeFileSync(base(uid, rel), text); };
+  put('Moon v1', 'RPG%20File1.json', 'owner v1');
+  put('Moon v2', 'RPG%20File1.json', 'owner v2');
+  friend(A, 'Moon v1/RPG%20File1.json', 'a save');
+  friend(A, '.marks/Moon v1/m.json', 'a mark');
+  friend(B, 'Moon v1/RPG%20File1.json', 'b one');
+  friend(B, 'Moon v2/RPG%20File1.json', 'b two');
+  friend(C, 'Moon v2/RPG%20File1.json', 'c two');
+  const row = (uid, game, playtime, progress) => lib.get().run('INSERT INTO user_games (user_id, game_id, playtime, progress, at) VALUES (?, ?, ?, ?, 1)', [uid, game, playtime, progress]);
+  await row(A, 'Moon v1', 100, '{"a":1}');
+  await row(B, 'Moon v1', 40, '{"b":1}');
+
+  // Показ плана — по владельцу: сейвы друзей в него не входят
+  assert.strictEqual((await copies.plan('Moon v1', 'Moon v2')).plans['Moon v2'].saves, 'both');
+  const res = await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual(res.saves, 'both');
+
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v1', 'RPG%20File1.json'), 'utf8'), 'owner v1', 'сейвы владельца остались');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'owner v2');
+  assert.strictEqual(fs.readFileSync(base(A, 'Moon v2/RPG%20File1.json'), 'utf8'), 'a save', 'у A сейвы были только у копии — переехали');
+  assert.strictEqual(fs.readFileSync(base(A, '.marks/Moon v2/m.json'), 'utf8'), 'a mark');
+  assert.ok(!fs.existsSync(base(A, 'Moon v1')) && !fs.existsSync(base(A, '.marks/Moon v1')));
+  assert.strictEqual(fs.readFileSync(base(B, 'Moon v1/RPG%20File1.json'), 'utf8'), 'b one', 'у B сейвы у обеих — остались');
+  assert.strictEqual(fs.readFileSync(base(B, 'Moon v2/RPG%20File1.json'), 'utf8'), 'b two');
+  assert.strictEqual(fs.readFileSync(base(C, 'Moon v2/RPG%20File1.json'), 'utf8'), 'c two');
+  const mine = async (uid, game) => ({ ...await lib.get().get('SELECT playtime, progress FROM user_games WHERE user_id = ? AND game_id = ?', [uid, game]) });
+  assert.deepStrictEqual([await mine(A, 'Moon v2'), await mine(A, 'Moon v1')], [{ playtime: 100, progress: '{"a":1}' }, { playtime: 0, progress: '{"a":1}' }]);
+  assert.deepStrictEqual([await mine(B, 'Moon v2'), await mine(B, 'Moon v1')], [{ playtime: 40, progress: '' }, { playtime: 0, progress: '{"b":1}' }], 'время B у оставшейся, progress остался при сейвах');
+});
+
+test('имена: cleanName даёт NFC и обрезанные края, nameFits отвергает управляющие и невидимые форматирующие знаки, foldName сворачивает кириллицу', () => {
+  const { cleanName, nameFits, foldName, NAME_MAX } = require('./src/utils/account.js');
+  assert.strictEqual(cleanName('  И\u0306ван '), 'Йван');
+  assert.strictEqual(cleanName(null), '');
+  assert.strictEqual(cleanName({}), '');
+  for (const name of ['Анна', 'Anna', 'Ёж', 'A', '名前', 'x'.repeat(NAME_MAX)]) assert.strictEqual(nameFits(name), true, name);
+  const bad = ['', 'x'.repeat(NAME_MAX + 1), 'a\u0000b', 'a\u001fb', 'a\u007fb', 'a\u200bb', 'a\u200db', 'a\u200eb', '\u202eabc', 'a\u2066b', 'a\u00adb', '\ufeffabc'];
+  for (const name of bad) assert.strictEqual(nameFits(name), false, JSON.stringify(name));
+  assert.strictEqual(foldName('АННА'), foldName('анна'));
+  assert.strictEqual(foldName('Ёж'), foldName('ёЖ'));
+  assert.strictEqual(foldName('Й'), foldName('и\u0306'), 'без учёта способа записи');
+  assert.notStrictEqual(foldName('Анна'), foldName('Аннa'), 'латинская «a» — другая буква: подмену глазами здесь не ловим');
+});
+
+test('имена: findAccount — точное имя главнее, потом без учёта регистра, неоднозначное — отказ; nameTaken видит владельца, людей и удалённых', async (t) => {
+  const { findAccount, nameTaken } = require('./src/utils/account.js');
+  const db = await resetDb(t);
+  await db.exec("INSERT INTO users (id, name, pass_hash, must_change, created_at, state) VALUES ('u1', 'Олег', 'h1', 0, 1, ''), ('u2', 'олег', 'h2', 1, 2, ''), ('u3', 'Анна', 'h3', 0, 3, ''), ('u4', 'Борис', 'h4', 0, 4, 'removed')");
+  await db.run("UPDATE settings SET value = 'Хозяин' WHERE key = 'admin_user'");
+
+  const who = async (typed) => { const f = await findAccount(db, typed); return f?.owner ? 'owner' : f?.person?.id ?? null; };
+  assert.strictEqual(await who('Олег'), 'u1');
+  assert.strictEqual(await who('олег'), 'u2');
+  assert.strictEqual(await who('ОЛЕГ'), null, 'двое подходят — никто');
+  assert.strictEqual(await who(' Олег '), 'u1', 'края обрезаются');
+  assert.strictEqual(await who('аННА'), 'u3');
+  assert.strictEqual(await who('хозяин'), 'owner');
+  assert.strictEqual(await who('ХОЗЯИН '), 'owner');
+  assert.strictEqual(await who('Борис'), 'u4', 'удалённый находится: имя за ним, а вход скажет «закрыт»');
+  assert.strictEqual(await who('Nobody'), null);
+  assert.strictEqual(await who(undefined), null);
+  assert.strictEqual(await who({ $ne: '' }), null);
+  assert.strictEqual((await findAccount(db, 'анна')).person.state, '');
+
+  assert.deepStrictEqual(await nameTaken(db, 'АННА'), { by: 'person', id: 'u3', state: '' });
+  assert.strictEqual((await nameTaken(db, 'АННА', 'u3')), null, 'своё имя не занято');
+  assert.deepStrictEqual(await nameTaken(db, 'борис'), { by: 'person', id: 'u4', state: 'removed' });
+  assert.deepStrictEqual(await nameTaken(db, 'ХОЗЯИН'), { by: 'owner', id: 'owner', state: '' });
+  assert.strictEqual(await nameTaken(db, 'Хозяин', 'owner'), null, 'владелец — своё имя');
+  assert.strictEqual(await nameTaken(db, 'Новый'), null);
+});
+
+test('сброс пароля: удалённого нет в списке и целью не бывает, закрытый назван отдельно и остаётся закрытым', async (t) => {
+  const { resetPassword, accountNamed } = require('./src/utils/account.js');
+  const db = await resetDb(t);
+  await db.exec("INSERT INTO users (id, name, pass_hash, must_change, created_at, state) VALUES ('ua', 'Анна', 'ha', 0, 1, 'locked'), ('ub', 'Борис', 'hb', 0, 1, ''), ('uc', 'Вера', 'hc', 0, 1, 'removed')");
+  await assert.rejects(accountNamed(db, 'вера'), /no such account/, 'удалённый — как неизвестный');
+  assert.deepStrictEqual((await accountNamed(db, 'анна')).person, { id: 'ua', name: 'Анна', state: 'locked' });
+  assert.deepStrictEqual(await resetPassword(db, 'long-enough'), { login: 'owner', others: ['Анна', 'Борис'], locked: ['Анна'] });
+  assert.deepStrictEqual(await resetPassword(db, 'temp-1234', 'АННА'), { login: 'Анна', others: ['Борис'], locked: ['Анна'] });
+  assert.strictEqual((await db.get("SELECT state FROM users WHERE id = 'ua'")).state, 'locked', 'пароль сброшен, вход всё ещё закрыт');
+  assert.strictEqual((await db.get("SELECT state FROM users WHERE id = 'uc'")).state, 'removed');
+});
+
+test('отчёт о проблеме: имена людей рядом входят в список скрываемых', async (t) => {
+  const { knownNames } = require('./src/services/problemReport.js');
+  const db = await resetDb(t);
+  await db.exec("CREATE TABLE games (id TEXT, title TEXT); CREATE TABLE wishlist (ref TEXT, info TEXT)");
+  await db.exec("INSERT INTO users (id, name, pass_hash) VALUES ('ua', 'Анна-Мария', 'h'), ('ub', 'Boris K', 'h')");
+  const names = await knownNames(db);
+  for (const name of ['owner', 'Анна-Мария', 'Boris K']) assert.ok(names.includes(name), name);
+});
+
+test('telegram: отмеченные картинки галереи людей двигают отпечаток копии, пустая таблица — нет', async (t) => {
+  const { tg, db } = await telegramRig(t);
+  await db.run("INSERT INTO games (id, title, playtime) VALUES ('G', 'G', 10)");
+  const before = await tg.changeMark();
+  await db.exec('CREATE TABLE user_gallery_favorites (user_id TEXT, game_id TEXT, file TEXT, at INTEGER, PRIMARY KEY (user_id, game_id, file))');
+  assert.strictEqual(await tg.changeMark(), before, 'таблица пуста — отпечаток прежний');
+  await db.run("INSERT INTO user_gallery_favorites VALUES ('u0123456789abcdef', 'G', 'a.png', 1)");
+  const marked = await tg.changeMark();
+  assert.notStrictEqual(marked, before, 'отметка человека — повод для копии');
+  await db.run('DELETE FROM user_gallery_favorites');
+  assert.strictEqual(await tg.changeMark(), before);
+});
+
+test('склейка: картинки людей (.avatar.jpg) в _saves не мешают — файлы на месте, сейвы человека переезжают', async (t) => {
+  const { put, savesDir, copies, fs } = await copiesRig(t);
+  const uid = 'u0123456789abcdef';
+  put('Moon v1', 'RPG%20File1.json', 'сейв владельца');
+  fs.writeFileSync(path.join(savesDir, '.avatar.jpg'), 'owner avatar');
+  fs.mkdirSync(path.join(savesDir, '.people', uid, 'Moon v1'), { recursive: true });
+  fs.writeFileSync(path.join(savesDir, '.people', uid, '.avatar.jpg'), 'his avatar');
+  fs.writeFileSync(path.join(savesDir, '.people', uid, 'Moon v1', 'RPG%20File1.json'), 'его сейв');
+  await copies.plan('Moon v1', 'Moon v2');
+  await copies.merge('Moon v2', 'Moon v1');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, '.avatar.jpg'), 'utf8'), 'owner avatar');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, '.people', uid, '.avatar.jpg'), 'utf8'), 'his avatar');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'сейв владельца');
+  assert.strictEqual(fs.readFileSync(path.join(savesDir, '.people', uid, 'Moon v2', 'RPG%20File1.json'), 'utf8'), 'его сейв');
+});
+
+test('аватар: jpegSize читает кадр из заголовка и вне сканера, validJpeg принимает только настоящий JPEG разумного размера', () => {
+  const { jpegSize } = require('./src/utils/jpegSize.js');
+  const { validJpeg, MAX_BYTES } = require('./src/utils/avatars.js');
+  const jpeg = (w, h, pad = 0) => Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0xff, 0xc0, 0, 11, 8, h >> 8, h & 255, w >> 8, w & 255, 1, 1, 0x11, 0]), Buffer.alloc(pad), Buffer.from([0xff, 0xd9])]);
+  assert.deepStrictEqual(jpegSize(jpeg(300, 200)), { width: 300, height: 200 });
+  assert.deepStrictEqual(jpegSize(Buffer.from('not a jpeg at all')), { width: 0, height: 0 });
+  assert.strictEqual(validJpeg(jpeg(256, 256)), true);
+  assert.strictEqual(validJpeg(jpeg(512, 512)), true);
+  assert.strictEqual(validJpeg(jpeg(513, 10)), false);
+  assert.strictEqual(validJpeg(jpeg(10, 513)), false);
+  assert.strictEqual(validJpeg(jpeg(0, 0)), false);
+  assert.strictEqual(validJpeg(jpeg(256, 256, MAX_BYTES)), false, 'тяжелее лимита');
+  assert.strictEqual(validJpeg(Buffer.from('<svg/>')), false);
+  assert.strictEqual(validJpeg(null), false);
+  assert.strictEqual(validJpeg('ffd8ff'), false);
+});
+
+// ============================================================================
+// Доступ к играм по людям (services/gameAccess.js): кто что видит, кэши по набору игр, склейка, корзина, копия
+// ============================================================================
+async function accessDb(t) {
+  const { open } = require('sqlite');
+  const sqlite3 = require('sqlite3');
+  const db = await open({ filename: ':memory:', driver: sqlite3.Database });
+  await db.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, state TEXT NOT NULL DEFAULT '', games_limited INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE user_game_access (user_id TEXT NOT NULL, game_id TEXT NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, game_id));
+    CREATE TABLE user_requests (user_id TEXT NOT NULL, key TEXT NOT NULL, game_id TEXT NOT NULL DEFAULT '', PRIMARY KEY (user_id, key));
+    CREATE TABLE games (id TEXT PRIMARY KEY);
+    INSERT INTO games (id) VALUES ('X'), ('Y');`);
+  const prev = dbService.db;
+  dbService.db = db;
+  t.after(async () => { dbService.db = prev; await db.close(); });
+  return db;
+}
+
+test('доступ к играм: владелец и «все игры» — null, ограниченный — его Set, закрытый или пропавший — пустой; ответ помнится на человеке', async (t) => {
+  const db = await accessDb(t);
+  const gameAccess = require('./src/services/gameAccess.js');
+  await db.exec(`INSERT INTO users (id, games_limited) VALUES ('all', 0), ('few', 1), ('none', 1);
+    INSERT INTO users (id, state, games_limited) VALUES ('shut', 'locked', 0);
+    INSERT INTO user_game_access (user_id, game_id) VALUES ('few', 'A'), ('few', 'B'), ('all', 'A'), ('shut', 'A')`);
+  assert.strictEqual(await gameAccess.allowedIds({ id: 'owner', isOwner: true }), null);
+  assert.strictEqual(await gameAccess.allowedIds(undefined), null, 'без входа (тесты, службы) — как до людей');
+  assert.strictEqual(await gameAccess.allowedIds({ id: 'all' }), null, 'строки доступа у человека «все игры» ни на что не влияют');
+  assert.deepStrictEqual([...await gameAccess.allowedIds({ id: 'few' })].sort(), ['A', 'B']);
+  assert.deepStrictEqual([...await gameAccess.allowedIds({ id: 'none' })], [], 'ограничен и ничего не открыто — ничего');
+  assert.deepStrictEqual([...await gameAccess.allowedIds({ id: 'shut' })], [], 'вход закрыт — ключ файлов, выданный раньше, тоже не открывает');
+  assert.deepStrictEqual([...await gameAccess.allowedIds({ id: 'ghost' })], [], 'строки человека нет — не «все игры»: ошибка закрывает, а не открывает');
+  assert.strictEqual(await gameAccess.may({ id: 'few' }, 'A'), true);
+  assert.strictEqual(await gameAccess.may({ id: 'few' }, 'C'), false);
+  assert.strictEqual(await gameAccess.may({ id: 'all' }, 'C'), true);
+  // Внутри запроса помним, между запросами — нет: человек (объект) новый на каждый запрос
+  const person = { id: 'few' };
+  await gameAccess.allowedIds(person);
+  await db.run("DELETE FROM user_game_access WHERE user_id = 'few'");
+  assert.strictEqual((await gameAccess.allowedIds(person)).size, 2);
+  assert.strictEqual((await gameAccess.allowedIds({ id: 'few' })).size, 0, 'следующий запрос видит снятый доступ сразу, без кэша');
+
+  const only = gameAccess.only(new Set(['A']), [{ id: 'A' }, { id: 'B' }], (x) => x.id);
+  assert.deepStrictEqual(only, [{ id: 'A' }]);
+  const list = ['A', 'B'];
+  assert.strictEqual(gameAccess.only(null, list), list, 'все игры — тот же список, без копии');
+  assert.strictEqual(gameAccess.scopeKey(null), '');
+  assert.strictEqual(gameAccess.scopeKey(new Set(['B', 'A'])), gameAccess.scopeKey(new Set(['A', 'B'])), 'порядок не важен');
+  assert.notStrictEqual(gameAccess.scopeKey(new Set(['A', 'B'])), gameAccess.scopeKey(new Set(['A', 'C'])));
+
+  // Замена одним ходом: флаг и список; сбой посередине ничего не меняет
+  await gameAccess.replace('few', { limited: true, games: ['X', 'Y'] });
+  assert.deepStrictEqual([...await gameAccess.allowedIds({ id: 'few' })].sort(), ['X', 'Y']);
+  await gameAccess.replace('few', { limited: false, games: ['X'] });
+  assert.strictEqual(await gameAccess.allowedIds({ id: 'few' }), null);
+  assert.deepStrictEqual(await db.all("SELECT game_id FROM user_game_access WHERE user_id = 'few'"), [{ game_id: 'X' }], 'список хранится, пока флаг снят');
+  // Игра в корзине (строки в games нет) остаётся в списке человека, сколько бы раз его ни сохраняли без неё: возврат вернёт доступ
+  await db.run("INSERT INTO user_game_access (user_id, game_id) VALUES ('few', 'Trashed')");
+  await gameAccess.replace('few', { limited: true, games: ['Y'] });
+  assert.deepStrictEqual((await db.all("SELECT game_id FROM user_game_access WHERE user_id = 'few' ORDER BY 1")).map((r) => r.game_id), ['Trashed', 'Y'], 'X снят, Trashed не тронут');
+  await gameAccess.replace('few', { limited: true, games: [] });
+  assert.deepStrictEqual((await db.all("SELECT game_id FROM user_game_access WHERE user_id = 'few'")).map((r) => r.game_id), ['Trashed']);
+});
+
+test('доступ к играм: unmark убирает отметку game только у закрытых игр и не правит ответ службы, который лежит в кэше', () => {
+  const gameAccess = require('./src/services/gameAccess.js');
+  const cached = { items: [{ id: 1, game: { id: 'A', update: true } }, { id: 2, game: { id: 'B' } }, { id: 3, nested: [{ game: { id: 'B' } }] }, { id: 4, game: 'text' }] };
+  const frozen = JSON.stringify(cached);
+  const seen = gameAccess.unmark(new Set(['A']), cached);
+  assert.deepStrictEqual(seen.items, [{ id: 1, game: { id: 'A', update: true } }, { id: 2 }, { id: 3, nested: [{}] }, { id: 4, game: 'text' }]);
+  assert.strictEqual(JSON.stringify(cached), frozen, 'исходный ответ не изменён');
+  assert.strictEqual(gameAccess.unmark(null, cached), cached, 'все игры — ответ как есть');
+  assert.strictEqual(gameAccess.unmark(new Set(), null), null);
+});
+
+test('поиск по репликам: кэш ответа различает наборы игр, у которых совпали длина, первая и последняя', async (t) => {
+  const { GalleryService } = require('./src/services/gallery.js');
+  const { SceneLines } = require('./src/services/sceneLines.js');
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), 'rpg-lines-access-'));
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+  const media = path.join(root, '_media');
+  const gal = new GalleryService();
+  gal.setDependencies({ gamesDir: root, mediaDir: media });
+  gal.sceneLangs = async () => null;
+  const V = Number(fs.readFileSync(path.join(__dirname, 'src/services/gallery.js'), 'utf8').match(/const INDEX_VERSION = (\d+)/)[1]);
+  const KEY = 'events/00001/Bath';
+  for (const id of ['A', 'X', 'Y', 'Z']) {
+    await fsp.mkdir(path.join(media, id, 'scripts-1'), { recursive: true });
+    await fsp.writeFile(gal.indexPath(id), JSON.stringify({ v: V, builtAt: 1, scripts: 'scripts-1', screen: { w: 816, h: 624 }, counts: {}, albums: [{ key: KEY, kind: 'cg', files: ['img/pictures/a.png'], script: true }] }));
+    await fsp.writeFile(gal.scriptPath(id, 'scripts-1', KEY), JSON.stringify({ steps: [{ k: 'pic', i: 0 }, { k: 'say', l: [`Секретное слово в игре ${id}`] }], sounds: [] }));
+  }
+  const lines = new SceneLines();
+  lines.setDependencies({ gallery: gal, translate: { langOf: async () => '', lookup: async () => new Map() }, mediaDir: media });
+  t.after(() => lines.close());
+  for (const id of ['A', 'X', 'Y', 'Z']) assert.strictEqual(await lines.indexGame(id), true);
+  const found = async (ids) => (await lines.search('секретное', { ids, limit: 24 })).games.map((g) => g.id).sort();
+  assert.deepStrictEqual(await found(['A', 'X', 'Z']), ['A', 'X', 'Z']);
+  assert.deepStrictEqual(await found(['A', 'Y', 'Z']), ['A', 'Y', 'Z'], 'у второго человека тот же размер и те же края, а находки — его, не первого');
+  assert.deepStrictEqual(await found(['A', 'X', 'Z']), ['A', 'X', 'Z'], 'и обратно');
+});
+
+test('сцены библиотеки: список человека с ограниченным набором не вытесняет память остальных (evict: false)', async () => {
+  const { LibraryScenes } = require('./src/services/libraryScenes.js');
+  const scenes = new LibraryScenes();
+  scenes.setDependencies({ gallery: { cached: async () => null, tagsPath: () => '/nonexistent' } });
+  scenes.memo.set('A', { at: 1, rows: [], files: new Map(), frames: [] });
+  scenes.memo.set('B', { at: 1, rows: [], files: new Map(), frames: [] });
+  scenes.rowsOf = async () => [];
+  scenes.rowTags = async () => [];
+  await scenes.list(['A'], { evict: false });
+  assert.deepStrictEqual([...scenes.memo.keys()].sort(), ['A', 'B'], 'человеку — без вытеснения');
+  await scenes.list(['A']);
+  assert.deepStrictEqual([...scenes.memo.keys()], ['A'], 'владельцу — как раньше');
+});
+
+// Доступ при склейке копий, возврате из корзины и окончательном удалении
+async function grant(lib, uid, ...games) {
+  for (const g of games) await lib.get().run('INSERT OR IGNORE INTO user_game_access (user_id, game_id, at) VALUES (?, ?, 1)', [uid, g]);
+}
+
+const accessOf = async (lib, uid) => (await lib.get().all('SELECT game_id FROM user_game_access WHERE user_id = ? ORDER BY game_id', [uid])).map((r) => r.game_id);
+
+test('склейка и доступ: кому открыта уходящая копия, тому открывается и оставшаяся; строка уходящей остаётся; кому не открыто ни одной — не открывается', async (t) => {
+  const { lib, trash, copies } = await copiesRig(t);
+  await grant(lib, 'uonly1', 'Moon v1');
+  await grant(lib, 'uonly2', 'Moon v2');
+  await grant(lib, 'uboth', 'Moon v1', 'Moon v2');
+  await grant(lib, 'uother', 'Else');
+  const res = await copies.merge('Moon v2', 'Moon v1');
+  assert.deepStrictEqual(await accessOf(lib, 'uonly1'), ['Moon v1', 'Moon v2'], 'копию отдали — игра осталась доступной');
+  assert.deepStrictEqual(await accessOf(lib, 'uonly2'), ['Moon v2']);
+  assert.deepStrictEqual(await accessOf(lib, 'uboth'), ['Moon v1', 'Moon v2']);
+  assert.deepStrictEqual(await accessOf(lib, 'uother'), ['Else'], 'у кого нет ни одной из копий, ничего не появилось');
+  await trash.restore(res.trashKey);
+  assert.deepStrictEqual(await accessOf(lib, 'uonly1'), ['Moon v1', 'Moon v2'], 'копию вернули из корзины — доступ при ней');
+});
+
+test('склейка и доступ: сбой на COMMIT откатывает и доступ; перенос на место игры с полки (movePeople) несёт его так же', async (t) => {
+  const { createCopies } = require('./src/services/copies.js');
+  const { lib, root, savesDir, trash, copies } = await copiesRig(t);
+  await grant(lib, 'uonly1', 'Moon v1');
+  const failing = new Proxy(lib.get(), { get: (db, name) => (name === 'exec'
+    ? (sql) => (sql === 'COMMIT' ? Promise.reject(new Error('commit не удался')) : db.exec(sql))
+    : typeof db[name] === 'function' ? db[name].bind(db) : db[name]) });
+  await assert.rejects(createCopies({ db: () => failing, trash, savesDir, gamesDir: root }).merge('Moon v2', 'Moon v1'), /commit не удался/);
+  assert.deepStrictEqual(await accessOf(lib, 'uonly1'), ['Moon v1'], 'откат: у оставшейся доступа не появилось');
+  await copies.movePeople('Moon v1', 'Moon v2');
+  assert.deepStrictEqual(await accessOf(lib, 'uonly1'), ['Moon v1', 'Moon v2'], 'игра встала на место карточки с полки — доступ к карточке тот же');
+});
+
+test('корзина и доступ: возврат под тем же именем возвращает доступ; окончательное стирание — убирает, и новая игра с тем же именем не открывается сама', async (t) => {
+  const { lib, trash, folder, row } = await libraryRig(t);
+  folder('Moon v1', 'Moon');
+  folder('Moon v2', 'Moon');
+  await lib.syncDatabase();
+  await grant(lib, 'ulena', 'Moon v1', 'Moon v2');
+
+  const first = await trash.trashGame('Moon v1');
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), ['Moon v1', 'Moon v2'], 'игру удалили — доступ не стёрт');
+  await trash.restore(first.key);
+  assert.ok(await row('Moon v1'));
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), ['Moon v1', 'Moon v2'], 'вернули — доступ при ней');
+
+  // С полки карточка остаётся в библиотеке: доступ не стирается, даже когда файлы из корзины ушли насовсем
+  const shelf = await trash.shelveGame('Moon v2');
+  await trash.remove(shelf.key);
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), ['Moon v1', 'Moon v2'], 'карточка на месте — доступ тоже');
+
+  // Удалена и стёрта насовсем: срок вышел
+  const gone = await trash.trashGame('Moon v1', Date.now() - 40 * 86400e3);
+  const again = await trash.trashGame('Moon v2', Date.now());
+  assert.ok(again);
+  assert.strictEqual(await trash.purge(), 1, 'стёрта только просроченная');
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), ['Moon v2'], 'у стёртой доступа не осталось, у лежащей в корзине — остался');
+  assert.strictEqual((await trash.list()).some((e) => e.key === gone.key), false);
+
+  // Новая игра с тем же именем папки: без выдачи она никому не открыта
+  folder('Moon v1', 'Another Moon');
+  await lib.syncDatabase();
+  assert.ok(await row('Moon v1'));
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), ['Moon v2'], 'Moon v1 заново появилась, доступа к ней нет');
+  // «Стереть насовсем» кнопкой — то же самое
+  await trash.remove(again.key);
+  assert.deepStrictEqual(await accessOf(lib, 'ulena'), [], 'Moon v2 стёрта вручную');
+});
+
+test('telegram: отпечаток копии двигают ограниченные люди и их список; без них и без записей доступа — прежний до байта', async (t) => {
+  const crypto = require('crypto');
+  const { tg, db } = await telegramRig(t);
+  await db.run("INSERT INTO games (id, title, playtime) VALUES ('G', 'G', 10)");
+  const old = async () => {
+    const h = crypto.createHash('sha1');
+    h.update(JSON.stringify(await db.all('SELECT id, title, status, rating, link, my_version, meta_locked, lastPlayed, playtime FROM games ORDER BY id')));
+    h.update(JSON.stringify(await db.all('SELECT key FROM wishlist ORDER BY key')));
+    return h.digest('hex');
+  };
+  assert.strictEqual(await tg.changeMark(), await old(), 'таблиц доступа нет вовсе');
+  await db.exec(`CREATE TABLE users (id TEXT PRIMARY KEY, games_limited INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE user_game_access (user_id TEXT NOT NULL, game_id TEXT NOT NULL, at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (user_id, game_id))`);
+  await db.run("INSERT INTO users (id) VALUES ('u1')");
+  assert.strictEqual(await tg.changeMark(), await old(), 'таблицы есть, человек со всеми играми — отпечаток тот же');
+  const marks = [await tg.changeMark()];
+  await db.run("UPDATE users SET games_limited = 1 WHERE id = 'u1'");
+  marks.push(await tg.changeMark());
+  await db.run("INSERT INTO user_game_access VALUES ('u1', 'G', 1)");
+  marks.push(await tg.changeMark());
+  await db.run("DELETE FROM user_game_access WHERE user_id = 'u1'");
+  marks.push(await tg.changeMark());
+  assert.strictEqual(new Set(marks.slice(0, 3)).size, 3, 'ограничили, открыли игру — каждый раз новая копия');
+  assert.strictEqual(marks[3], marks[1], 'игру закрыли — человек ограничен без игр, как сразу после ограничения');
+  await db.run("UPDATE users SET games_limited = 0 WHERE id = 'u1'");
+  assert.strictEqual(await tg.changeMark(), await old(), 'снова все игры — отпечаток прежний');
+});
+
+test('доступ к играм: список человека (overlay) — только открытые ему, номер по видимым; сырые строки подбора — так же; «все игры» — без изменений', async (t) => {
+  const db = await withPersonalDb(t);
+  const personal = require('./src/services/personal.js');
+  await db.exec(`INSERT INTO users (id, games_limited) VALUES ('ulim', 1), ('uall', 0);
+    INSERT INTO user_game_access (user_id, game_id) VALUES ('ulim', 'B'), ('uall', 'B')`);
+  const games = ['A', 'B', 'C'].map((id, i) => ({ id, number: i + 1, rating: 0, notes: 'owner', lists: [], shelfMatch: null }));
+  const lim = await personal.overlay(games, { id: 'ulim' });
+  assert.deepStrictEqual(lim.map((g) => [g.id, g.number, g.notes]), [['B', 1, '']], 'видна одна, и она первая: по номерам размер библиотеки не угадать');
+  assert.deepStrictEqual((await personal.overlay(games, { id: 'uall' })).map((g) => [g.id, g.number]), [['A', 1], ['B', 2], ['C', 3]]);
+  assert.deepStrictEqual((await personal.overlay(games.map(({ id }) => ({ id })), { id: 'ulim' }, { raw: true })).map((g) => g.id), ['B'], 'строки games для подбора');
+  assert.deepStrictEqual(games.map((g) => g.number), [1, 2, 3], 'исходный список не тронут');
+});
+
+// --- Запросы игр: свои загрузки человека (routes/uploads.js) и его чат с ботом (services/telegram.js) ---
+test('загрузки человека: только свои, цели, режима и «всё равно» нет; номер владельца прежний; новая игра ему открывается', async (t) => {
+  const { UploadService } = require('./src/services/uploads.js');
+  const crypto = require('crypto');
+  const rig = await uploadRig(t);
+  const granted = [];
+  rig.svc.grant = async (user, game) => { granted.push([user, game]); };
+  const names = new Map();
+  const add = rig.svc.addGameToDB;
+  rig.svc.addGameToDB = async (folder, dest, opts) => { names.set(folder, opts.name); return add.call(rig.svc, folder, dest, opts); };
+  const data = Buffer.from('archive');
+  const file = { name: 'mine.zip', size: data.length, fingerprint: 'abc' };
+
+  // Номер загрузки владельца не изменился: тот же хэш, что и до людей
+  const ownerId = crypto.createHash('sha256').update(`mine.zip\n${data.length}\nabc`).digest('hex').slice(0, 32);
+  const owned = await rig.start(file);
+  assert.strictEqual(owned.body.id, ownerId);
+
+  const A = { id: 'uaaa', isOwner: false };
+  const B = { id: 'ubbb', isOwner: false };
+  rig.person = A;
+  const mine = await rig.start({ ...file, target: 'SomeGame', mode: 'patch', force: true });
+  assert.strictEqual(mine.status, 200, 'цель и режим отброшены: такой игры нет, а отказа не было');
+  const id = mine.body.id;
+  assert.strictEqual(id, UploadService.idFor(file.name, file.size, file.fingerprint, '', '', A.id));
+  assert.notStrictEqual(id, ownerId);
+  const meta = JSON.parse(await fsp.readFile(path.join(rig.dir, `${id}.json`), 'utf8'));
+  assert.deepStrictEqual([meta.by, meta.target, meta.mode, meta.force], [A.id, undefined, undefined, undefined]);
+  await rig.chunk(id, 0, data.subarray(0, 2));
+  assert.deepStrictEqual((await rig.call('GET', '/list')).body.map((x) => x.id), [id]);
+
+  rig.person = B;
+  const other = await rig.start(file);
+  assert.notStrictEqual(other.body.id, id, 'у двоих с одним файлом загрузки разные');
+  assert.deepStrictEqual((await rig.call('GET', '/list')).body, [], 'чужая не видна');
+  for (const [method, url, json] of [['GET', `/status?id=${id}`], ['POST', `/cancel?id=${id}`], ['POST', `/retry?id=${id}`], ['POST', `/password?id=${id}`, { password: 'x' }], ['GET', `/status?id=${'0'.repeat(32)}`]]) {
+    const res = await rig.call(method, url, json ? { json } : {});
+    assert.deepStrictEqual([res.status, res.body.reason], [404, 'upload-gone'], url);
+  }
+  const foreign = await rig.chunk(id, 2, data.subarray(2));
+  assert.deepStrictEqual([foreign.status, foreign.body.reason], [404, 'upload-gone']);
+  assert.strictEqual((await rig.call('GET', '/status?id=../../etc')).status, 400);
+  rig.person = undefined;
+  assert.ok((await rig.call('GET', '/list')).body.some((x) => x.id === id), 'владелец видит всё');
+  assert.strictEqual((await rig.call('GET', `/status?id=${id}`)).status, 200);
+
+  // Места нет: «всё равно» не предлагается
+  rig.person = A;
+  rig.free = 0;
+  const full = await rig.start({ name: 'big.zip', size: 5000, fingerprint: 'zzz', force: true });
+  assert.deepStrictEqual([full.status, full.body.reason, full.body.hard], [507, 'space', true]);
+  rig.free = 1e15;
+
+  // Имя занято: человеку об этом не говорим. Игра открыта ему и при обычном конце, и после перезапуска
+  await fsp.mkdir(path.join(rig.gamesDir, 'mine'));
+  assert.strictEqual((await rig.chunk(id, 2, data.subarray(2))).status, 200);
+  await rig.until(async () => (await rig.status(id)).state === 'done', 'распаковка');
+  const done = await rig.status(id);
+  assert.strictEqual(done.copy, false);
+  assert.match(done.folder, /^mine_[0-9a-f]{6}$/, 'хвост случайный: «mine_1» выдал бы занятое имя');
+  assert.strictEqual((await rig.call('GET', '/list')).body.find((x) => x.id === id)?.folder ?? done.folder, done.folder);
+  assert.deepStrictEqual(granted, [[A.id, done.folder]]);
+  const again = JSON.parse(await fsp.readFile(path.join(rig.dir, `${id}.json`), 'utf8'));
+  await rig.svc.writeMeta({ ...again, state: 'processing' });
+  await rig.svc.finalize(id);
+  assert.deepStrictEqual(granted, [[A.id, done.folder], [A.id, done.folder]], 'путь после перезапуска');
+  assert.strictEqual(names.get(done.folder), 'mine', 'в название случайный хвост не идёт');
+
+  // Загрузка владельца ничего никому не выдаёт
+  rig.person = undefined;
+  await rig.chunk(ownerId, 0, data);
+  await rig.until(async () => (await rig.status(ownerId)).state === 'done', 'распаковка');
+  assert.strictEqual(granted.length, 2);
+  assert.strictEqual((await rig.status(ownerId)).copy, true, 'владельцу правда как есть');
+});
+

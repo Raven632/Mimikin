@@ -1,0 +1,9 @@
+[
+  "long_hair", "short_hair", "twintails", "ponytail", "braid", "twin_braids", "blonde_hair", "black_hair", "brown_hair", "white_hair", "silver_hair", "red_hair", "blue_hair", "green_hair", "purple_hair", "hair_ribbon",
+  "dress", "white_dress", "kimono", "armor", "maid", "witch_hat", "school_uniform", "hat", "cape", "cloak", "hood", "scarf", "gloves", "boots", "skirt", "ribbon", "glasses", "crown", "tiara", "necklace", "robe",
+  "animal_ears", "cat_ears", "tail", "wings", "angel_wings", "horns", "pointy_ears", "elf", "dragon", "slime_(creature)", "ghost", "skeleton", "fairy", "mermaid", "vampire", "angel", "demon", "cat", "dog", "fox", "bird", "horse", "rabbit", "fish",
+  "castle", "forest", "tree", "flower", "field", "sky", "cloud", "starry_sky", "moon", "full_moon", "sun", "sunset", "ocean", "beach", "river", "lake", "waterfall", "mountain", "cave", "bridge", "city", "house", "church", "classroom", "library", "bedroom", "kitchen", "garden", "ruins", "tower", "lighthouse",
+  "rain", "snow", "wind", "fog", "night",
+  "smile", "sitting", "standing", "walking", "running", "sleeping", "flying", "jumping", "blush",
+  "sword", "shield", "staff", "holding_sword", "holding_staff", "book", "bag", "lantern", "candle", "key", "treasure_chest", "potion", "cup", "apple", "umbrella", "rose", "cherry_blossoms", "feathers", "leaf", "bed", "window", "door", "guitar", "piano"
+]

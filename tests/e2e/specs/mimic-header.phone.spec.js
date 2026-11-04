@@ -14,7 +14,8 @@ async function boot(page) {
   await page.goto('/');
   await expect(page.locator('.shelf-card').first()).toBeVisible();
   const now = await page.evaluate(() => Date.now());
-  await page.clock.pauseAt(new Date(now + 100));
+  // С запасом: пока команда дойдёт до страницы, часы идут, а назад pauseAt не умеет
+  await page.clock.pauseAt(new Date(now + 2000));
 }
 
 test.describe('мимик в шапке (телефон)', () => {
@@ -50,6 +51,6 @@ test.describe('мимик в шапке (телефон)', () => {
     expect(await mark(page).getAttribute('data-over')).toBe('p0');
     await page.clock.runFor(300);
     await page.clock.resume();
-    await expect(page.locator('.picker-content')).toBeVisible();
+    await expect(page.locator('.play-pick')).toBeVisible();
   });
 });

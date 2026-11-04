@@ -154,7 +154,7 @@ const PathPanel = ({ game, t, lang, shots, onPlay }) => {
                   <span className="path-ic"><Icon /></span>
                   {pic(e)}
                   <span className="path-txt">{text(e)}</span>
-                  {from && <button type="button" className="path-play" onClick={() => onPlay({ mark: from })}><IconPlay />{t.shots_play}</button>}
+                  {from && onPlay && <button type="button" className="path-play" onClick={() => onPlay({ mark: from })}><IconPlay />{t.shots_play}</button>}
                 </li>
               );
             })}

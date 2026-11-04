@@ -16,12 +16,23 @@ const MIN_AGE_MS = 2 * 60 * 1000;
 const DEPTH = 3;
 // Ключ подписан «mimikin-<id установки>»: при перенастройке убираем только свой прежний, не ключ соседней установки
 const COMMENT = 'mimikin';
+
+// ssh2 изредка (около 4 ключей из 1000) пишет ed25519-ключ, который сама же не читает: «Malformed OpenSSH private key».
+// С таким вход по ключу не работает никогда — берём другой
+function newKey(comment) {
+    for (let i = 0; i < 10; i++) {
+        const pair = utils.generateKeyPairSync('ed25519', { comment });
+        if (!(utils.parseKey(pair.private) instanceof Error)) return pair;
+    }
+    throw new Error('не вышло создать ключ SSH');
+}
 // Имя файла с сервера — только имя: «/», «\», «..» и NUL не выпустят запись за пределы «Входящих»
 const SAFE_NAME = (n) => !!n && !/[/\\\0]/.test(n) && n !== '..' && !n.startsWith('.');
 // Папка второй установки (services/relay.js): «.<имя>»
 const BOX_DIR = /^\.[a-z0-9_-]{1,32}$/;
 
-const fail = (message) => Object.assign(new Error(message), { seedbox: true });
+// reason и params — та же причина кодом: «Настройки» пишут её на языке человека (frontend apiError.js, passWhy)
+const fail = (message, reason = '', params = undefined) => Object.assign(new Error(message), { seedbox: true, reason, params });
 
 // Сохранённая настройка: JSON { host, port, user, folder, key, hostKey }
 function settings() {
@@ -37,17 +48,29 @@ const cleanFolder = (f) => String(f || '').trim().replace(/\\/g, '/').replace(/\
 const folderError = (f) => (!f ? 'Укажите папку на сервере' : f.startsWith('/') ? 'Папка — от домашней, без «/» в начале'
     : f.split('/').includes('..') ? 'В пути к папке не должно быть «..»' : '');
 
+// Одна неудача прохода для «Настроек»: text — на случай, если кода нет (ответ самого сервера SSH, он по-английски)
+const problemOf = (e) => ({ reason: e.reason || '', params: e.params, text: e.message });
+
 class SeedboxService {
     constructor() {
         this.dir = '';
         this.Client = Client;
-        this.state = { last: 0, error: '', current: null, pulled: 0 };
+        // waiting — архивы, которые ждут места на диске: имя → { need, free } (ход загрузки «Загрузить», services/myjd.js)
+        this.state = { last: 0, error: '', problems: [], current: null, pulled: 0, waiting: {} };
         this.pulling = null;
         this.kept = new Set(); // забрали, а удалить на сервере не вышло — второй раз не забираем
+        this.told = new Set(); // ждущие места, о которых уже написали в журнал: раз на файл, а не каждую минуту
+        this.uploads = null;
+        this.forced = async () => false;
+        this.waits = {};
     }
 
-    setDependencies({ dir }) {
+    // uploads — проверка места (room): архив, который не влезет вместе с игрой, не качаем, а ждём место — иначе он
+    // качался бы до конца диска каждую минуту. forced(name) — «Скачать всё равно» у его загрузки (services/myjd.js)
+    setDependencies({ dir, uploads = null, forced = null }) {
         this.dir = dir;
+        this.uploads = uploads;
+        if (forced) this.forced = forced;
     }
 
     // Вход: { password } или { privateKey }. Отпечаток сервера — sha256 его ключа; известен — сверяем
@@ -89,7 +112,7 @@ class SeedboxService {
         if (folderError(cfg.folder)) return { ok: false, message: folderError(cfg.folder) };
         // id установки — прежний, если уже настраивали: тогда заменится свой старый ключ
         const id = settings()?.id || crypto.randomBytes(4).toString('hex');
-        const { private: key, public: pub } = utils.generateKeyPairSync('ed25519', { comment: `${COMMENT}-${id}` });
+        const { private: key, public: pub } = newKey(`${COMMENT}-${id}`);
         let session;
         try {
             session = await this.connect(cfg, { password: o.password });
@@ -141,7 +164,7 @@ class SeedboxService {
             cur = cur ? `${cur}/${part}` : part;
             await call(sftp, 'mkdir', cur).catch(() => {});
         }
-        await call(sftp, 'stat', folder).catch(() => { throw fail(`Нет папки ${folder}`); });
+        await call(sftp, 'stat', folder).catch(() => { throw fail(`Нет папки ${folder}`, 'seedbox-no-folder', { folder }); });
     }
 
     // Один проход: готовые архивы — во «Входящие», с сервера — долой. Распакованное (папки игр) не трогаем
@@ -166,10 +189,14 @@ class SeedboxService {
             }
             // Один плохой архив (права, обрыв) не держит остальные: ошибку запоминаем, идём дальше
             const errors = [];
-            for (const f of files) await this.fetch(session.sftp, f).catch((e) => { errors.push(e.message); console.error('[Seedbox]', e.message); });
-            this.state.error = errors.join('; ');
+            this.waits = {};
+            for (const f of files) await this.fetch(session.sftp, f).catch((e) => { errors.push(e); if (!e.quiet) console.error('[Seedbox]', e.message); });
+            this.state.error = errors.map((e) => e.message).join('; ');
+            this.state.problems = errors.map(problemOf);
+            this.state.waiting = this.waits;
         } catch (e) {
             this.state.error = e.message;
+            this.state.problems = [problemOf(e)];
             console.error('[Seedbox]', e.message);
         } finally {
             session?.conn.end();
@@ -202,6 +229,15 @@ class SeedboxService {
         await fsp.mkdir(dir, { recursive: true });
         const dest = path.join(dir, path.basename(f.name.normalize('NFC')));
         if (await fsp.stat(dest).catch(() => null)) return; // такой уже ждёт во «Входящих» — не затираем
+        // Места нет — архив остаётся на сервере, следующий проход проверит снова
+        const name = f.name.normalize('NFC');
+        const room = this.uploads ? await this.uploads.room({ size: f.size, force: await this.forced(name), name }).catch(() => null) : null;
+        if (room && !room.ok) {
+            this.waits[name] = { need: room.need, free: room.free };
+            if (!this.told.has(f.remote)) { this.told.add(f.remote); console.warn(`[Seedbox] ${f.name}: ждёт места — ${room.text}`); }
+            throw Object.assign(fail(`Ждёт места: ${f.name} — ${room.text}`, 'pull-space', { name: f.name }), { quiet: true });
+        }
+        this.told.delete(f.remote);
         const tmp = path.join(dir, `.${path.basename(f.name)}.${crypto.randomBytes(4).toString('hex')}.seedbox`);
         this.state.current = { name: f.name.normalize('NFC'), got: 0, total: f.size };
         try {
@@ -209,7 +245,7 @@ class SeedboxService {
                 step: (got) => { if (this.state.current) this.state.current.got = got; },
             }, (e) => (e ? reject(e) : resolve())));
             const st = await fsp.stat(tmp);
-            if (st.size !== f.size) throw fail(`${f.name}: пришло ${st.size} байт из ${f.size}`);
+            if (st.size !== f.size) throw fail(`${f.name}: пришло ${st.size} байт из ${f.size}`, 'pull-short', { name: f.name, got: st.size, size: f.size });
             await fsp.rename(tmp, dest);
         } catch (e) {
             await fsp.rm(tmp, { force: true });
@@ -219,7 +255,7 @@ class SeedboxService {
         // Не удалился — помним до перезапуска, иначе после импорта он пришёл бы снова и встал в библиотеку второй раз
         await call(sftp, 'unlink', f.remote).catch((e) => {
             this.kept.add(`${f.remote}\n${f.size}`);
-            throw fail(`${f.name}: забран, но на сервере не удалён (${e.message}) — удалите его там сами`);
+            throw fail(`${f.name}: забран, но на сервере не удалён (${e.message}) — удалите его там сами`, 'seedbox-kept', { name: f.name });
         });
         console.log(`[Seedbox] ${f.name}: во «Входящих», ${Math.round(f.size / 1048576)} МБ`);
     }
@@ -251,3 +287,4 @@ const writeText = (sftp, file, text) => new Promise((resolve, reject) => {
 module.exports = new SeedboxService();
 module.exports.SeedboxService = SeedboxService;
 module.exports.cleanFolder = cleanFolder;
+module.exports.newKey = newKey;
