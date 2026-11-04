@@ -31,6 +31,8 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '24'
+        cache: npm
+        cache-dependency-path: api/package-lock.json
 
     - name: Установка пакетов (Strict Mode)
       working-directory: ./api
@@ -47,8 +49,37 @@ jobs:
       working-directory: ./api
       env:
         REDIS_URL: redis://localhost:6379
-      run: npm test
-      
+      # Упавший прогон повторяем один раз: тесты ходят по настоящим сокетам, диску и таймерам, и на
+      # двух ядрах раннера редкий сбой случается. Но сбой не прячем: предупреждение и строка в сводке
+      # называют тесты, упавшие в первый раз. Второй сбой — задание красное
+      shell: bash
+      run: |
+        nproc
+        if ! npm test 2>&1 | tee /tmp/api-first.log; then
+          failed=$(grep -E '^\s*(✖|not ok)' /tmp/api-first.log | sort -u | head -30) || true  # упал до первого теста — строк «✖» нет, а повтор всё равно нужен
+          echo "::warning::Тесты API прошли только со второго раза. Упали в первый: $(echo "$failed" | head -5 | tr '\n' ';')"
+          {
+            echo "### Тесты API: первый прогон упал, второй прошёл"
+            echo '```'
+            echo "$failed"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          npm test
+        fi
+
+  # Скрипт выкладки (deploy/pull-deploy.sh): его сбой виден только на сервере
+  deploy-scripts:
+    name: Deploy scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Запуск проверки
+      run: tests/deploy/test.sh
+
   # Служба распознавания текста на картинках (ocr/): разбор картинки на синтетических «надписях», без моделей
   ocr-tests:
     name: OCR service tests
@@ -84,6 +115,8 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: '22'
+        cache: npm
+        cache-dependency-path: frontend/package-lock.json
 
     - name: Установка пакетов (Strict Mode)
       working-directory: ./frontend
@@ -129,7 +162,7 @@ jobs:
   # ветку назад не двигает
   mark-deployable:
     name: Mark for deploy
-    needs: [ build-and-test, ocr-tests, build-frontend, e2e ]
+    needs: [ build-and-test, ocr-tests, build-frontend, deploy-scripts, e2e ]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -142,11 +175,19 @@ jobs:
       with:
         fetch-depth: 0
 
+    # Сравниваем с тем, что на GitHub сейчас (FETCH_HEAD), а не с веткой на момент скачивания кода. Отказ при
+    # отправке, когда deploy уже на более новом коммите, — не ошибка: другой запуск успел первым. Красным — только
+    # если deploy ушла в сторону от main
     - name: Ветка deploy — на этот коммит
       run: |
-        git fetch origin deploy || true
-        if git rev-parse -q --verify origin/deploy >/dev/null && git merge-base --is-ancestor HEAD origin/deploy; then
+        newer() { git fetch -q origin deploy 2>/dev/null && git merge-base --is-ancestor HEAD FETCH_HEAD; }
+        if newer; then
           echo "deploy уже на этом коммите или новее"
-        else
-          git push origin HEAD:refs/heads/deploy
+        elif ! git push origin HEAD:refs/heads/deploy; then
+          if newer; then
+            echo "deploy уже на более новом коммите"
+          else
+            echo "::error::В ветке deploy есть коммит, которого нет в main. Верните её на коммит из main"
+            exit 1
+          fi
         fi

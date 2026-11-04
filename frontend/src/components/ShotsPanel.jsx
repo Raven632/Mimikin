@@ -45,10 +45,12 @@ function whyTitle(m, t) {
   if (m.why === 'choice') return m.label ? `${t.shots_why.choice}: ${m.label}` : t.shots_why.choice;
   if (m.why === 'map') return `${t.shots_why.map}${m.map || m.label ? `: ${m.map || m.label}` : ''}`;
   if (m.why === 'back') return t.shots_why.back;
-  if (m.why === 'exit') return m.map ? `${t.shots_why.exit}: ${m.map}` : t.shots_why.exit;
+  // Посреди сцены — реплика, на которой вышли (как «Перед сценой: <реплика>»); на карте — сама карта
+  if (m.why === 'exit') return (m.mid && m.label) || m.map ? `${t.shots_why.exit}: ${(m.mid && m.label) || m.map}` : t.shots_why.exit;
   return m.label || m.map || t.shots_why.timer;
 }
 
+// onCover — обложка у игры одна на всех: ставит её владелец, у остальных людей кнопки нет
 const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
   const { items, failed, reload } = shots;
   const [filter, setFilter] = useState('all');
@@ -200,7 +202,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
             {day.items.map((m) => (
               <button key={m.id} type="button" className="shots-card" onClick={() => setView({ list: 'own', at: indexOf(m) })}>
                 {m.thumb || m.full ? <img src={api(game.id, `/${m.id}/${m.full ? 'shot' : 'thumb'}`)} alt="" loading="lazy" /> : <span className="shots-ph" />}
-                {m.save && <span className="shots-play-badge"><IconPlay />{t.shots_play}</span>}
+                {m.save && onPlay && <span className="shots-play-badge"><IconPlay />{t.shots_play}</span>}
                 <span className="shots-cap">
                   {m.label || m.map || '—'}
                   <MetaLine as="small" parts={[m.map && m.map !== m.label ? m.map : '', timeOf(m.at, lang)]} />
@@ -243,9 +245,9 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
                 t.shots_position(at + 1, list.length)]} />
             </div>
             <div className="shots-view-actions">
-              {current.save && <button type="button" className="save-btn" disabled={!!busy} onClick={() => play(current)}><IconPlay />{t.shots_play}</button>}
+              {current.save && onPlay && <button type="button" className="save-btn" disabled={!!busy} onClick={() => play(current)}><IconPlay />{t.shots_play}</button>}
               {current.kind === 'auto' && <button type="button" className="meta-status-btn" disabled={!!busy} onClick={() => keep(current)} data-tip={t.shots_keep_hint}><IconStarSolid />{t.shots_keep}</button>}
-              {(current.full || current.thumb) && current.kind !== 'auto' && (
+              {onCover && (current.full || current.thumb) && current.kind !== 'auto' && (
                 <button type="button" className="meta-status-btn" disabled={!!busy} onClick={() => cover(current)}><IconImage />{t.shots_cover}</button>
               )}
               {(current.full || current.thumb) && (

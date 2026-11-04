@@ -1,8 +1,13 @@
+import { HiddenTags } from './PictureTags';
 import { useEffect, useRef, useState } from 'react';
 import { useLayer } from '../layers';
 import { useClosing } from '../useClosing';
 import { confirmDialog } from '../confirm';
-import { errorText, httpError } from '../apiError';
+import { forgetFindAnswers } from '../findData';
+import { errorText, httpError, passWhy, reasonText, serverWords } from '../apiError';
+import AccountsPanel from './AccountsPanel';
+import ProfileEditor from './ProfileEditor';
+import { isOwner } from '../me';
 import TelegramPanel from './TelegramPanel';
 import { getCoverUrl } from '../coverUrl';
 import { timeAgo } from '../formatAgo';
@@ -15,10 +20,11 @@ import { saveFavoriteTags, useFavoriteTags } from '../favoriteTags';
 import { loadKnownLangs, saveKnownLangs, useKnownLangs } from '../knownLangs';
 import KnownLangsPicker from './KnownLangsPicker';
 import HelpTitle from './Help';
+import ServerJournal from './ServerJournal';
 
 const LANGS = [['ru', 'Русский'], ['en', 'English'], ['de', 'Deutsch']];
 const MIN_PASS = 4; // как проверяет сервер (api/src/routes/auth.js)
-const REPO = 'https://github.com/Raven632/rpg-library';
+const REPO = 'https://github.com/Raven632/Mimikin';
 
 async function post(url, body) {
   const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -74,6 +80,33 @@ const FavoriteTags = ({ t, showToast, tags: all }) => {
 };
 
 // Языки, которые я знаю: игры на них окно игры не предлагает переводить
+// «Не предлагать»: тост с отменой живёт секунды, поэтому вернуть скрытое можно и здесь. Нечего возвращать — раздела нет
+const DismissedPicks = ({ t, showToast }) => {
+  const [count, setCount] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    fetch('/api/recommend/dismissed').then((r) => (r.ok ? r.json() : null)).then((d) => { if (alive && d) setCount(d.count); }, () => {});
+    return () => { alive = false; };
+  }, []);
+  if (!count) return null;
+  const reset = async () => {
+    try {
+      const res = await fetch('/api/recommend/dismissed', { method: 'DELETE' });
+      if (!res.ok) throw await httpError(res);
+      setCount(0);
+      forgetFindAnswers();
+      showToast?.(t.pick_restored, 'success');
+    } catch (err) { showToast?.(errorText(t, err), 'error'); }
+  };
+  return (
+    <section className="set-section" data-section="dismissed-picks">
+      <HelpTitle t={t} title={t.pick_hidden_title} hint={t.pick_hidden_hint} />
+      <p className="set-hint">{t.pick_hidden_count(count)}</p>
+      <button type="button" className="meta-status-btn" onClick={reset}>{t.pick_restore}</button>
+    </section>
+  );
+};
+
 const KnownLangs = ({ t, showToast }) => {
   const langs = useKnownLangs();
   const [busy, setBusy] = useState(false);
@@ -96,7 +129,77 @@ const HideOnLeave = ({ t }) => {
   return <Toggle checked={on} onChange={(v) => { setHideOnLeave(v); setOn(v); }} label={t.set_hide_leave} hint={t.set_hide_leave_hint} />;
 };
 
-const GeneralTab = ({ t, lang, onLangChange, blurCovers, setBlurCovers, onShowKeys, showToast, tags }) => (
+// Разбор картинок для поиска и ленты (api/src/services/gallery.js, analysisStatus): что он делает, сколько стоит и где он
+// сейчас. Человек должен видеть это до того, как сервер скачает 740 МБ и займёт память. Состояние спрашиваем, только пока
+// оно может поменяться само; peek — без подготовки модели слов, которую окно поиска начинает при открытии
+const ANALYSIS_POLL = { downloading: 3000, analysing: 10000, waiting: 15000 };
+const readAnalysis = () => fetch('/api/pictures/status?peek=1').then((r) => (r.ok ? r.json() : null)).then((d) => d?.analysis || null);
+
+const PictureAnalysis = ({ t, lang, showToast }) => {
+  const [st, setSt] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const every = ANALYSIS_POLL[st?.state] || 0;
+  useEffect(() => {
+    let alive = true;
+    const load = () => readAnalysis().then((d) => { if (alive && d) setSt(d); }, () => {});
+    load();
+    const timer = every ? setInterval(load, every) : null;
+    return () => { alive = false; if (timer) clearInterval(timer); };
+  }, [every]);
+  if (!st) return null;
+  const S = t.set_pictures;
+  const toggle = async (on) => {
+    setBusy(true);
+    try {
+      await post('/api/settings/options', { name: 'picture_analysis', value: on });
+      const d = await readAnalysis();
+      if (d) setSt(d);
+    } catch (err) { showToast?.(errorText(t, err), 'error'); } finally { setBusy(false); }
+  };
+  // Значение на экране — всегда то, что ответил сервер: не сохранилось — остаётся прежнее
+  const setSpeed = async (speed) => {
+    if (busy || speed === st.speed) return;
+    setBusy(true);
+    try {
+      await post('/api/settings/options', { name: 'picture_speed', value: speed });
+      // Сохранилось, а статус не прочитался: на экране всё равно новое, иначе при «всё разобрано» (опроса нет) так и висело бы старое
+      const d = await readAnalysis().catch(() => null);
+      setSt((s) => d || { ...s, speed });
+    } catch (err) { showToast?.(errorText(t, err), 'error'); } finally { setBusy(false); }
+  };
+  const mb = (x) => Math.round(x / 1000000);
+  const line = {
+    off: st.small ? S.small : S.off,
+    waiting: S.waiting,
+    downloading: st.download ? S.downloading(mb(st.download.done), mb(st.download.total)) : S.starting,
+    analysing: st.frames?.total ? S.analysing(st.frames.done.toLocaleString(lang), st.frames.total.toLocaleString(lang)) : S.starting,
+    done: S.done,
+    failed: S.failed,
+    unavailable: S.unavailable,
+  }[st.state];
+  return (
+    <section className="set-section" data-section="picture-analysis">
+      {st.state === 'unavailable'
+        ? <HelpTitle t={t} title={S.title} hint={S.hint} />
+        : <Toggle checked={st.on} onChange={busy ? () => {} : toggle} label={S.title} hint={S.hint} />}
+      <p className={`set-status${st.state === 'done' ? ' ok' : ''}`} role="status">{line}</p>
+      {st.speed && (
+        <>
+          <div className="set-choice" role="radiogroup" aria-label={S.speed}>
+            {[['quiet', S.speed_quiet], ['fast', S.speed_fast]].map(([speed, label]) => (
+              <button key={speed} type="button" role="radio" aria-checked={st.speed === speed}
+                className={`set-choice-btn${st.speed === speed ? ' active' : ''}`} onClick={() => setSpeed(speed)}>{label}</button>
+            ))}
+          </div>
+          <p className="set-hint">{S.speed_hint}</p>
+        </>
+      )}
+    </section>
+  );
+};
+
+// Человеку (не владельцу) здесь доступен только язык: остальное — настройки библиотеки, и сервер их ему не отдаёт
+const GeneralTab = ({ t, lang, onLangChange, blurCovers, setBlurCovers, onShowKeys, showToast, owner, tags }) => (
   <>
     <section className="set-section">
       <h3 className="set-title">{t.set_lang}</h3>
@@ -107,25 +210,33 @@ const GeneralTab = ({ t, lang, onLangChange, blurCovers, setBlurCovers, onShowKe
         ))}
       </div>
     </section>
-    <section className="set-section">
-      <h3 className="set-title">{t.set_groups.covers}</h3>
-      <Toggle checked={blurCovers} onChange={setBlurCovers} label={t.set_covers} hint={t.set_covers_hint} />
-      <HideOnLeave t={t} />
-    </section>
-    <KnownLangs t={t} showToast={showToast} />
-    <FavoriteTags t={t} showToast={showToast} tags={tags} />
-    {onShowKeys && (
-      <section className="set-section keys-only-desktop">
-        <HelpTitle t={t} title={t.keys_title} hint={t.keys_hint} />
-        <button type="button" className="meta-status-btn" onClick={onShowKeys}>{t.keys_show}</button>
-      </section>
+    {owner && (
+      <>
+        <section className="set-section">
+          <h3 className="set-title">{t.set_groups.covers}</h3>
+          <Toggle checked={blurCovers} onChange={setBlurCovers} label={t.set_covers} hint={t.set_covers_hint} />
+          <HideOnLeave t={t} />
+        </section>
+        <KnownLangs t={t} showToast={showToast} />
+        <PictureAnalysis t={t} lang={lang} showToast={showToast} />
+        <HiddenTags t={t} Title={HelpTitle} />
+        <FavoriteTags t={t} showToast={showToast} tags={tags} />
+        <DismissedPicks t={t} showToast={showToast} />
+        {onShowKeys && (
+          <section className="set-section keys-only-desktop">
+            <HelpTitle t={t} title={t.keys_title} hint={t.keys_hint} />
+            <button type="button" className="meta-status-btn" onClick={onShowKeys}>{t.keys_show}</button>
+          </section>
+        )}
+      </>
     )}
   </>
 );
 
-// Смена пароля: прежний — чтобы с чужого открытого устройства пароль не сменили. После смены
-// другие устройства выходят, это — остаётся со входом (сервер ставит новую куку)
-const AccountTab = ({ t, onLogout, showToast }) => {
+// «Мой профиль» — у каждого, и у главного администратора тоже: аватар, имя (оно же логин), смена пароля, выход.
+// Пароль: прежний — чтобы с чужого открытого устройства пароль не сменили. После смены другие устройства выходят,
+// это — остаётся со входом (сервер ставит новую куку)
+const AccountTab = ({ t, onLogout, showToast, me, onMe }) => {
   const [current, setCurrent] = useState('');
   const [next, setNext] = useState('');
   const [next2, setNext2] = useState('');
@@ -152,10 +263,11 @@ const AccountTab = ({ t, onLogout, showToast }) => {
 
   return (
     <>
-      <form className="set-section set-form" onSubmit={submit} noValidate>
+      {me && <ProfileEditor t={t} person={me} self showToast={showToast} onChanged={onMe} />}
+      <form className="set-section set-form" onSubmit={submit} noValidate data-section="password">
         <h3 className="set-title">{t.set_pass_title}</h3>
         {/* Скрытое имя — менеджеру паролей, чтобы он обновил нужную запись */}
-        <input type="text" name="username" autoComplete="username" hidden readOnly />
+        <input type="text" name="username" autoComplete="username" hidden readOnly value={me?.name || ''} />
         <label className="auth-field">
           <span className="auth-label">{t.set_pass_current}</span>
           <input type="password" autoComplete="current-password" value={current} onChange={(e) => setCurrent(e.target.value)} aria-invalid={!!error} />
@@ -226,11 +338,11 @@ const RestoreSection = ({ t, onLibraryChanged }) => {
       <div className="auth-error" role="alert" aria-live="assertive">{error}</div>
       {result && (
         <div className="set-result" role="status">
-          {t.restore_done(result.games, result.saves)}
-          {result.missing.length > 0 && (
+          {t.restore_done(result.games, result.shelved.length, result.saves)}
+          {result.shelved.length > 0 && (
             <details>
-              <Summary>{t.restore_missing(result.missing.length)}</Summary>
-              {result.missing.join(', ')}
+              <Summary>{t.restore_shelved}</Summary>
+              {result.shelved.join(', ')}
             </details>
           )}
         </div>
@@ -257,7 +369,9 @@ const BackupTab = ({ t, onLibraryChanged, info, setInfo, showToast }) => (
 );
 
 // Корзина: удалённые игры 30 дней. Вернуть — со всеми данными; стереть — сразу и навсегда
-const TrashTab = ({ t, lang, onRestore, onCount }) => {
+// Файлы игры с полки (item.shelf): карточка — в библиотеке. Вернуть — игра снова на месте; стереть — карточка остаётся
+// на полке, и список игр об этом узнаёт сразу (onErased): «Вернуть» в её окне больше не предлагается
+const TrashTab = ({ t, lang, onRestore, onErased, onCount }) => {
   const [items, setItems] = useState(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -273,11 +387,11 @@ const TrashTab = ({ t, lang, onRestore, onCount }) => {
 
   const restore = async (item) => {
     setBusy(item.key);
-    if (await onRestore(item.key)) setItems((list) => list.filter((i) => i.key !== item.key));
+    if (await onRestore(item.key, item.shelf ? t.shelf_restored : undefined)) setItems((list) => list.filter((i) => i.key !== item.key));
     setBusy('');
   };
   const erase = async (item) => {
-    const text = item.vanished ? t.trash_erase_vanished_text : t.trash_erase_text;
+    const text = item.vanished ? t.trash_erase_vanished_text : item.shelf ? t.trash_erase_shelf_text : t.trash_erase_text;
     if (!(await confirmDialog({ title: t.trash_erase_q, name: item.title, cover: item.cover ? getCoverUrl(item, 360) : null, text, confirmLabel: t.trash_erase, danger: true }))) return;
     setBusy(item.key);
     try {
@@ -285,6 +399,7 @@ const TrashTab = ({ t, lang, onRestore, onCount }) => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw httpError(res, data);
       setItems((list) => list.filter((i) => i.key !== item.key));
+      if (item.shelf) onErased?.();
     } catch (e) {
       setError(errorText(t, e));
     } finally {
@@ -318,9 +433,10 @@ const TrashTab = ({ t, lang, onRestore, onCount }) => {
                   <span className="trash-name" data-tip={item.title}>{item.title}</span>
                   {/* Папку убрали мимо приложения — в корзине только запись: вернётся сама вместе с папкой */}
                   <span className="trash-meta">
-                    {item.vanished ? t.trash_meta_vanished(timeAgo(item.deletedAt, lang)) : t.trash_meta(timeAgo(item.deletedAt, lang))}
+                    {item.vanished ? t.trash_meta_vanished(timeAgo(item.deletedAt, lang)) : item.shelf ? t.trash_meta_shelf(timeAgo(item.deletedAt, lang)) : t.trash_meta(timeAgo(item.deletedAt, lang))}
                   </span>
                   {item.vanished && !item.taken && <span className="trash-meta">{t.trash_vanished_hint}</span>}
+                  {item.shelf && !item.taken && <span className="trash-meta">{t.trash_shelf_hint}</span>}
                 </div>
                 <span className="trash-size">{item.vanished ? '' : formatSize(item.size)}</span>
                 <span className="trash-days">
@@ -427,7 +543,7 @@ const SecretField = ({ t, name, info, setInfo, showToast, title, text, steps, ch
   );
 };
 
-// MyJDownloader для «Загрузить» в «Новинках» (api/src/services/myjd.js): почта, пароль, устройство и папка «Входящие»,
+// MyJDownloader для «Загрузить» в «Найти» (api/src/services/myjd.js): почта, пароль, устройство и папка «Входящие»,
 // как её видит сервер JDownloader. Хранится одним JSON; наружу — только «задан». При сохранении сервер входит и ищет
 // устройство. Своя форма, а не SecretField с parts: тот склеивает поля в «имя=значение; …», а в пароле может быть что угодно
 const MyJdField = ({ t, info, setInfo, showToast, linked = false, bare = false }) => {
@@ -506,7 +622,8 @@ const SeedboxField = ({ t, lang, info, setInfo, showToast, st, setSt, bare = fal
       setF((v) => ({ ...v, password: '' }));
       showToast(value ? L.saved : L.removed, 'success');
     } catch (err) {
-      setError(errorText(t, err, { byStatus: { 400: err?.reason === 'refused' ? err.message || L.refused : L.bad }, offline: t.srv_lost }));
+      // Подробности отказа сервер пишет только по-русски: сюда, к другим языкам, они не идут (по-русски errorText отдаст их сам)
+      setError(errorText(t, err, { byStatus: { 400: err?.reason === 'refused' ? L.refused : L.bad, 502: L.refused }, offline: t.srv_lost }));
     } finally {
       setBusy(false);
     }
@@ -535,10 +652,10 @@ const SeedboxField = ({ t, lang, info, setInfo, showToast, st, setSt, bare = fal
               <p className={`set-status${cur.set ? ' ok' : ''}`}>{cur.set && st?.set ? `${L.has(`${st.user}@${st.host}`, st.folder || '~')}` : L.none}</p>
               {cur.set && st?.set && (
                 <p className={`set-hint${st.error ? ' set-error' : ''}`}>
-                  {st.error ? L.last_error(st.error) : st.last ? L.last_ok(timeAgo(st.last, lang), st.pulled) : L.waiting}
+                  {st.error ? L.last_error(passWhy(t, st)) : st.last ? L.last_ok(timeAgo(st.last, lang), st.pulled) : L.waiting}
                 </p>
               )}
-              {field('host', 'text', { placeholder: 'wolf.usbx.me' })}
+              {field('host', 'text', { placeholder: 'seedbox.example.com' })}
               {field('port', 'text', { inputMode: 'numeric' })}
               {field('user')}
               {field('password', 'password', { placeholder: cur.set ? L.password_again : '' })}
@@ -768,7 +885,7 @@ const RelayField = ({ t, lang, showToast, st, setSt }) => {
           <p className="set-status ok">{L.linked_to(st.linked.url)}</p>
           {st.linked.folder && <p className="set-hint">{L.folder(st.linked.folder, st.linked.self)}</p>}
           {st.peer && <p className="set-hint">{L.peer_down}</p>}
-          {st.error ? <p className="set-hint set-error">{L.last_error(st.error)}</p> : st.last ? <p className="set-hint">{L.last_ok(timeAgo(st.last, lang), st.pulled)}</p> : null}
+          {st.error ? <p className="set-hint set-error">{L.last_error(passWhy(t, st))}</p> : st.last ? <p className="set-hint">{L.last_ok(timeAgo(st.last, lang), st.pulled)}</p> : null}
           <div className="set-row">
             <button type="button" className="meta-status-btn subtle" disabled={busy} onClick={() => act('pull')}>{L.pull}</button>
             <button type="button" className="meta-status-btn subtle" disabled={busy} onClick={unlink}>{L.unlink}</button>
@@ -788,7 +905,7 @@ const RelayField = ({ t, lang, showToast, st, setSt }) => {
           {o?.status === 'waiting' ? (
             <>
               <p className="set-status">{L.waiting(o.url, o.code)}</p>
-              {o.error && <p className="set-hint set-error">{o.error}</p>}
+              {o.error && <p className="set-hint set-error">{reasonText(t, o.problem) || serverWords(t, o.error)}</p>}
               <div className="set-row">
                 <button type="button" className="meta-status-btn subtle" disabled={busy} onClick={() => act('cancel')}>{L.cancel}</button>
               </div>
@@ -849,7 +966,7 @@ const JdBookmark = ({ t, info }) => {
   );
 };
 
-// «Загрузки»: «Загрузить» в «Новинках» (MyJDownloader) и забор скачанного с seedbox
+// «Загрузки»: «Загрузить» в «Найти» (MyJDownloader) и забор скачанного с seedbox
 const DownloadsTab = ({ t, lang, info, setInfo, showToast }) => {
   const [open, setOpen] = useState(null);
   const [box, setBox] = useState(null);
@@ -882,7 +999,8 @@ const DownloadsTab = ({ t, lang, info, setInfo, showToast }) => {
       </ServiceRow>
     </div>
     </section>
-    <JdBookmark t={t} info={info} />
+    {/* Закладке нужен тот же вход, что и JdLinkPanel, куда она ведёт */}
+    {info?.myjd?.set && <JdBookmark t={t} info={info} />}
     </>
   );
 };
@@ -900,7 +1018,7 @@ const TermsSection = ({ t }) => {
     return () => { alive = false; };
   }, []);
   if (!data) return null;
-  const current = lang || TL_LANGS.find((l) => data.games[l] > 0) || 'ru';
+  const current = lang || TL_LANGS.find((l) => data.games[l] > 0) || t.lang_id;
   const fromLibrary = data.terms.filter((r) => r[current].votes).length;
   return (
     <section className="set-section">
@@ -971,9 +1089,12 @@ const UpdateBlock = ({ t, lang, up, setUp }) => {
   const copy = () => navigator.clipboard?.writeText(command).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }, () => {});
   const when = up.checkedAt ? new Date(up.checkedAt).toLocaleString(lang, { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit' }) : '';
   if (!up.newer) {
+    // Закрытый репозиторий и «ещё нет выпусков» — не сбой: своя спокойная строка без «не удалось» (reason без error)
+    const said = reasonText(t, up);
+    const note = up.error ? U.failed(said || up.error) : said;
     return (
       <div className="set-row set-update-line">
-        <p className={`set-status${up.error ? '' : ' ok'}`}>{up.error ? U.failed(up.error) : `${U.latest}`}{when && <span className="set-hint">, {U.checked(when)}</span>}</p>
+        <p className={`set-status${note ? '' : ' ok'}`}>{note || U.latest}{when && <span className="set-hint">, {U.checked(when)}</span>}</p>
         <button type="button" className="meta-status-btn subtle" disabled={busy} onClick={check}>{busy ? t.svc_checking : U.check}</button>
       </div>
     );
@@ -1064,6 +1185,8 @@ const ServerFacts = ({ t }) => {
   const S = t.set_server;
   const rows = [
     ['GAME_PORT', d.gamePort, S.gamePort],
+    ['GAME_ORIGIN', d.gameOrigin || S.unset, S.gameOrigin],
+    ['TRUST_PROXY', d.trustProxy === false ? S.off : String(d.trustProxy), S.trustProxy],
     ['GAME_ISOLATION', d.isolation ? S.on : S.off, S.isolation],
     ['GAMES_DIR', d.gamesDir, S.gamesDir],
     ['INBOX_DIR', d.inboxDir, S.inboxDir],
@@ -1125,6 +1248,7 @@ const AboutTab = ({ t, lang, info, setInfo, showToast, up, setUp }) => {
         </ServiceRow>
       </div>
       <ServerFacts t={t} />
+      <ServerJournal t={t} lang={lang} showToast={showToast} />
     </>
   );
 };
@@ -1134,15 +1258,20 @@ const AboutTab = ({ t, lang, info, setInfo, showToast, up, setUp }) => {
 // и строки нет: «…» в оглавлении ничего не говорит. Тон: '' обычный, 'bad' ошибка, 'new' есть что открыть
 const SOURCE_KEYS = ['scraper'];
 const TL_KEYS = TL_SERVICES.map(([name]) => name);
-const stateLines = ({ t, lang, info, up, box, trash, backupAt }) => {
+const stateLines = ({ t, lang, info, up, box, trash, backupAt, people }) => {
   const S = t.set_state;
-  const count = (keys) => keys.filter((k) => info?.[k]?.set).length;
+  // Ничего не подключено — строки нет, а не «0 из 5»: всё работает и без этих служб, и заголовок группы говорит об этом один раз
+  const connected = (keys, line) => {
+    const n = keys.filter((k) => info?.[k]?.set).length;
+    return n ? [line(n, keys.length)] : undefined;
+  };
   const out = { general: [S.lang[lang]], account: [S.account] };
+  if (people > 0) out.people = [S.people(people)];
   if (info) {
-    out.sources = [S.sources(count(SOURCE_KEYS), SOURCE_KEYS.length)];
-    out.translate = [S.translate(count(TL_KEYS), TL_KEYS.length)];
-    out.downloads = box?.error ? [S.downloads_bad(t.set_secret.seedbox.title), 'bad'] : [S.downloads(count(['myjd', 'seedbox']), 2)];
-    out.notify = [info.telegram?.set ? S.notify_on : S.notify_off];
+    out.sources = connected(SOURCE_KEYS, S.sources);
+    out.translate = connected(TL_KEYS, S.translate);
+    out.downloads = box?.error ? [S.downloads_bad(t.set_secret.seedbox.title), 'bad'] : connected(['myjd', 'seedbox'], S.downloads);
+    if (info.telegram?.set) out.notify = [S.notify_on];
   }
   if (backupAt > 0) {
     const d = new Date(backupAt);
@@ -1159,8 +1288,10 @@ const stateLines = ({ t, lang, info, up, box, trash, backupAt }) => {
 // (копия, Telegram), язык в подвале меню, а ключ и пароль — только в .env на сервере.
 // Вкладки слева; на телефоне — окно на весь экран: вверху оглавление в две колонки (название и состояние), раздел
 // открывается под ним, а когда оглавление пролистано — оно сворачивается в строку с кнопкой «Разделы»
-const SettingsModal = ({ tab: initialTab = 'general', t, lang, onLangChange, blurCovers, setBlurCovers, socket, showToast, onLogout, onRestoreTrash, onLibraryChanged, onShowKeys, tags, onClose }) => {
-  const [tab, setTab] = useState(initialTab);
+const SettingsModal = ({ tab: initialTab = 'general', t, lang, onLangChange, blurCovers, setBlurCovers, socket, showToast, onLogout, onRestoreTrash, onLibraryChanged, onShowKeys, tags, me, onMe, onClose }) => {
+  // Владелец видит все разделы; остальные люди — язык и пароль (api/src/utils/access.js не отдаёт им остальное)
+  const owner = isOwner();
+  const [tab, setTab] = useState(owner || ['general', 'account'].includes(initialTab) ? initialTab : 'general');
   const [info, setInfo] = useState(null);
   // Токен бота сменили — панель Telegram перечитывает своё состояние
   const [tgRev, setTgRev] = useState(0);
@@ -1174,20 +1305,33 @@ const SettingsModal = ({ tab: initialTab = 'general', t, lang, onLangChange, blu
   const [box, setBox] = useState(null);
   const [trash, setTrash] = useState(null);
   const [backupAt, setBackupAt] = useState(0);
+  // Сколько людей в библиотеке (без удалённых, главный администратор в счёте) — строка под «Пользователями». Список меняют
+  // и другие устройства: событие people-changed
+  const [people, setPeople] = useState(0);
   useEffect(() => {
+    if (!owner) return undefined;
+    let alive = true;
+    const count = () => fetch('/api/users').then((r) => (r.ok ? r.json() : [])).then((d) => { if (alive && Array.isArray(d)) setPeople(d.filter((p) => p.state !== 'removed').length); }).catch(() => {});
+    count();
+    socket?.on('people-changed', count);
+    return () => { alive = false; socket?.off('people-changed', count); };
+  }, [owner, socket]);
+  useEffect(() => {
+    if (!owner) return undefined;
     let alive = true;
     fetch('/api/settings').then((r) => (r.ok ? r.json() : null)).then((d) => { if (alive && d) setInfo(d); }).catch(() => {});
     fetch('/api/settings/update').then((r) => (r.ok ? r.json() : null)).then((d) => { if (alive && d) setUp(d); }).catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [owner]);
   // Число игр в корзине (без подсчёта размеров — тот только во вкладке) и время последней копии (её сообщает Telegram):
   // без них строки под «Корзиной» и «Копиями» были бы пустыми, пока не зайдёшь во вкладку
   const tgSet = !!info?.telegram?.set;
   useEffect(() => {
+    if (!owner) return undefined;
     let alive = true;
     fetch('/api/games/trash?count=1').then((r) => (r.ok ? r.json() : null)).then((d) => { if (alive && typeof d?.count === 'number') setTrash((n) => n ?? d.count); }).catch(() => {});
     return () => { alive = false; };
-  }, []);
+  }, [owner]);
   useEffect(() => {
     if (!tgSet) return undefined;
     let alive = true;
@@ -1219,18 +1363,16 @@ const SettingsModal = ({ tab: initialTab = 'general', t, lang, onLangChange, blu
     contentRef.current?.scrollTo({ top: 0, behavior: calm ? 'auto' : 'smooth' });
   };
 
-  const tabs = [
-    ['general', t.set_tab_general],
-    ['account', t.set_tab_account],
-    ['sources', t.set_tab_sources],
-    ['translate', t.set_tab_translate],
-    ['downloads', t.set_tab_downloads],
-    ['notify', t.set_tab_notify],
-    ['backup', t.set_tab_backup],
-    ['trash', t.set_tab_trash],
-    ['about', t.set_tab_about],
-  ];
-  const lines = stateLines({ t, lang, info, up, box, trash, backupAt });
+  // Группы — чтобы новичок видел, что подключения можно не заполнять. У человека две вкладки, ему заголовки ни к чему. «О программе» — отдельно, без заголовка
+  const own = [['general', t.set_tab_general], ['account', t.set_tab_account]];
+  const groups = owner ? [
+    [t.set_tab_group.own, own],
+    [t.set_tab_group.library, [['people', t.set_tab_people], ['backup', t.set_tab_backup], ['trash', t.set_tab_trash]]],
+    [t.set_tab_group.links, [['sources', t.set_tab_sources], ['translate', t.set_tab_translate], ['downloads', t.set_tab_downloads], ['notify', t.set_tab_notify]]],
+    ['', [['about', t.set_tab_about]]],
+  ] : [['', own]];
+  const tabs = groups.flatMap(([, list]) => list);
+  const lines = stateLines({ t, lang, info, up, box, trash, backupAt, people });
   const here = lines[tab];
 
   return (
@@ -1253,37 +1395,49 @@ const SettingsModal = ({ tab: initialTab = 'general', t, lang, onLangChange, blu
         <div className="modal-actions-top"><button type="button" className="modal-close" aria-label={t.close} data-tip={t.close} onClick={close}><IconClose /></button></div>
         <h2 id="settings-title" className="stats-title settings-title">{t.settings}</h2>
         <div className="settings-body">
-          <nav ref={navRef} className="settings-tabs" role="tablist" aria-orientation="vertical">
-            {tabs.map(([key, label]) => {
-              const line = lines[key];
-              return (
-                <button key={key} type="button" role="tab" aria-selected={tab === key}
-                  className={`settings-tab${tab === key ? ' active' : ''}`} onClick={() => setTab(key)}>
-                  <span className="settings-tab-name">
-                    {label}
-                    {key === 'about' && up?.newer && <BrandMark size={16} className="settings-tab-new" />}
-                  </span>
-                  {line && <small className={`settings-tab-state${line[1] ? ` ${line[1]}` : ''}`}>{line[0]}</small>}
-                </button>
-              );
-            })}
+          {/* Заголовок внутри role=tablist недопустим: у каждой группы свой список вкладок, а заголовок его называет */}
+          <nav ref={navRef} className="settings-tabs">
+            {groups.map(([title, list], at) => (
+              <div key={at} className="settings-tab-group">
+                {title && <div className="settings-group-title" id={`set-group-${at}`}>{title}</div>}
+                <div className="settings-tab-list" role="tablist" aria-orientation="vertical" aria-labelledby={title ? `set-group-${at}` : undefined} aria-label={title ? undefined : t.settings}>
+                  {list.map(([key, label]) => {
+                    const line = lines[key];
+                    return (
+                      <button key={key} type="button" role="tab" aria-selected={tab === key}
+                        className={`settings-tab${tab === key ? ' active' : ''}`} onClick={() => setTab(key)}>
+                        <span className="settings-tab-name">
+                          {label}
+                          {key === 'about' && up?.newer && <BrandMark size={16} className="settings-tab-new" />}
+                        </span>
+                        {line && <small className={`settings-tab-state${line[1] ? ` ${line[1]}` : ''}`}>{line[0]}</small>}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </nav>
           <div className="settings-panel" role="tabpanel">
-            {tab === 'general' && <GeneralTab t={t} lang={lang} onLangChange={onLangChange} blurCovers={blurCovers} setBlurCovers={setBlurCovers} onShowKeys={onShowKeys} showToast={showToast} tags={tags} />}
-            {tab === 'account' && <AccountTab t={t} onLogout={onLogout} showToast={showToast} />}
+            {tab === 'general' && <GeneralTab t={t} lang={lang} onLangChange={onLangChange} blurCovers={blurCovers} setBlurCovers={setBlurCovers} onShowKeys={onShowKeys} showToast={showToast} owner={owner} tags={tags} />}
+            {tab === 'account' && <AccountTab t={t} onLogout={onLogout} showToast={showToast} me={me} onMe={onMe} />}
+            {tab === 'people' && owner && <AccountsPanel t={t} showToast={showToast} socket={socket} onMe={onMe} onChanged={onLibraryChanged} goProfile={() => setTab('account')} />}
             {tab === 'notify' && (
               <>
                 <TelegramPanel key={tgRev} t={t} lang={lang} socket={socket} showToast={showToast} onBackupAt={setBackupAt} />
                 <SecretField t={t} name="telegram" info={info} setInfo={setInfo} showToast={showToast} secretInput
                   title={t.set_secret.telegram.title} text={t.set_secret.telegram.text}
                   check={(v) => /^\d{5,15}:[A-Za-z0-9_-]{30,60}$/.test(v)} onSaved={() => setTgRev((n) => n + 1)} />
-                <section className="set-section">
-                  <OptionNumber t={t} info={info} setInfo={setInfo} showToast={showToast} name="disk_warn_gb" label={t.set_option.disk_warn_gb} hint={t.set_option.disk_warn_gb_hint} />
-                </section>
+                {/* Порог читает только бот (telegram.js): без него поле ничего не делает */}
+                {tgSet && (
+                  <section className="set-section">
+                    <OptionNumber t={t} info={info} setInfo={setInfo} showToast={showToast} name="disk_warn_gb" label={t.set_option.disk_warn_gb} hint={t.set_option.disk_warn_gb_hint} />
+                  </section>
+                )}
               </>
             )}
             {tab === 'backup' && <BackupTab t={t} onLibraryChanged={onLibraryChanged} info={info} setInfo={setInfo} showToast={showToast} />}
-            {tab === 'trash' && <TrashTab t={t} lang={lang} onRestore={onRestoreTrash} onCount={setTrash} />}
+            {tab === 'trash' && <TrashTab t={t} lang={lang} onRestore={onRestoreTrash} onErased={onLibraryChanged} onCount={setTrash} />}
             {tab === 'sources' && <SourcesTab t={t} lang={lang} info={info} setInfo={setInfo} showToast={showToast} />}
             {tab === 'translate' && <TranslateTab t={t} lang={lang} info={info} setInfo={setInfo} showToast={showToast} />}
             {tab === 'downloads' && <DownloadsTab t={t} lang={lang} info={info} setInfo={setInfo} showToast={showToast} />}

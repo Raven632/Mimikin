@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useLayer } from '../layers';
-import { writeSound, readSceneSound, readSceneLang, writeSceneLang, AUTO_PACES, readAutoPace, writeAutoPace } from '../galleryView';
+import { writeSound, readSceneSound, readSceneLang, writeSceneLang, AUTO_PACES, readAutoPace, writeAutoPace, readSceneWhole, writeSceneWhole } from '../galleryView';
+import { SeekLine } from './VideoSeek';
 import { languageTitle } from '../formatLanguage';
 import BarChoose from './BarChoose';
 import { IconClose, IconChevronLeft, IconChevronRight, IconPlay, IconPause, IconSound, IconMute, IconSkip } from './icons';
@@ -25,7 +26,31 @@ const VID_UNKNOWN = 8000; // мс ждать конец ролика, пока �
 const PRELOAD = 2;        // роликов, что подгружаем заранее: больше телефону не потянуть
 const SKIP_MS = 120;      // мс на реплику при пропуске: текст мелькает, как пропуск в игре
 const SKIP_SPEED = 8;     // во сколько раз быстрее паузы, анимации и переходы, пока идёт пропуск
+const PEEK_MS = 150;      // мс покоя пальца на полосе реплик, прежде чем просить картинку строки: склейка — работа сервера
 const isStop = (s) => s.k === 'say' || s.k === 'choice';
+// Номер реплики, с которой открыть: с текстом text — ближайшая к at с таким текстом (у выбора — варианты через перевод
+// строки, как в поиске по репликам); не нашлась — at, но не дальше последней
+const stopOf = (steps, at, text) => {
+  const stops = steps.filter(isStop);
+  if (text) {
+    let best = -1;
+    stops.forEach((s, i) => { if ((s.k === 'say' ? s.text : (s.o || []).join('\n')) === text && (best < 0 || Math.abs(i - at) < Math.abs(best - at))) best = i; });
+    if (best >= 0) return best;
+  }
+  return Math.max(0, Math.min(at, stops.length - 1));
+};
+// Остановка, на которой впервые виден кадр file (поиск по картинкам, «Сцена»); кадра в сцене нет — с начала
+const stopAtFile = (data, file) => {
+  const shown = data.steps.findIndex((s) => s.k === 'pic' && s.i >= 0 && data.files[s.i] === file);
+  if (shown < 0) return 0;
+  let n = 0;
+  for (let j = 0; j < data.steps.length; j++) {
+    if (!isStop(data.steps[j])) continue;
+    if (j >= shown) return n;
+    n++;
+  }
+  return Math.max(0, n - 1);
+};
 // Канал по кругу: музыка, фон, голос по кругу (стон, дыхание) — у голоса свой на каждый канал плагина
 const slotOf = (s) => (s.kind === 'vloop' ? `vloop${s.ch || 0}` : s.kind);
 const LOOPED = (s) => s.kind === 'bgm' || s.kind === 'bgs' || s.kind === 'vloop';
@@ -60,11 +85,42 @@ const alphaOk = () => alphaProbe || (alphaProbe = new Promise((done) => {
   v.play?.().catch(() => {});
 }));
 
+// Состояние экрана к реплике: шаги до to (сама реплика — to) свёрнуты без пауз — картинка, анимация, ролики, врезки,
+// затемнение, тон и звуки по кругу. seg — где начинается отрезок этой реплики: голос из него звучит вместе с ней, а разовая
+// анимация, начатая раньше, уже доиграла. Вспышки, тряска и одиночные звуки не повторяются — иначе наслоились бы
+const fold = (steps, to, seg) => {
+  const st = { pic: -1, box: undefined, anim: null, once: false, vids: [], ends: [], spine: new Map(), dark: null, tint: null, want: {}, voice: null };
+  // Слои роликов без повтора, конца которых игра дождалась (vwait): с keep стоят последним кадром, без keep уже погасли
+  let done = new Set();
+  for (let j = 0; j < to; j++) {
+    const s = steps[j];
+    if (s.k === 'pic') { st.pic = s.i < 0 ? -2 : s.i; st.box = s.box; st.anim = null; }
+    else if (s.k === 'spine' || s.k === 'l2d') { if (s.off) st.spine.delete(s.id); else st.spine.set(s.id, s); }
+    else if (s.k === 'anim') { st.anim = s; st.once = !s.loop && j < seg; }
+    else if (s.k === 'vid') {
+      const was = new Map(st.vids.map((v) => [v.s, v.f]));
+      done = new Set([...done].filter((slot) => s.v.some((v) => v.s === slot && v.f === was.get(slot))));
+      st.vids = s.v;
+    }
+    else if (s.k === 'vwait') { const v = st.vids.find((x) => x.s === s.s); if (v && !v.loop && !v.nx) done.add(s.s); }
+    else if (s.k === 'fx' && s.t === 'fade') st.dark = s.o ? s : null;
+    else if (s.k === 'snd' && LOOPED(s)) st.want[slotOf(s)] = s;
+    else if (s.k === 'snd' && s.kind === 'voice') st.voice = j >= seg ? s : null;
+    else if (s.k === 'stop' && s.kind === 'voice') { for (const kind of Object.keys(st.want)) if (kind.startsWith('vloop')) st.want[kind] = null; st.voice = null; }
+    else if (s.k === 'stop') st.want[s.kind] = null;
+    else if (s.k === 'fx' && s.t === 'tint') st.tint = s;
+  }
+  st.ends = st.vids.filter((v) => done.has(v.s) && v.keep).map((v) => v.s);
+  st.vids = st.vids.filter((v) => !done.has(v.s) || v.keep);
+  return st;
+};
+
 function createEngine(game, live, ui) {
   // anim — играющая анимация; cur и old — две картинки поверх неподвижной (old держит прежний кадр, пока он гаснет); loaded
   // и bad — кадры, что загрузились и что нет; flight — что грузится; res — кто ждёт кадр; pool — звуки кадров; regions — повторы
-  // цикла [откуда, докуда]; dark — экран затемнён
-  const e = { data: null, stops: [], cursor: 0, at: -1, gen: 0, timer: 0, loops: {}, want: {}, shots: new Set(), voice: null, meOn: false, picToken: 0, pending: null, shown: -1, pic: -1, fades: new Set(), fading: {}, asked: new Set(), queue: [], loading: 0,
+  // цикла [откуда, докуда]; dark — экран затемнён; quiet — переход на строку, пока тянут полосу (без звука и подгрузки вперёд);
+  // jump — на какую реплику перешли (полоса, «назад»): она встаёт целиком, без печати заново; peek — таймер покоя пальца
+  const e = { data: null, stops: [], cursor: 0, at: -1, gen: 0, timer: 0, quiet: false, jump: -1, peek: 0, loops: {}, want: {}, shots: new Set(), voice: null, meOn: false, picToken: 0, pending: null, shown: -1, pic: -1, fades: new Set(), fading: {}, asked: new Set(), queue: [], loading: 0,
     anim: null, animUp: false, animToken: 0, cur: null, old: null, loaded: new Set(), bad: new Set(), flight: new Set(), res: new Map(), pool: {}, regions: [], dark: false, darkStops: 0,
     // Ролики: vids — слой на место (slot → { el, v, of, ready, old }), vidList — что сейчас задано шагом vid, vidPend — кто ещё грузится,
     // vbad — ролики, что не открылись, pre — подгруженные заранее, vtoken — какое ожидание ролика сейчас, alpha — умеет ли браузер
@@ -258,7 +314,7 @@ function createEngine(game, live, ui) {
     const k = a.ok[p];
     put(a, k, a.at >= 0);
     a.at = p;
-    if (a.s.s && !live.still) for (const sd of a.s.s) if (sd.t >= a.cum[k] && sd.t < a.cum[k] + a.s.d[k]) chirp(sd);
+    if (a.s.s && !live.still && !a.last) for (const sd of a.s.s) if (sd.t >= a.cum[k] && sd.t < a.cum[k] + a.s.d[k]) chirp(sd);
     const last = p === a.ok.length - 1;
     // Один раз — последний кадр так и стоит; по кругу — с кадра r (разгон играет один раз)
     if (last && !a.s.loop) { a.next = -1; return; }
@@ -270,21 +326,23 @@ function createEngine(game, live, ui) {
     a.timer = 0;
     if (e.anim === a && !live.hidden) frame(a, a.next);
   };
-  const beginAnim = (s, key) => {
+  // last — разовая анимация, что к этой реплике уже доиграла (переход на строку): сразу последний кадр, без звуков кадров
+  const beginAnim = (s, key, last) => {
     const ok = s.f.map((f, k) => k).filter((k) => !e.bad.has(s.f[k]));
     // Ни один кадр не загрузился — остаётся картинка
     if (!ok.length || !e.cur) return;
     let t = 0;
-    const a = { s, key, ok, cum: s.d.map((d) => (t += d) - d), at: -1, next: -1, timer: 0 };
+    const a = { s, key, ok, cum: s.d.map((d) => (t += d) - d), at: -1, next: -1, timer: 0, last };
     e.anim = a;
     e.animUp = true;
     // «Меньше движения»: один кадр — первый кадр круга или последний у разового
-    frame(a, live.still ? (s.loop ? Math.max(0, ok.findIndex((q) => q >= (s.r || 0))) : ok.length - 1) : 0);
-    if (live.still) { clearTimeout(a.timer); a.timer = 0; a.next = -1; }
+    const one = live.still || last;
+    frame(a, one ? (s.loop ? Math.max(0, ok.findIndex((q) => q >= (s.r || 0))) : ok.length - 1) : 0);
+    if (one) { clearTimeout(a.timer); a.timer = 0; a.next = -1; }
     // Неподвижную картинку прячем, когда первый кадр уже нарисован
     Promise.resolve(e.cur.decode?.()).catch(() => {}).then(() => { if (e.anim === a) ui.anim(true); });
   };
-  const startAnim = (s) => {
+  const startAnim = (s, last = false) => {
     const key = JSON.stringify([s.f, s.d, s.loop, s.r, s.x]);
     if (s.loop && e.anim && e.anim.key === key) return;
     halt();
@@ -294,7 +352,7 @@ function createEngine(game, live, ui) {
     for (const i of need) e.asked.add(i);
     e.queue = [...need.filter((i) => !e.flight.has(i)), ...e.queue.filter((i) => !need.includes(i))];
     pump();
-    Promise.all(need.map(frameReady)).then(() => { if (token === e.animToken) beginAnim(s, key); });
+    Promise.all(need.map(frameReady)).then(() => { if (token === e.animToken) beginAnim(s, key, last); });
   };
   // --- Ролики. Слои <video> лежат в рамке экрана игры (e.box): положение и размер — в долях рамки, поэтому ролик и картинка
   // под ним сходятся при любом размере окна. Запускаются без звука и «внутри страницы» (iOS не открывает их на весь экран);
@@ -354,15 +412,16 @@ function createEngine(game, live, ui) {
     if (e.vids.get(L.v.s) !== L) return;
     if (L.v.nx) {
       const { nx, ...rest } = L.v;
-      const next = newLayer({ ...rest, f: nx.f, loop: nx.loop, x: nx.x, y: nx.y }, e.box);
+      const next = newLayer({ ...rest, f: nx.f, loop: nx.loop, x: nx.x, y: nx.y }, e.box, L);
       next.of = L.of;
-      next.old = L;
       e.vids.set(L.v.s, next);
       place(next);
       hear(next);
     } else if (!L.v.loop && !L.v.keep) L.el.style.visibility = 'hidden';
   };
-  const newLayer = (v, box) => {
+  // old — слой, который новый сменит на этом месте. Отдаём сразу, а не после: подгруженный заранее ролик бывает готов
+  // уже здесь, и прежний слой, приставленный потом, так и играл бы под новым
+  const newLayer = (v, box, old = null) => {
     const i = e.pre.findIndex((q) => q.f === v.f);
     const el = i >= 0 ? e.pre.splice(i, 1)[0].el : document.createElement('video');
     el.className = 'scene-vid';
@@ -374,22 +433,24 @@ function createEngine(game, live, ui) {
     el.preload = 'auto';
     el.loop = !!v.loop;
     el.style.visibility = 'hidden';
-    const L = { el, v, of: v.f, old: null, ready: null };
+    const L = { el, v, of: v.f, old, ready: null };
     L.ready = new Promise((done) => {
       let timer = 0;
       L.fin = () => { clearTimeout(timer); done(); };
-      if (e.vbad.has(v.f)) { done(); return; }
+      // Новый слой определился (есть кадр или ролик не открылся) — прежний на этом месте убираем, без чёрного кадра между ними
+      const drop = () => { if (L.old) { kill(L.old); L.old = null; } };
+      const failed = () => { e.vbad.add(v.f); el.style.display = 'none'; drop(); L.fin(); };
+      if (e.vbad.has(v.f)) { drop(); done(); return; }
       timer = setTimeout(L.fin, VID_LOAD);
-      // Новый слой встал — прежний на этом месте убираем, без чёрного кадра между ними. Подгруженный заранее мог получить
-      // кадр раньше: события «loadeddata» уже не будет
       const loaded = () => {
         el.style.visibility = '';
-        if (L.old) { kill(L.old); L.old = null; }
+        drop();
         if (L.v.pause) el.pause();
         L.fin();
       };
-      if (el.readyState >= 2) loaded(); else el.addEventListener('loadeddata', loaded, { once: true });
-      el.addEventListener('error', () => { e.vbad.add(v.f); el.style.display = 'none'; if (L.old) { kill(L.old); L.old = null; } L.fin(); }, { once: true });
+      // Подгруженный заранее мог получить кадр или ошибку раньше: событий «loadeddata» и «error» уже не будет
+      if (el.readyState >= 2) loaded(); else if (el.error) failed(); else el.addEventListener('loadeddata', loaded, { once: true });
+      el.addEventListener('error', failed, { once: true });
     });
     el.addEventListener('loadedmetadata', () => place(L));
     el.addEventListener('ended', () => ended(L));
@@ -411,9 +472,7 @@ function createEngine(game, live, ui) {
     list.forEach((v, k) => {
       let L = e.vids.get(v.s);
       if (!L || L.of !== v.f) {
-        const had = L;
-        L = newLayer(v, box);
-        L.old = had || null;
+        L = newLayer(v, box, L || null);
         e.vids.set(v.s, L);
         pend.push(L.ready);
       } else {
@@ -517,9 +576,10 @@ function createEngine(game, live, ui) {
         e.at = at;
         // Экран остался чёрным на много реплик подряд — возврат потерялся: светлеем сами
         if (e.dark && ++e.darkStops > DARK_STOPS) fade({ o: 0, n: 18 });
-        ahead();
+        // Полосу ещё тянут (quiet): вперёд не грузим — каждая склейка на сервере стоит сотни мс, а палец уйдёт дальше
+        if (!e.quiet) ahead();
         // Реплику читаем, когда картинка встала: язык могли сменить, пока она грузилась (retext), и старый текст не вернётся
-        settled().then(() => { if (gen === e.gen) { e.shown = at; ui.setLine(e.data.steps[at], e.stops.indexOf(at)); } });
+        settled().then(() => { if (gen === e.gen) { const no = e.stops.indexOf(at); e.shown = at; ui.setLine(e.data.steps[at], no, no === e.jump); } });
         return;
       }
       apply(s);
@@ -527,10 +587,11 @@ function createEngine(game, live, ui) {
     e.at = steps.length;
     settled().then(() => { if (gen === e.gen) ui.setEnd(); });
   };
-  const run = () => { e.shown = -1; ui.clear(); go(++e.gen); };
+  const run = (quiet = false) => { e.quiet = quiet; e.jump = -1; e.shown = -1; ui.clear(); go(++e.gen); };
 
   const api = {
-    start(data) {
+    // at0 — с какой реплики открыть (номер с нуля): поиск по репликам открывает плеер сразу на найденной строке
+    start(data, at0 = 0) {
       e.data = data;
       e.stops = data.steps.map((s, i) => (isStop(s) ? i : -1)).filter((i) => i >= 0);
       e.cursor = 0;
@@ -551,6 +612,7 @@ function createEngine(game, live, ui) {
       const open = [];
       data.steps.forEach((s, i) => { if (s.k === 'rep') { if (s.o) open.push(i); else if (open.length) e.regions.push([open.pop(), i]); } });
       animOff();
+      if (at0 > 0) { api.seek(at0); return; }
       ahead();
       run();
     },
@@ -597,51 +659,60 @@ function createEngine(game, live, ui) {
       if (e.at >= e.data.steps.length) return;
       run();
     },
-    // Назад: состояние перед предыдущей репликой собираем заново (картинка, музыка), дальше сцена идёт как обычно
+    // Назад — сразу на предыдущую реплику, тем же переходом, что и полоса: отрезок перед ней не проигрывается заново
+    // (паузы события, вспышки, звуки)
     prev() {
       if (!e.data) return;
-      const k = Math.max(0, (e.at >= e.data.steps.length ? e.stops.length : e.stops.indexOf(e.at)) - 1);
+      api.seek((e.at >= e.data.steps.length ? e.stops.length : e.stops.indexOf(e.at)) - 1);
+    },
+    // Переход на реплику k (с нуля): всё, что было к ней, — сразу и без пауз (fold), затем она сама и её голос. quiet —
+    // полосу ещё тянут: только картинка, тон и затемнение, без роликов, врезок, звука и подгрузки вперёд. Возвращает номер
+    seek(k, { quiet = false } = {}) {
+      clearTimeout(e.peek);
+      if (!e.data || !e.stops.length) return -1;
+      k = Math.max(0, Math.min(e.stops.length - 1, k));
       api.silence();
+      // Подгрузка для прежнего места уже не нужна: очередь заново, «спрошенными» остаются кадры, что есть или летят
+      e.queue = [];
+      e.asked = new Set([...e.loaded, ...e.bad, ...e.flight]);
+      const st = fold(e.data.steps, e.stops[k], k > 0 ? e.stops[k - 1] + 1 : 0);
       e.pic = -1;
-      e.want = {};
-      const from = k > 0 ? e.stops[k - 1] + 1 : 0;
-      let pic = -1;
-      let box;
-      let anim = null;
-      let dark = null;
-      let tint = null;
-      let vids = [];
-      const spine = new Map();
-      for (let j = 0; j < from; j++) {
-        const s = e.data.steps[j];
-        if (s.k === 'pic') { pic = s.i < 0 ? -2 : s.i; box = s.box; anim = null; }
-        else if (s.k === 'spine' || s.k === 'l2d') { if (s.off) spine.delete(s.id); else spine.set(s.id, s); }
-        else if (s.k === 'anim') anim = s;
-        else if (s.k === 'vid') vids = s.v;
-        else if (s.k === 'fx' && s.t === 'fade') dark = s.o ? s : null;
-        else if (s.k === 'snd' && LOOPED(s)) e.want[slotOf(s)] = s;
-        else if (s.k === 'stop' && s.kind === 'voice') { for (const kind of Object.keys(e.want)) if (kind.startsWith('vloop')) e.want[kind] = null; }
-        else if (s.k === 'stop') e.want[s.kind] = null;
-        else if (s.k === 'fx' && s.t === 'tint') tint = s;
+      e.want = st.want;
+      const anim = quiet ? null : st.anim;
+      if (st.pic >= 0) show(st.pic, st.box); else { e.pic = st.pic; ui.setPic(st.pic); if (!anim) animOff(); }
+      if (anim) startAnim(anim, st.once);
+      if (!quiet) {
+        // Врезки Spine и Live2D — какими были к этой реплике: прыжком, слой с тем же запуском играет дальше
+        const had = e.spine.size > 0;
+        e.spine = st.spine;
+        e.spinePend = had || st.spine.size ? ui.spine(new Map(st.spine), true) : null;
+        // Ролики — каким был список к этой реплике; начинаются с начала, а те, конца которых игра дождалась, стоят последним кадром
+        destroyVids();
+        if (st.vids.length) applyVids(st.vids);
+        for (const slot of st.ends) {
+          const L = e.vids.get(slot);
+          if (!L) continue;
+          L.v = { ...L.v, pause: true };
+          const end = () => { L.el.pause(); if (Number.isFinite(L.el.duration)) L.el.currentTime = L.el.duration; };
+          if (L.el.readyState >= 1) end(); else L.el.addEventListener('loadedmetadata', end, { once: true });
+        }
       }
-      if (pic >= 0) show(pic, box); else { e.pic = pic; ui.setPic(pic); if (!anim) animOff(); }
-      if (anim) startAnim(anim);
-      // Врезки Spine и Live2D — какими были к этой реплике: прыжком, слой с тем же запуском играет дальше
-      const had = e.spine.size > 0;
-      e.spine = spine;
-      e.spinePend = had || spine.size ? ui.spine(new Map(spine), true) : null;
-      // Ролики — каким был список к этой реплике; начинаются с начала
-      destroyVids();
-      if (vids.length) applyVids(vids);
-      // Затемнение — каким было к этой реплике, сразу, без перехода
-      e.dark = !!dark;
+      // Затемнение и тон экрана — какими стояли к этой реплике, сразу, без перехода
+      e.dark = !!st.dark;
       e.darkStops = 0;
-      ui.fade(dark ? { o: 1, c: dark.c, ms: 0 } : { o: 0, ms: 0 });
-      // Тон экрана — тот, что стоял к этой реплике, сразу, без перехода
-      ui.fx(tint ? { ...tint, n: 0 } : { k: 'fx', t: 'tint', c: [0, 0, 0, 0], n: 0 }, 1);
-      loopAll();
-      e.cursor = from;
-      run();
+      ui.fade(st.dark ? { o: 1, c: st.dark.c, ms: 0 } : { o: 0, ms: 0 });
+      ui.fx(st.tint ? { ...st.tint, n: 0 } : { k: 'fx', t: 'tint', c: [0, 0, 0, 0], n: 0 }, 1);
+      // Музыка с тем же файлом играет дальше с места (loop); голос этой реплики — с ней
+      if (!quiet) { loopAll(); if (st.voice) shot(st.voice); }
+      e.cursor = e.stops[k];
+      run(quiet);
+      if (!quiet) e.jump = k;
+      return k;
+    },
+    // Полосу тянут: переход без звука — когда палец постоит PEEK_MS на одной строке
+    peek(k) {
+      clearTimeout(e.peek);
+      e.peek = setTimeout(() => api.seek(k, { quiet: true }), PEEK_MS);
     },
     // Громкость и скрытие (H) поменялись: музыка играет или молчит, одиночные звуки при молчании обрываем
     refresh() {
@@ -674,6 +745,7 @@ function createEngine(game, live, ui) {
       halt();
     },
     dispose() {
+      clearTimeout(e.peek);
       e.gen++;
       e.dead = true;
       e.queue = [];
@@ -699,8 +771,12 @@ function createEngine(game, live, ui) {
 }
 
 // n — номер сцены у альбома со сценами-гостями (album.scenes); у остальных 0. title — название строки списка (вкладки
-// «Сцены» и «Диалоги»); onNext — «Смотреть подряд»: после конца сцены — следующая из списка, а не закрытие
-const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = false, onAuto = null, onNext = null, onClose }) => {
+// «Сцены» и «Диалоги»); onNext — «Смотреть подряд»: после конца сцены — следующая из списка, а не закрытие;
+// at0 — с какой реплики открыть (номер с нуля); fromText — её текст (поиск по репликам): если галерею с тех пор
+// пересобрали и номера сдвинулись, плеер встаёт на ближайшую реплику с этим текстом; lang0 — язык, на котором её нашли
+// (только на этот раз: выбор языка игры не запоминается); atFile — открыть там, где впервые виден этот кадр (поиск по
+// картинкам)
+const SceneView = ({ game, t, album, n = 0, at0 = 0, fromText = '', atFile = '', lang0 = '', title = '', speed, hidden, auto0 = false, onAuto = null, onNext = null, onClose }) => {
   const s = t.scene;
   const sceneUrl = (pick) => `/api/gallery/${encodeURIComponent(game.id)}/scene?key=${encodeURIComponent(album.key)}&n=${n}&ui=${encodeURIComponent(t.lang_id)}${pick ? `&lang=${encodeURIComponent(pick)}` : ''}`;
   const rootRef = useRef(null);
@@ -724,6 +800,10 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   const spineRef = useRef(null);
   const l2dRef = useRef(null);
   const [line, setLine] = useState(null);       // { step, no } — реплика или выбор на экране
+  const [pos, setPos] = useState(0);            // номер последней показанной реплики: полоса не прыгает в начало между репликами
+  // Полоса реплик: строка под пальцем, пока тянут (её текст сразу виден целиком); держится и после того, как отпустили, пока
+  // не встанет реплика перехода — рамка не мигает пустой, пока грузится картинка. null — не тянут
+  const [drag, setDrag] = useState(null);
   const [ended, setEnded] = useState(false);
   const [typed, setTyped] = useState(0);
   const [auto, setAuto] = useState(auto0);
@@ -734,6 +814,7 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   const [skipOn, setSkipOn] = useState(false);
   const skip = skipHeld || skipOn;
   const [noText, setNoText] = useState(false);
+  const [textWhole, setTextWhole] = useState(readSceneWhole); // «Текст сразу»: реплика без печати по буквам, одно нажатие — одна реплика
   const [sound, setSound] = useState(readSceneSound);
   const [langs, setLangs] = useState(null);     // варианты языка текста этой сцены (от двух) или null
   const [lang, setLang] = useState('');         // выбранный код (у оригинала — его настоящий код)
@@ -766,7 +847,14 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
     anim: setAnimOn,
     vidOn: setVidOn,
     fade: setDark,
-    setLine: (step, no) => { setEnded(false); setTyped(0); setLine({ step, no }); },
+    // jumped — перешли на эту реплику (полоса, «назад»): она уже прочитана, встаёт целиком
+    setLine: (step, no, jumped) => {
+      if (jumped) setDrag(null);
+      setEnded(false);
+      setTyped(jumped ? Infinity : 0);
+      setLine({ step, no });
+      setPos(no);
+    },
     setEnd: () => { setLine(null); setEnded(true); },
     clear: () => { setLine(null); setEnded(false); },
     fx: (s, speed) => {
@@ -780,11 +868,11 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   useEffect(() => {
     let alive = true;
     const my = ++asked.current;
-    fetch(sceneUrl(readSceneLang(game.id)))
+    fetch(sceneUrl(lang0 || readSceneLang(game.id)))
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (!alive) return;
-        if (d?.steps?.length) { setLangs(d.langs || null); setLang(d.lang || ''); setData(d); eng.start(d); } else setData(false);
+        if (d?.steps?.length) { setLangs(d.langs || null); setLang(d.lang || ''); setData(d); eng.start(d, atFile ? stopAtFile(d, atFile) : stopOf(d.steps, at0, fromText)); } else setData(false);
       }, () => { if (alive) setData(false); });
     return () => { alive = false; asked.current = my + 1; eng.dispose(); };
   }, [game.id, album.key, n]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -839,8 +927,8 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   };
 
   const text = line?.step.k === 'say' ? Array.from(line.step.text) : [];
-  // Реплика печатается; «меньше движения» и пропуск — сразу целиком
-  const whole = still || skip;
+  // Реплика печатается; «меньше движения», пропуск и «Текст сразу» — сразу целиком
+  const whole = still || skip || textWhole;
   const typing = text.length > 0 && !whole && typed < text.length;
   useEffect(() => {
     if (!line || line.step.k !== 'say' || still || !typing) return undefined;
@@ -861,10 +949,27 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   const next = () => {
     eng.resume();
     if (ended) { (onNext || onClose)(); return; }
+    // Полосу отпустили, а реплика перехода ещё не встала (ждёт картинку): на экране строка полосы целиком — дальше от неё.
+    // Сам drag тогда не сбросился бы: реплика после нажатия приходит уже не как переход (jumped)
+    if (drag !== null) { setDrag(null); eng.next(); return; }
     if (typing) { setTyped(text.length); return; }
     eng.next();
   };
   const prev = () => { eng.resume(); eng.prev(); };
+  // Полоса реплик. Тянут: текст строки под пальцем — сразу из шагов (без сети), картинка — через 150 мс покоя (каждая новая
+  // склейка — работа сервера, быстрый проход по сцене запустил бы десятки). Отпустили — переход со звуком и голосом строки
+  const stops = useMemo(() => (data ? data.steps.map((x, i) => (x.k === 'say' || x.k === 'choice' ? i : -1)).filter((i) => i >= 0) : []), [data]);
+  const scrub = (v) => {
+    const k = Math.round(v);
+    if (k === drag) return;
+    setDrag(k);
+    eng.peek(k);
+  };
+  const commit = (v) => {
+    const k = Math.round(v);
+    setDrag(k);
+    eng.seek(k);
+  };
   // Язык по кругу (L): по выбранному в списке, а не по пришедшему — быстрые нажатия идут друг за другом
   const nextLang = () => {
     const at = langs.findIndex((o) => o.code === lang);
@@ -875,7 +980,8 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   // выбирает сам. Пока идёт пропуск, листает он
   const waiting = !!line && !typing;
   useEffect(() => {
-    if (!auto || skip || !waiting) return undefined;
+    // Полосу тянут — стоит: реплика под пальцем ещё не выбрана
+    if (!auto || skip || !waiting || drag !== null) return undefined;
     const voice = eng.voice();
     if (voice && !voice.paused && !voice.ended) {
       let timer = 0;
@@ -887,7 +993,7 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
     const len = line.step.k === 'say' ? text.length : 20;
     const timer = setTimeout(() => eng.next(), (Math.max(1500, Math.min(9000, 1000 + len * 60)) * pace) / speed);
     return () => clearTimeout(timer);
-  }, [auto, skip, waiting, line, pace]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [auto, skip, waiting, line, pace, drag]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Пропуск: реплика сразу целиком и через такт (SKIP_MS) следующая; между репликами паузу события и конец ролика не ждём,
   // а картинку реплики — ждём: иначе реплики уходили бы невидимыми. На конце сцены встаёт: дальше — нажатием, как в «Авто».
@@ -895,7 +1001,7 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
   const lineRef = useRef(null);
   useEffect(() => { lineRef.current = line; }, [line]);
   useEffect(() => {
-    if (!skip || ended) return undefined;
+    if (!skip || ended || drag !== null) return undefined;
     // Ctrl — не жест для браузера: музыку и ролики, которые он не дал запустить, пробуем сейчас
     eng.resume();
     let seen = null;
@@ -905,9 +1011,10 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
       seen = l;
     }, SKIP_MS);
     return () => clearInterval(timer);
-  }, [skip, ended]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [skip, ended, drag]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Клавиши: пробел, Enter, → — дальше; ← — назад; A — авто, V — без текста, M — звук; Ctrl держать — пропуск (как в игре)
+  // Клавиши: пробел, Enter, → — дальше; ← и Backspace — назад (Backspace — как перемотка в игре); A — авто, V — без текста,
+  // M — звук; Ctrl держать — пропуск (как в игре)
   useEffect(() => {
     const onKey = (e) => {
       if (e.key === 'Control') { setSkipHeld(true); return; }
@@ -922,7 +1029,7 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
       // Буквы — по коду клавиши: на русской раскладке «A» приходит как «ф»
       const k = e.key.toLowerCase();
       if (k === ' ' || k === 'enter' || k === 'arrowright') { if (!e.repeat) next(); }
-      else if (k === 'arrowleft') prev();
+      else if (k === 'arrowleft' || k === 'backspace') prev();
       else if (e.code === 'KeyA') setAuto((v) => !v);
       else if (e.code === 'KeyV') setNoText((v) => !v);
       else if (e.code === 'KeyM') setSound((v) => { writeSound(!v); return !v; });
@@ -972,6 +1079,12 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
     return name + mark + part;
   };
   const firstPic = data ? data.steps.find((x) => x.k === 'pic' && x.i >= 0)?.i : undefined;
+  // Пока тянут полосу, в рамке — строка под пальцем, целиком; иначе — реплика двигателя, как печатается
+  const dragLine = drag !== null && stops[drag] !== undefined ? { step: data.steps[stops[drag]], no: drag } : null;
+  const shown = dragLine || line;
+  const shownText = dragLine ? (dragLine.step.k === 'say' ? Array.from(dragLine.step.text) : []) : text;
+  const cut = dragLine || whole ? shownText.length : typed;
+  const at = drag ?? (ended ? total - 1 : pos);
   return (
     <div ref={rootRef} className="scene" role="dialog" aria-modal="true" aria-label={title || album.scenes?.[n]?.t || s.title} tabIndex={-1} onClick={next}
       onPointerDown={(e) => { if (!e.ctrlKey) setSkipHeld(false); }}>
@@ -999,24 +1112,32 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
       {data === false && <p className="scene-note">{s.failed}</p>}
       {/* Рамка и панель — одним столбцом снизу: на телефоне панель в три ряда не закрывает реплику */}
       <div className="scene-ui">
-      {showText && line?.step.k === 'say' && (
+      {showText && shown?.step.k === 'say' && (
         <div className="scene-box" data-testid="scene-box">
-          {line.step.who && <div className="scene-who">{line.step.who}</div>}
-          <p className="scene-text" lang={textLang}>{text.slice(0, whole ? text.length : typed).join('')}<span className="scene-rest">{text.slice(whole ? text.length : typed).join('')}</span></p>
+          {shown.step.who && <div className="scene-who">{shown.step.who}</div>}
+          <p className="scene-text" lang={textLang}>{shownText.slice(0, cut).join('')}<span className="scene-rest">{shownText.slice(cut).join('')}</span></p>
         </div>
       )}
-      {showText && line?.step.k === 'choice' && (
+      {showText && shown?.step.k === 'choice' && (
         <div className="scene-box" data-testid="scene-box">
           <ul className="scene-choices" lang={textLang}>
-            {line.step.o.map((o, i) => <li key={i} className={i === line.step.i ? 'taken' : ''}>{o}</li>)}
+            {shown.step.o.map((o, i) => <li key={i} className={i === shown.step.i ? 'taken' : ''}>{o}</li>)}
           </ul>
         </div>
       )}
-      {showText && ended && <div className="scene-box"><p className="scene-text scene-end">{s.end}</p></div>}
+      {showText && ended && !dragLine && <div className="scene-box"><p className="scene-text scene-end">{s.end}</p></div>}
+      {/* Полоса реплик — своей строкой над панелью, шириной с рамку; номер строки и сколько их — по краям. Касание полосы
+          не листает сцену (корень листает по нажатию). У сцены из одной реплики полосы нет: идти некуда */}
+      {total >= 2 && (
+        <div className="scene-seek" onClick={(e) => e.stopPropagation()}>
+          <span className="seek-time cur">{at + 1}</span>
+          <SeekLine value={at} max={total - 1} step={1} label={s.seek} valueText={s.seek_at(at + 1, total)} onSeek={scrub} onCommit={commit} />
+          <span className="seek-time">{total}</span>
+        </div>
+      )}
       <div className="scene-bar" onClick={(e) => e.stopPropagation()}>
         <button type="button" className="gallery-play" onClick={tool(prev)} aria-label={s.prev} data-tip={s.prev}><IconChevronLeft /></button>
         <button type="button" className="gallery-play" onClick={tool(next)} aria-label={s.next} data-tip={s.next}><IconChevronRight /></button>
-        <span className="scene-pos">{line ? `${line.no + 1} / ${total}` : ended ? `${total} / ${total}` : ''}</span>
         <button type="button" className="gallery-play" aria-pressed={auto} onClick={tool(() => setAuto((v) => !v))} data-tip={s.auto_hint}>{auto ? <IconPause /> : <IconPlay />} {s.auto}</button>
         {/* Темп «Авто» — рядом с ним, пока оно включено: сколько времени дать на чтение реплики */}
         {auto && (
@@ -1025,6 +1146,7 @@ const SceneView = ({ game, t, album, n = 0, title = '', speed, hidden, auto0 = f
         )}
         <button type="button" className="gallery-play" aria-pressed={skip} onClick={tool(() => { if (skipOn) setTyped(Infinity); setSkipOn(!skipOn); })} data-tip={s.skip_hint}><IconSkip /> {s.skip}</button>
         <button type="button" className="gallery-play" aria-pressed={noText} onClick={tool(() => setNoText((v) => !v))}>{s.no_text}</button>
+        <button type="button" className="gallery-play" aria-pressed={textWhole} onClick={tool(() => { setTyped(Infinity); setTextWhole((v) => { writeSceneWhole(!v); return !v; }); })} data-tip={s.whole_hint}>{s.whole}</button>
         <button type="button" className="gallery-play" aria-pressed={sound} onClick={tool(() => setSound((v) => { writeSound(!v); return !v; }))} aria-label={sound ? s.sound_off : s.sound_on} data-tip={sound ? s.sound_off : s.sound_on}>
           {sound ? <IconSound /> : <IconMute />}
         </button>

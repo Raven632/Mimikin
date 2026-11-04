@@ -55,7 +55,7 @@ test.describe('мимик-загрузчик', () => {
     await page.route(/\/api\/gallery\/[^/?]+(\?.*)?$/, (route) => route.fulfill({ json: { state: 'building', done: 7, total: 14, albums: [] } }));
     await openLibrary(page);
     await openGame(page, 'Starfall Inn');
-    await page.locator('.grimoire-action-btn', { hasText: 'Галерея' }).click();
+    await page.locator('.act-gallery').click();
     const wait = page.locator('.gallery-wait .mimic-wait.show');
     await expect(wait).toBeVisible();
     await expect(wait).toContainText('7 из 14');

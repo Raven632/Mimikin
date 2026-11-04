@@ -13,11 +13,13 @@ import BarChoose from './BarChoose';
 import { VideoSeek } from './VideoSeek';
 import { useVideoControl } from '../videoControl';
 import SceneList from './SceneList';
+import SceneCast from './SceneCast';
+import { TagStrip, TagPanel, TagPicked } from './PictureTags';
 import { rigCoverUrl, useRigCovers } from './rigCapture';
 import { HelpMark } from './Help';
 import { useHelp } from '../useHelp';
-import { IconClose, IconChevronLeft, IconChevronRight, IconHeart, IconHeartLine, IconExpand, IconSound, IconMute, IconPlay, IconPause, IconShuffle, IconTalk, IconFilm, IconLoop, IconFork } from './icons';
-import { readSound, writeSound, hasSound, SPEEDS, readSpeed, writeSpeed, STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage, readSpineCover, sceneRows } from '../galleryView';
+import { IconClose, IconChevronLeft, IconChevronRight, IconHeart, IconHeartLine, IconExpand, IconSound, IconMute, IconPlay, IconPause, IconShuffle, IconTalk, IconFilm, IconLoop, IconFork, IconTag, IconSimilar } from './icons';
+import { readSound, writeSound, hasSound, SPEEDS, readSpeed, writeSpeed, STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage, readSpineCover, sceneRows, readTagsOn, writeTagsOn, useTagIndex, rowFiles, hasTags, tagCounts, similarPictures } from '../galleryView';
 import { flash } from '../pulse';
 // Набор Spine играет pixi: тяжёлый, грузится только когда открыли такую анимацию
 // Файл не открылся (заблокирован, сайт обновили, а вкладка старая) — пустое поле вместо белого экрана
@@ -69,7 +71,8 @@ const motionCell = (name) => (name.match(/\d[\w-]*$/) || [name])[0];
 // и так видна целиком. Словесных — больше половины и список не короткий
 const wordMotions = (motions) => motions.length > 12 && motions.filter((m) => !/\d/.test(m[0])).length * 2 > motions.length;
 
-const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
+// initialScene — пришли из поиска по репликам: { key, n, stop, text, lang } — плеер сразу на этой реплике (SceneView, at0)
+const GameGallery = ({ game, t, onClose, initialFile = '', initialScene = null, initialTag = '' }) => {
   const help = useHelp();
   const [data, setData] = useState(null);
   const [error, setError] = useState('');
@@ -77,6 +80,12 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
   const [tab, setTab] = useState(null);       // чип раздела; null — первый непустой
   const [shown, setShown] = useState(PAGE);
   const [view, setView] = useState(null);      // { album, index } — открытая картинка
+  const [tagSel, setTagSel] = useState(initialTag ? [initialTag] : []);      // выбранные теги: в сетке и в сценах — только то, где есть все (TagPanel)
+  const [tagNot, setTagNot] = useState([]);      // теги «без этого»: таких кадров и сцен нет
+  const [tagPanel, setTagPanel] = useState(false);
+  const [tagHidden, setTagHidden] = useState(null);   // скрытые теги, если их только что поменяли; null — как пришли с тегами игры
+  const tagBtn = useRef(null);
+  const [tagsOn, setTagsOn] = useState(readTagsOn);   // теги под картинкой в просмотре (кнопка «Теги»)
   const viewOpen = useRef(false);
   useEffect(() => { viewOpen.current = !!view; }, [view]);
   const [playing, setPlaying] = useState(false);
@@ -133,6 +142,19 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
             if (i >= 0) { setSecPick('pics'); setTab(key); setPlaying(!!list[i].anim); setView({ album: i, index: list[i].files.indexOf(initialFile) }); break; }
           }
         }
+        // Пришли из поиска по репликам: раздел «Сцены», вкладка сцены и плеер на найденной реплике, один раз. Название — как у
+        // плитки (sceneRows); галерею с тех пор пересобрали и сцены нет — просто галерея
+        else if (initialScene && !jumped.current) {
+          jumped.current = true;
+          const album = d.albums.find((a) => a.key === initialScene.key && a.script);
+          if (album) {
+            const talk = album.kind === 'dialogue';
+            const row = sceneRows(d.albums, talk).find((r) => r.album === album && r.n === initialScene.n);
+            setSecPick('scenes');
+            setTab(talk ? 'dialogue' : 'scenes');
+            setScene({ album, n: initialScene.n, title: row?.title || '', from: initialScene.stop, fromText: initialScene.text, lang0: initialScene.lang });
+          }
+        }
       })
       .catch((e) => { if (alive) setError(errorText(t, e)); });
     load();
@@ -170,17 +192,57 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
   // Шаблонной строкой — иначе компилятор React принимает её за часть массива чипов и отказывается от оптимизации
   const current = section === 'sounds' ? 'sounds' : `${chips.find((k) => k === tab) || chips.at(0) || 'all'}`;
   const inScenes = section === 'scenes';
-  const rows = inScenes ? sceneTabs[current] : NO_ROWS;
+  // Кто в сценах (ряд имён над плитками): отдельным запросом, когда оглавление готово и сцены есть. Нет ответа — ряда нет,
+  // подписи плиток — из оглавления
+  const hasScenes = sceneChips.length > 0;
+  const [cast, setCast] = useState(null);
+  useEffect(() => {
+    if (!ready || !hasScenes) return undefined;
+    let alive = true;
+    fetch(`/api/gallery/${encodeURIComponent(game.id)}/cast`).then((r) => (r.ok ? r.json() : null)).then((d) => { if (alive) setCast({ id: game.id, ...d }); }).catch(() => {});
+    return () => { alive = false; };
+  }, [game.id, ready, hasScenes]);
+  const castTab = inScenes && cast?.id === game.id ? cast[current] || null : null;
+  // Выбранное имя — вместе с игрой и вкладкой, для которых его выбрали: другая вкладка или раздел — снова «Все»
+  const whoAt = `${game.id}|${section}|${current}`;
+  const [whoOf, setWhoOf] = useState({ at: '', i: null });
+  // Ушли с вкладки — выбор забываем сразу (во время отрисовки, как велит React): вернулись — снова «Все»
+  if (whoOf.at && whoOf.at !== whoAt) setWhoOf({ at: '', i: null });
+  const who = whoOf.at === whoAt && castTab?.names?.[whoOf.i] ? whoOf.i : null;
+  const pickWho = (i) => { setWhoOf({ at: whoAt, i }); setShown(PAGE); };
+  // Плитки вкладки: с выбранным именем — только его сцены (их же берут «Смотреть подряд», «Случайная» и цепочка); кто под
+  // названием — из той же таблицы, что ряд (cast.w), — так имена, которые сервер научился находить, видны без пересборки
+  const castRows = useMemo(() => {
+    if (!inScenes) return NO_ROWS;
+    const all = sceneTabs[current];
+    if (!castTab) return all;
+    const key = (r) => `${r.album.key}\n${r.n}`;
+    return all.filter((r) => who === null || castTab.rows?.[key(r)]?.includes(who)).map((r) => ({ ...r, w: castTab.w?.[key(r)] || null }));
+  }, [inScenes, sceneTabs, current, castTab, who]);
+  const tagIndex = useTagIndex(game.id, ready);
+  // Выбранные теги действуют и на сцены: в сцене теги могут быть на разных кадрах
+  const rows = useMemo(() => ((tagSel.length || tagNot.length) && tagIndex ? castRows.filter((r) => hasTags(rowFiles(r), tagSel, tagIndex, tagNot)) : castRows), [castRows, tagSel, tagNot, tagIndex]);
+  const castRow = castTab?.names?.length >= 2 ? <SceneCast key={whoAt} names={castTab.names} total={sceneTabs[current].length} value={who} onChange={pickWho} t={t} /> : null;
   const inSounds = section === 'sounds' && !!sounds;
   // Вперемешку — как в «Избранном»: порядок альбомов перемешан один раз при включении
   const [order, setOrder] = useState(null);
   const albums = useMemo(() => {
     // Файлы игры — в порядке, как прислал сервер (как в игре)
-    const base = ready && !inScenes ? tabAlbums(data.albums, current) : [];
+    let base = ready && !inScenes ? tabAlbums(data.albums, current) : [];
+    // Выбранные теги: в CG — только кадры, где есть все, обложка — первый такой кадр (у анимации теги — у первого кадра, она
+    // остаётся целиком). На других вкладках у альбома размечены не все кадры (у ролика — первый), он остаётся или уходит целиком
+    if ((tagSel.length || tagNot.length) && tagIndex) {
+      base = base.map((a) => {
+        if (current !== 'cg') return hasTags(a.files, tagSel, tagIndex, tagNot) ? a : null;
+        if (a.anim) return hasTags([a.files[0]], tagSel, tagIndex, tagNot) ? a : null;
+        const files = a.files.filter((f) => hasTags([f], tagSel, tagIndex, tagNot));
+        return files.length ? { ...a, files, cover: files.includes(a.cover) ? a.cover : files[0] } : null;
+      }).filter(Boolean);
+    }
     if (!order) return base;
     const rank = new Map(order.map((k, i) => [k, i]));
     return [...base].sort((a, b) => (rank.get(a.key) ?? 0) - (rank.get(b.key) ?? 0));
-  }, [data, ready, current, inScenes, order]);
+  }, [data, ready, current, inScenes, order, tagSel, tagNot, tagIndex]);
   const toggleShuffle = () => {
     setView(null);
     setShow(false);
@@ -286,6 +348,8 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
   // Выражение и ошибка помнят свой альбом: у другой модели выражение прежней не подходит, и ошибка была не о ней
   const expNow = album && l2dExp.key === album.key ? l2dExp.i : -1;
   const withSound = !!file && isVideo(file) && album.kind === 'animation' && hasSound(album.audio, file);
+  // Теги есть у картинок игры (разметчик, сервер): не у роликов, наборов Spine и Live2D и не у картинок с сайтов
+  const tagged = !!file && !isRig(album) && !isVideo(file);
   const loop = !!file && isVideo(file) && album.kind === 'animation';
   // Ролик под своим плеером: не петля, не Live2D и не Spine
   const plain = !!file && isVideo(file) && !loop && !album.live2d && !album.spine;
@@ -416,6 +480,31 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
       <button type="button" className="gallery-play" aria-pressed={!!order} onClick={toggleShuffle} aria-label={t.favs_shuffle}><IconShuffle /><span className="tool-label">{t.favs_shuffle}</span></button>
     </>
   ) : null;
+  // Наборы кадров вкладки для тегов: в CG — по кадру (у анимации — первый), вся сцена в «Сценах», на других вкладках — альбом
+  const tagItems = useMemo(() => {
+    if (!tagIndex || inSounds || !ready) return [];
+    if (inScenes) return castRows.map(rowFiles);
+    if (current !== 'cg') return tabAlbums(data.albums, current).map((a) => a.files);
+    return [...new Set(tabAlbums(data.albums, current).flatMap((a) => (a.anim ? a.files.slice(0, 1) : a.files)))].map((f) => [f]);
+  }, [tagIndex, inSounds, ready, inScenes, castRows, data, current]);
+  const tagsHere = useMemo(() => tagItems.some((files) => files.some((f) => tagIndex.of.has(f))), [tagItems, tagIndex]);
+  const tagResult = inScenes ? t.lines_scenes : current === 'cg' ? t.gallery_frames : t.gallery_tags_albums;
+  const tagChanged = (yes, no) => { setTagSel(yes); setTagNot(no); setView(null); setPlaying(false); setShown(PAGE); };
+  const pickTag = (tag) => tagChanged(tagSel.includes(tag) ? tagSel.filter((x) => x !== tag) : [...tagSel, tag], tagNot.filter((x) => x !== tag));
+  const notTag = (tag) => tagChanged(tagSel.filter((x) => x !== tag), tagNot.includes(tag) ? tagNot.filter((x) => x !== tag) : [...tagNot, tag]);
+  const resetTags = () => tagChanged([], []);
+  const tagN = tagSel.length + tagNot.length;
+  // Игру ещё не разобрали — кнопка всё равно есть: панель скажет почему, иначе фильтр выглядит пропавшим. Если разобрали,
+  // а на этой вкладке тегов нет (диалоги) — кнопки нет
+  const tagTool = (tagsHere || tagN > 0 || tagIndex?.has.size === 0) && !inSounds ? (
+    <button ref={tagBtn} type="button" className="gallery-play tag-tool" aria-haspopup="dialog" aria-expanded={tagPanel} aria-pressed={tagN > 0} onClick={() => setTagPanel((on) => !on)} aria-label={t.gallery_tags}>
+      <IconTag /><span className="tool-label">{t.gallery_tags}</span>{tagN > 0 && <span className="tag-tool-n">{tagN}</span>}
+    </button>
+  ) : null;
+  // Кнопка ушла (вкладка без тегов) — панель закрыта и сама не откроется, когда вернёмся
+  if (tagPanel && !tagTool) setTagPanel(false);
+  // Числа — только когда их показывают: панель открыта или теги выбраны
+  const tagNums = useMemo(() => (tagIndex && (tagPanel || tagN) ? tagCounts(tagItems, tagSel, tagNot, tagIndex) : null), [tagItems, tagSel, tagNot, tagIndex, tagPanel, tagN]);
   // Подсказка — одна строка: что делает нажатие и где то же самое в другом виде; вторая половина — только на компьютере
   const h = t.gallery_hint;
   const sh = t.scene_list.hint;
@@ -424,7 +513,7 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
   const hintBody = !ready || inSounds ? null : inScenes ? (
     <p className="gallery-hint" id={help.id}>
       {sh[current]}
-      <span className="hint-more"> {sh[`${current}_more`]}
+      <span className="hint-more"> {sh[`${current}_more`]}{castRow && ` ${t.scene_list.cast_hint}`}
         {current === 'scenes' && legend.map(([k, Ic, label]) => <span key={k}> <span className="hint-ic"><Ic /> {label}</span></span>)}
       </span>
     </p>
@@ -451,14 +540,18 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
             </button>
           ))}
         </div>
-        {(chipRow || tools || hintBody) && (
+        {(chipRow || tools || tagTool || hintBody || castRow) && (
           <div className="gallery-lv2">
             {chipRow && <div className="gallery-tabs" role="tablist">{chipRow}</div>}
-            {(tools || hintBody) && <div className="gallery-tools">{tools}{hintBody && <HelpMark help={help} t={t} />}</div>}
+            {(tools || tagTool || hintBody) && <div className="gallery-tools">{tools}{tagTool}{hintBody && <HelpMark help={help} t={t} />}</div>}
+            {castRow}
           </div>
         )}
         {help.open && hintBody}
       </div>
+      {tagN > 0 && !inSounds && ready && tagNums && (
+        <TagPicked t={t} picked={tagSel} not={tagNot} count={tagResult(tagNums.total)} hidden={tagHidden || tagIndex.hidden} onPick={pickTag} onNot={notTag} onReset={resetTags} onHidden={setTagHidden} />
+      )}
 
       {error && <StateView kind="error" title={error} onRetry={() => { setError(''); setReload((n) => n + 1); }} retryLabel={t.retry} />}
       {!error && data?.state === 'building' && (
@@ -469,9 +562,13 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
           </MimicLoader>
         </div>
       )}
-      {ready && !inSounds && !inScenes && albums.length === 0 && <StateView title={t.gallery_empty} />}
+      {ready && !inSounds && !inScenes && albums.length === 0 && !tagN && <StateView title={t.gallery_empty} />}
+      {ready && !inSounds && tagN > 0 && (inScenes ? rows : albums).length === 0 && <StateView title={t.gallery_tags_nothing} hint={t.gallery_tags_nothing_hint} />}
 
       {inScenes && ready && <SceneList rows={rows.slice(0, shown)} t={t} src={src} spineCover={spineCover} onOpen={(i) => playRow(i, false)} />}
+      {tagPanel && tagTool && tagNums && (
+        <TagPanel t={t} anchor={tagBtn} counts={tagNums.counts} total={tagNums.total} picked={tagSel} not={tagNot} onPick={pickTag} onNot={notTag} onReset={resetTags} result={tagResult} none={t.gallery_tags_none} onClose={() => setTagPanel(false)} />
+      )}
       {ready && !inSounds && !inScenes && (
         <div className="gallery-grid">
           {albums.slice(0, shown).map((a, i) => (
@@ -497,7 +594,7 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
           ))}
         </div>
       )}
-      {scene && <SceneView key={`${scene.album.key}\n${scene.n}`} game={game} t={t} album={scene.album} n={scene.n} title={scene.title} speed={speed} hidden={hidden} auto0={scene.chain && chainAuto} onAuto={scene.chain ? setChainAuto : null} onNext={nextRow} onClose={() => setScene(null)} />}
+      {scene && <SceneView key={`${scene.album.key}\n${scene.n}`} game={game} t={t} album={scene.album} n={scene.n} at0={scene.from} fromText={scene.fromText} lang0={scene.lang0} title={scene.title} speed={speed} hidden={hidden} auto0={scene.chain && chainAuto} onAuto={scene.chain ? setChainAuto : null} onNext={nextRow} onClose={() => setScene(null)} />}
       {sounds && <SoundRoom game={game} t={t} sounds={sounds} active={!!inSounds} hidden={hidden} />}
       {(inScenes ? rows : albums).length > shown && <div ref={more} className="gallery-more-sentinel" />}
 
@@ -512,9 +609,10 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
           onTouchEnd={(e) => {
             // Картинку по горизонтали уже листал свайп за пальцем (useGalleryImage): второй раз не листаем, а нажатие после него отменяем
             if (took()) { e.preventDefault(); return; }
+            // Жест на панели (листают полосу тегов) кадры не листает, как и свайп за пальцем.
             // Палец на плеере — это перемотка ролика, а не листание (у петли плеера нет — листаем). Увеличенную картинку
             // палец двигает, а не листает
-            if (e.target.closest?.('.vseek') || zoom.blocks()) return;
+            if (e.target.closest?.('.vseek, .gallery-bar') || zoom.blocks()) return;
             const from = touch.current || { x: e.changedTouches[0].clientX, y: e.changedTouches[0].clientY };
             const dx = e.changedTouches[0].clientX - from.x;
             const dy = e.changedTouches[0].clientY - from.y;
@@ -557,6 +655,8 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
           <button type="button" className="lightbox-nav next" aria-label={t.shelf_next} onClick={(e) => { e.stopPropagation(); setPlaying(false); step(1); }}><IconChevronRight /></button>
           {pick && <ScenePick t={t} list={pick} anchor={watchRef} onPick={(n) => startScene(album, n)} onClose={() => setPick(null)} />}
           <div className="gallery-bar" onClick={(e) => e.stopPropagation()}>
+            {/* Теги кадра — первой строкой панели; у анимации — первого кадра (размечен он) */}
+            {tagsOn && tagged && <TagStrip game={game} file={album.anim ? album.files[0] : file} t={t} />}
             {plain && <VideoSeek el={vid.el} onSeek={vid.seek} onToggle={vid.toggle} label={t.gallery_sounds.seek} />}
             {plain && (
               <>
@@ -602,6 +702,10 @@ const GameGallery = ({ game, t, onClose, initialFile = '' }) => {
             )}
             {(album.anim || playing || loop || isRig(album)) && (
               <button type="button" className="gallery-play" onClick={nextSpeed} aria-label={t.gallery_speed(speed)} data-tip={t.gallery_speed(speed)}>{t.gallery_speed_value(speed)}</button>
+            )}
+            {tagged && <button type="button" className="gallery-play" onClick={() => similarPictures(game.id, album.anim ? album.files[0] : file)} data-tip={t.pics_similar_hint}><IconSimilar /> {t.pics_similar}</button>}
+            {tagged && (
+              <button type="button" className="gallery-play" aria-pressed={tagsOn} onClick={() => { writeTagsOn(!tagsOn); setTagsOn(!tagsOn); }} data-tip={tagsOn ? t.gallery_tags_hide : t.gallery_tags_show}><IconTag /> {t.gallery_tags}</button>
             )}
             {/* Склейка «@cg/…» — тоже в избранное: её адрес — по составу слоёв, после пересборки тот же */}
             {!isRig(album) && <button

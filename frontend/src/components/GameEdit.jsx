@@ -219,7 +219,9 @@ const GameEdit = ({ game, index, roman, contentRef, dirtyRef, t, lang, notify, o
               </Field>
               {/* Пустое поле — версия из названия папки; в пояснении видно, какая нашлась */}
               <Field id={id('version')} label={t.edit_f_myversion}
-                hint={!fields.myVersion && game.version ? t.edit_f_myversion_auto(game.version) : t.edit_f_myversion_hint}>
+                hint={!fields.myVersion && game.version
+                  ? t.edit_f_myversion_auto(game.version)
+                  : t.edit_f_myversion_hint}>
                 <input id={id('version')} type="text" value={fields.myVersion} maxLength={40} onChange={change('myVersion')} autoComplete="off" aria-describedby={hintId('version')} />
               </Field>
               {/* Пустое поле — язык по тексту игры; в пояснении видно, какой определился */}

@@ -1,4 +1,4 @@
-import { test, expect, imagesLoaded, openHome, openLibrary, openGame, menu, DEMO_NOW } from '../fixtures.js';
+import { test, expect, imagesLoaded, openHome, openLibrary, openGame, menu, openSites, openSiteFilters, DEMO_NOW } from '../fixtures.js';
 
 // Снимки экранов до и после переделки стилей (запуск — playwright.config.js, VISUAL=1). Каждый снимок
 // сравнивается с эталоном попиксельно: стили переложили — внешний вид не должен измениться.
@@ -38,9 +38,15 @@ test.describe('компьютер', () => {
     await page.locator('.nav-tab', { hasText: 'Библиотека' }).click();
     await expect(page.locator('.library > .game-card').first()).toBeVisible(); await settle(page);
     await shot(page, 'd-library');
-    await page.locator('.controls-zone .picker-btn').first().click(); await settle(page);
+    await page.locator('.filters-toggle').click(); await settle(page);
+    await shot(page, 'd-filters');
+    await page.locator('.toolbar-filters .picker-btn').first().click(); await settle(page);
     await shot(page, 'd-genres');
     await page.keyboard.press('Escape');
+    await page.locator('.filters-toggle').click();
+    await page.locator('.look-btn[aria-expanded]').click(); await settle(page);
+    await shot(page, 'd-view-row');
+    await page.locator('.look-btn[aria-expanded]').click();
     await page.evaluate(() => window.scrollTo(0, 600)); await settle(page);
     await shot(page, 'd-grid');
     await page.locator('.library > .game-card').first().hover(); await settle(page);
@@ -64,7 +70,7 @@ test.describe('компьютер', () => {
   test('правка сведений: форма, новая обложка, вопрос перед потерей правок', async ({ page }) => {
     await openLibrary(page);
     await openGame(page, 'Starfall Inn');
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click(); await settle(page);
+    await page.locator('.act-edit').click(); await settle(page);
     await shot(page, 'd-edit');
     await page.locator('.edit-add input').fill('https://store.steampowered.com/app/100');
     await page.locator('.edit-add input').press('Enter');
@@ -81,13 +87,13 @@ test.describe('компьютер', () => {
   test('настройки: все вкладки', async ({ page }) => {
     await openLibrary(page);
     await menu(page, 'Настройки'); await settle(page);
-    for (const tab of ['Общие', 'Аккаунт', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'Копии', 'Корзина', 'О программе']) {
+    for (const tab of ['Общие', 'Мой профиль', 'Пользователи', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'Копии', 'Корзина', 'О программе']) {
       await page.locator('.settings-tab', { hasText: tab }).click(); await settle(page);
       await shot(page, `d-settings-${tab}`);
     }
   });
 
-  test('статистика, клавиши, новинки', async ({ page }) => {
+  test('статистика, клавиши, «Найти»', async ({ page }) => {
     await openLibrary(page);
     await menu(page, 'Статистика'); await settle(page);
     await shot(page, 'd-stats');
@@ -95,10 +101,13 @@ test.describe('компьютер', () => {
     await page.keyboard.press('Shift+Slash'); await settle(page);
     await shot(page, 'd-keys');
     await page.keyboard.press('Escape'); await settle(page);
-    await page.locator('.nav-tab', { hasText: 'Новинки' }).click();
+    await openSites(page);
     await expect(page.locator('.catalog-content .state-error')).toBeVisible({ timeout: 20_000 }); await settle(page);
     await shot(page, 'd-news-offline');
-    await page.locator('.catalog-sources .chip', { hasText: 'Хочу поиграть' }).click(); await settle(page);
+    await openSiteFilters(page); await settle(page);
+    await shot(page, 'd-find-filters');
+    await page.locator('.catalog-filters .filters-toggle').click(); await settle(page);
+    await page.locator('.catalog-sources .chip', { hasText: 'Отложенные' }).click(); await settle(page);
     await shot(page, 'd-wishlist-empty');
   });
 
@@ -125,7 +134,7 @@ test.describe('планшет', () => {
     await shot(page, 't-filters');
     await openGame(page, 'Starfall Inn'); await settle(page);
     await shot(page, 't-game');
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click(); await settle(page);
+    await page.locator('.act-edit').click(); await settle(page);
     await shot(page, 't-edit');
   });
 });
@@ -144,7 +153,7 @@ test.describe('телефон', () => {
     await page.locator('.library > .game-card', { hasText: 'Starfall Inn' }).click();
     await expect(page.locator('.modal-content')).toBeVisible(); await settle(page);
     await shot(page, 'm-game');
-    await page.locator('.grimoire-action-btn', { hasText: 'Изменить' }).click(); await settle(page);
+    await page.locator('.act-edit').click(); await settle(page);
     await shot(page, 'm-edit');
   });
 });

@@ -7,6 +7,8 @@ services:
     volumes:
       # Прокидываем всю папку src разом (там лежат db, routes, services)
       - ./api/src:/app/api/src
+      # Скрипты для консоли (scripts/reset-password.js): их запускают и тесты
+      - ./api/scripts:/app/api/scripts
       # Главный файл сервера
       - ./api/server.js:/app/api/server.js
       # Без этого npm test в контейнере гоняет копию тестов из образа, а не твою правку
@@ -18,6 +20,9 @@ services:
       - ./api/public/cheats.js:/app/api/public/cheats.js
     environment:
       - NODE_ENV=development
+      # Разбор всех кадров для поиска по картинкам на dev выключен: dev и prod на одном сервере, а разбор занимает три
+      # ядра на сутки. Включить: PICTURE_PASS=1 в окружении при docker compose up
+      - PICTURE_PASS=${PICTURE_PASS:-0}
       
   frontend:
       image: node:20

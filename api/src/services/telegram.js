@@ -27,14 +27,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const link = (text, url) => (url ? `<a href="${esc(url)}">${esc(text)}</a>` : esc(text));
+// Почему не вышла загрузка или скачивание: у русского сервер уже написал сам, у других — по коду; код незнакомый — без русского
+const uploadWhy = (t, { reason, params, error }) => {
+    if (!t.upload_why) return error || '';
+    const why = t.upload_why[reason] || t.upload_why.other;
+    return typeof why === 'function' ? why(params || {}) : why;
+};
 
 const TEXT = {
     ru: {
         added: (title) => `Игра добавлена: <b>${esc(title)}</b>`,
         updated: (title, version) => `Игра обновлена: <b>${esc(title)}</b>${version ? ` — версия ${esc(version)}` : ''}`,
         patched: (title) => `Патч установлен: <b>${esc(title)}</b>`,
+        unshelved: (title, version) => `Игра вернулась с полки: <b>${esc(title)}</b>${version ? ` — версия ${esc(version)}` : ''}`,
         upload_error: (name, error) => `Загрузка «${esc(name)}» не удалась: ${esc(error)}`,
         upload_password: (name) => `Архив «${esc(name)}» под паролем — введите пароль в библиотеке`,
+        upload_space: (name, need, free) => `Архиву «${esc(name)}» не хватило места на распаковку: нужно ${need}, свободно ${free}. Архив сохранён — освободите место и нажмите «Повторить» в библиотеке`,
         backup: (games, saves, size) => `Копия библиотеки: игр — ${games}, сейвы — у ${saves}. ${size}`,
         backup_locked: ' Архив под паролем из BACKUP_PASSWORD.',
         backup_failed: (error) => `Копия библиотеки не отправлена: ${esc(error)}`,
@@ -63,13 +71,34 @@ const TEXT = {
             captcha: 'капчу не решили за 10 минут — пришлите ссылку ещё раз',
             stale: 'сервер перезапускался — пришлите ссылку ещё раз',
         },
+        dl_space: (need, free) => `не скачиваю — на сервере мало места: архив и игра займут около ${need}, свободно ${free}. Освободите место и нажмите «Повторить» в библиотеке или «Скачать всё равно»`,
     },
     en: {
         added: (title) => `Game added: <b>${esc(title)}</b>`,
         updated: (title, version) => `Game updated: <b>${esc(title)}</b>${version ? ` — version ${esc(version)}` : ''}`,
         patched: (title) => `Patch installed: <b>${esc(title)}</b>`,
+        unshelved: (title, version) => `Game back from the shelf: <b>${esc(title)}</b>${version ? ` — version ${esc(version)}` : ''}`,
+        // Причина кодом (services/uploads.js): по-русски её текст уже готов, здесь — другим языкам
+        upload_why: {
+            'other-engine': ({ engine }) => `the game is made with ${new Intl.ListFormat('en', { type: 'disjunction' }).format(engine)}; Mimikin only runs RPG Maker MV and MZ games`,
+            'no-game': 'no game in the archive: there is no www folder and no index.html',
+            'no-game-nested': 'no game in the archive or the archives inside it: there is no www folder and no index.html',
+            'archive-bad': 'the file does not open as an archive: it is damaged or not an archive at all',
+            'archive-broken': '7-Zip found errors in the data, the archive is damaged. Check your copy and upload it again',
+            'archive-volumes': 'the archive comes in several parts. Pack the game into one archive',
+            'archive-link': 'the archive links to files outside the game, so it is not unpacked',
+            'archive-path': 'the archive has paths pointing outside its folder ("../"), so it is not unpacked',
+            'archive-empty': 'the archive is empty',
+            'archive-incomplete': 'the archive on the server is incomplete. Upload it again',
+            'archive-tool': ({ detail }) => `7-Zip could not unpack it: ${detail}`,
+            'tool-missing': ({ detail }) => `7-Zip did not start: ${detail}`,
+            'patch-program': ({ file }) => `the archive holds a patcher program (“${file}”), not game files. Run it on a Windows computer`,
+            'patch-unknown': 'cannot tell where the patch goes: the archive has neither files of this game nor engine folders (data, js, img, audio)',
+            other: 'see the server log for details',
+        },
         upload_error: (name, error) => `Upload of “${esc(name)}” failed: ${esc(error)}`,
         upload_password: (name) => `“${esc(name)}” is password-protected — enter the password in the library`,
+        upload_space: (name, need, free) => `There was not enough space to unpack “${esc(name)}”: it needs ${need}, ${free} is free. The archive is kept — free up space and press “Retry” in the library`,
         backup: (games, saves, size) => `Library backup: ${games} games, saves of ${saves}. ${size}`,
         backup_locked: ' The archive is locked with BACKUP_PASSWORD.',
         backup_failed: (error) => `The library backup was not sent: ${esc(error)}`,
@@ -98,13 +127,33 @@ const TEXT = {
             captcha: 'the captcha was not solved in 10 minutes — send the link again',
             stale: 'the server restarted — send the link again',
         },
+        dl_space: (need, free) => `not downloading — the server is low on space: the archive and the game need about ${need}, ${free} is free. Free up space and press “Retry” in the library, or “Download anyway”`,
     },
     de: {
         added: (title) => `Spiel hinzugefügt: <b>${esc(title)}</b>`,
         updated: (title, version) => `Spiel aktualisiert: <b>${esc(title)}</b>${version ? ` — Version ${esc(version)}` : ''}`,
         patched: (title) => `Patch installiert: <b>${esc(title)}</b>`,
+        unshelved: (title, version) => `Spiel zurück aus dem Regal: <b>${esc(title)}</b>${version ? ` — Version ${esc(version)}` : ''}`,
+        upload_why: {
+            'other-engine': ({ engine }) => `das Spiel wurde mit ${new Intl.ListFormat('de', { type: 'disjunction' }).format(engine)} erstellt; Mimikin startet nur Spiele aus RPG Maker MV und MZ`,
+            'no-game': 'im Archiv ist kein Spiel: weder ein Ordner www noch eine index.html',
+            'no-game-nested': 'weder im Archiv noch in den Archiven darin ist ein Spiel: kein Ordner www und keine index.html',
+            'archive-bad': 'die Datei lässt sich nicht als Archiv öffnen: Sie ist beschädigt oder gar kein Archiv',
+            'archive-broken': '7-Zip hat Fehler in den Daten gefunden, das Archiv ist beschädigt. Prüfe deine Kopie und lade sie erneut hoch',
+            'archive-volumes': 'das Archiv besteht aus mehreren Teilen. Packe das Spiel in ein einziges Archiv',
+            'archive-link': 'das Archiv verweist auf Dateien außerhalb des Spiels und wird deshalb nicht entpackt',
+            'archive-path': 'das Archiv enthält Pfade aus seinem Ordner heraus („../“) und wird deshalb nicht entpackt',
+            'archive-empty': 'das Archiv ist leer',
+            'archive-incomplete': 'das Archiv auf dem Server ist unvollständig. Lade es erneut hoch',
+            'archive-tool': ({ detail }) => `7-Zip konnte es nicht entpacken: ${detail}`,
+            'tool-missing': ({ detail }) => `7-Zip ist nicht gestartet: ${detail}`,
+            'patch-program': ({ file }) => `im Archiv liegt ein Patch-Programm („${file}“), keine Spieldateien. Es läuft auf einem Windows-Rechner`,
+            'patch-unknown': 'unklar, wohin der Patch gehört: Im Archiv sind weder Dateien dieses Spiels noch Engine-Ordner (data, js, img, audio)',
+            other: 'Details stehen im Serverprotokoll',
+        },
         upload_error: (name, error) => `Hochladen von „${esc(name)}“ fehlgeschlagen: ${esc(error)}`,
         upload_password: (name) => `„${esc(name)}“ ist passwortgeschützt — Passwort in der Bibliothek eingeben`,
+        upload_space: (name, need, free) => `Für „${esc(name)}“ war beim Entpacken nicht genug Platz: nötig sind ${need}, frei sind ${free}. Das Archiv bleibt erhalten — mach Platz frei und drück in der Bibliothek „Erneut versuchen“`,
         backup: (games, saves, size) => `Sicherung der Bibliothek: ${games} Spiele, Spielstände von ${saves}. ${size}`,
         backup_locked: ' Das Archiv ist mit BACKUP_PASSWORD verschlüsselt.',
         backup_failed: (error) => `Die Sicherung wurde nicht gesendet: ${esc(error)}`,
@@ -133,6 +182,7 @@ const TEXT = {
             captcha: 'das Captcha wurde nicht in 10 Minuten gelöst — schick den Link noch einmal',
             stale: 'der Server wurde neu gestartet — schick den Link noch einmal',
         },
+        dl_space: (need, free) => `ich lade nicht herunter — auf dem Server ist wenig Platz: Archiv und Spiel brauchen etwa ${need}, frei sind ${free}. Mach Platz frei und drück in der Bibliothek „Erneut versuchen“ oder „Trotzdem herunterladen“`,
     },
 };
 
@@ -181,7 +231,9 @@ class TelegramService {
 
     async prefs() {
         const saved = await this.getJson('telegram_prefs', {});
-        const out = { lang: 'ru', library: '' };
+        // Язык записан не всегда: с TELEGRAM_CHAT_ID кнопку «Подключить» не нажимают (его ставит окно Telegram в «Настройках»).
+        // Запасной — английский, как у всего приложения (frontend locales/index.js)
+        const out = { lang: 'en', library: '' };
         for (const kind of KINDS) out[kind] = saved[kind] !== false;
         if (TEXT[saved.lang]) out.lang = saved.lang;
         if (/^https?:\/\/[^\s"<>]+$/.test(saved.library || '')) out.library = saved.library;
@@ -212,9 +264,10 @@ class TelegramService {
             }
             return data.result;
         } catch (e) {
-            if (e.name === 'AbortError') throw new Error('Telegram не ответил');
+            if (e.name === 'AbortError') throw Object.assign(new Error('Telegram не ответил'), { reason: 'tg-timeout' });
             if (e.status) throw e;
-            throw new Error(`нет связи с Telegram (${e.cause?.code || e.message})`);
+            const detail = e.cause?.code || e.message;
+            throw Object.assign(new Error(`нет связи с Telegram (${detail})`), { reason: 'tg-offline', params: { detail } });
         } finally {
             clearTimeout(timer);
         }
@@ -326,13 +379,14 @@ class TelegramService {
         if (!this.token) return { configured: false };
         let bot = '';
         let error = '';
-        try { bot = await this.me(); } catch (e) { error = e.message; }
+        let why = {};
+        try { bot = await this.me(); } catch (e) { error = e.message; why = { reason: e.reason || '', params: e.params }; }
         const chat = await this.chat();
         const pending = this.pending && Date.now() < this.pending.expires && bot
             ? { code: this.pending.code, url: `https://t.me/${bot}?start=${this.pending.code}` }
             : null;
         return {
-            configured: true, bot, error, pending,
+            configured: true, bot, error, ...why, pending,
             linked: chat ? { name: chat.name || '', fromEnv: !!chat.fromEnv } : null,
             prefs: await this.prefs(),
             backupAt: (await this.getJson('telegram_backup', {})).at || 0,
@@ -340,7 +394,7 @@ class TelegramService {
     }
 
     async startLink({ lang, library } = {}) {
-        if (!this.token) throw Object.assign(new Error('Бот не настроен: впишите токен в «Настройки → Уведомления»'), { status: 400 });
+        if (!this.token) throw Object.assign(new Error('Бот не настроен: впишите токен в «Настройки → Уведомления»'), { status: 400, reason: 'tg-no-token' });
         await this.me();
         await this.savePrefs({ lang, library });
         this.pending = { code: String(crypto.randomInt(100000, 1000000)), expires: Date.now() + LINK_TTL };
@@ -412,7 +466,7 @@ class TelegramService {
             const r = await this.download(what);
             text = r.already ? t.dl_already(r.title) : t.dl_started(r.title);
         } catch (e) {
-            text = e.reason === 'off' ? t.dl_off : e.reason === 'site' ? t.dl_site : t.dl_failed(e.message);
+            text = e.reason === 'off' ? t.dl_off : e.reason === 'site' ? t.dl_site : t.dl_failed(uploadWhy(t, { reason: e.reason, params: e.params, error: e.message }));
         }
         await this.deliver('service', text);
     }
@@ -420,8 +474,10 @@ class TelegramService {
     // Загрузка, начатая отсюда, встала на сборе ссылок (services/myjd.js, onStage): капча или ошибка
     async downloadStage(job) {
         const t = await this.texts();
+        const { lang } = await this.prefs();
         const text = job.stage === 'captcha' ? t.dl_captcha(job.title, job.captcha || '?')
-            : t.dl_stopped(job.title, t.dl_why[job.error] || esc(job.error || ''));
+            : job.error === 'space' ? t.dl_stopped(job.title, t.dl_space(this.size(job.need || 0, t, lang), this.size(job.free || 0, t, lang)))
+                : t.dl_stopped(job.title, t.dl_why[job.error] || esc(uploadWhy(t, job)));
         await this.deliver('service', text, { silent: job.stage !== 'captcha' });
     }
 
@@ -455,14 +511,14 @@ class TelegramService {
     async test() {
         const t = await this.texts();
         if (!(await this.deliver('service', t.test + (await this.libraryLine(t))))) {
-            throw Object.assign(new Error('Чат не привязан'), { status: 400 });
+            throw Object.assign(new Error('Чат не привязан'), { status: 400, reason: 'tg-no-chat' });
         }
     }
 
     // --- Загрузки ---
 
     // Загрузка кончилась, а страницы с ней никто не смотрел (services/uploads.js)
-    async uploadFinished({ name, state, error, folder, target, mode, version, unattended }) {
+    async uploadFinished({ name, state, error, reason, params, folder, target, mode, version, shelf, unattended, need = 0, free = 0 }) {
         if (!unattended || !this.token) return;
         const t = await this.texts();
         const id = folder || target;
@@ -470,9 +526,11 @@ class TelegramService {
         const title = row ? shownTitle(row).title : id;
         let text;
         let silent = true;
-        if (state === 'done') text = mode === 'patch' ? t.patched(title) : target ? t.updated(title, version) : t.added(title);
+        // С полки (uploads.js, swapIn) — не «обновлена»: прежней версии в библиотеке не было
+        if (state === 'done') text = mode === 'patch' ? t.patched(title) : !target ? t.added(title) : shelf ? t.unshelved(title, version) : t.updated(title, version);
         else if (state === 'password') { text = t.upload_password(name); silent = false; }
-        else { text = t.upload_error(name, error || ''); silent = false; }
+        else if (state === 'space') { const { lang } = await this.prefs(); text = t.upload_space(name, this.size(need, t, lang), this.size(free, t, lang)); silent = false; }
+        else { text = t.upload_error(name, uploadWhy(t, { reason, params, error })); silent = false; }
         await this.deliver('uploads', text + (await this.libraryLine(t)), { silent });
     }
 
@@ -527,6 +585,28 @@ class TelegramService {
             for (const f of (await fsp.readdir(path.join(this.savesDir, dir)).catch(() => [])).sort()) {
                 const st = await fsp.stat(path.join(this.savesDir, dir, f)).catch(() => null);
                 if (st?.isFile()) h.update(`${dir}/${f}:${st.size}:${Math.round(st.mtimeMs)}\n`);
+            }
+        }
+        // Люди: их строки (в том числе отмеченные картинки галереи) и сейвы (_saves/.people/<id>/<игра>/…). Добавляется,
+        // только если они есть, — у владельца без других людей отпечаток тот же, что и до них, и копия не уходит лишний раз
+        // после обновления
+        for (const table of ['user_games', 'user_wishlist', 'user_gallery_favorites']) {
+            const rows = await this.sql().all(`SELECT * FROM ${table} ORDER BY 1, 2`).catch(() => []);
+            if (rows.length) h.update(`${table}:${JSON.stringify(rows)}`);
+        }
+        // Кому какие игры открыты: сменился список — копия уходит, иначе изменение доступа в ней не увидели бы. Как и выше, только
+        // когда есть ограниченные люди или записи доступа
+        const limited = await this.sql().all('SELECT id FROM users WHERE games_limited = 1 ORDER BY id').catch(() => []);
+        const access = await this.sql().all('SELECT user_id, game_id FROM user_game_access ORDER BY 1, 2').catch(() => []);
+        if (limited.length || access.length) h.update(`access:${JSON.stringify(limited)}${JSON.stringify(access)}`);
+        const peopleDir = path.join(this.savesDir, '.people');
+        for (const uid of (await fsp.readdir(peopleDir).catch(() => [])).sort()) {
+            const games = (await fsp.readdir(path.join(peopleDir, uid)).catch(() => [])).filter((n) => !n.startsWith('.')).sort();
+            for (const dir of games) {
+                for (const f of (await fsp.readdir(path.join(peopleDir, uid, dir)).catch(() => [])).sort()) {
+                    const st = await fsp.stat(path.join(peopleDir, uid, dir, f)).catch(() => null);
+                    if (st?.isFile()) h.update(`.people/${uid}/${dir}/${f}:${st.size}:${Math.round(st.mtimeMs)}\n`);
+                }
             }
         }
         return h.digest('hex');

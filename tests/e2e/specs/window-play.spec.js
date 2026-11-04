@@ -19,10 +19,12 @@ test.describe('окно игры из карточки', () => {
     await watch(page);
     await openLibrary(page);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await cardFor(page, 'Starfall Inn').click();
+    await cardFor(page, 'Starfall Inn').locator('.card-title').click();
     await expect(page.locator('.modal-content')).toBeVisible();
     await expect.poll(async () => (await seen(page)).ghost).toBe(true);
     await expect(page.locator('.modal-ghost.fly')).toHaveCount(0);
+    // Отложенное до посадки (скриншоты, landed) встаёт чуть позже призрака и запускает свои переходы — ждём и его
+    await expect(page.locator('.modal-content .screen-thumb img').first()).toBeAttached();
     // После полёта ещё может доигрывать проявление настоящей обложки (80 мс) — ждём, пока анимаций не останется
     await expect.poll(() => page.evaluate(() => document.querySelector('.modal-content').getAnimations({ subtree: true }).length
       + document.querySelector('.modal-overlay').getAnimations().length)).toBe(0);
@@ -45,7 +47,7 @@ test.describe('окно игры из карточки', () => {
   test('закрыли на полпути открытия: окно разворачивается и уходит, страница под ним снова доступна', async ({ page }) => {
     await openLibrary(page);
     await page.emulateMedia({ reducedMotion: 'no-preference' });
-    await cardFor(page, 'Starfall Inn').click();
+    await cardFor(page, 'Starfall Inn').locator('.card-title').click();
     await expect(page.locator('.modal-content')).toBeAttached();
     // Подложка нажата, пока окно ещё растёт: раньше такое нажатие игнорировалось
     await page.locator('.modal-overlay').click({ position: { x: 4, y: 4 } });
@@ -81,7 +83,7 @@ test.describe('окно игры из карточки', () => {
   test('«уменьшить движение»: окно сразу на месте, призрака не было, закрывается сразу', async ({ page }) => {
     await watch(page);
     await openLibrary(page);
-    await cardFor(page, 'Starfall Inn').click();
+    await cardFor(page, 'Starfall Inn').locator('.card-title').click();
     await expect(page.locator('.modal-content')).toBeVisible();
     expect(await page.evaluate(() => document.querySelector('.modal-content').getAnimations({ subtree: true }).length)).toBe(0);
     await page.locator('.modal-close').click();
@@ -95,6 +97,62 @@ test.describe('окно игры из карточки', () => {
     await page.goto('/?game=Starfall%20Inn');
     await page.waitForTimeout(300);
     expect((await seen(page)).ghost).toBe(false);
+  });
+});
+
+// Датчик перерисовок окна: самодельный хук инструментов React (прод-React его вызывает на каждом коммите).
+// Окно — компонент над .game-overlay; перерисовалось — у него новый список хуков (memoizedState).
+// Полёт — пока у окна есть data-flying (windowFly.js)
+const watchRenders = (page) => page.addInitScript(() => {
+  const R = window.__renders = { flying: 0, after: 0 };
+  let last = null;
+  const find = (fiber) => {
+    for (const stack = [fiber]; stack.length;) {
+      const f = stack.pop();
+      if (f.stateNode instanceof Element && f.stateNode.matches('.modal-overlay.game-overlay')) return f;
+      if (f.sibling) stack.push(f.sibling);
+      if (f.child) stack.push(f.child);
+    }
+    return null;
+  };
+  window.__REACT_DEVTOOLS_GLOBAL_HOOK__ = {
+    supportsFiber: true, renderers: new Map(), inject: () => 1, checkDCE() {},
+    onCommitFiberUnmount() {}, onPostCommitFiberRoot() {},
+    onCommitFiberRoot(id, root) {
+      let modal = find(root.current)?.return;
+      while (modal && typeof modal.type !== 'function') modal = modal.return;
+      const state = modal?.memoizedState ?? null;
+      // Первый коммит с окном — само открытие, его не считаем
+      if (state && last && state !== last) {
+        if (document.querySelector('.modal-content[data-flying]')) R.flying++; else R.after++;
+      }
+      last = state;
+    },
+  };
+});
+
+test.describe('окно игры в полёте', () => {
+  test('в полёте окно не перерисовывается: ни ответы сервера, ни общие хранилища', async ({ page }) => {
+    await watch(page);
+    await watchRenders(page);
+    // Ответы, которые окно ждёт при открытии, — с задержкой, чтобы пришли ровно посреди полёта (240 мс)
+    let langs = 0;
+    const late = async (route) => { await new Promise((r) => setTimeout(r, 60)); await route.continue(); };
+    await page.route('**/api/settings/known-langs', (route) => { langs++; return late(route); });
+    for (const url of ['**/api/settings/favorite-tags', '**/api/games/*/guides', '**/api/marks/*', '**/api/saves/**']) await page.route(url, late);
+    await openLibrary(page);
+    // Знакомые языки грузятся вместе с играми, до открытия окна
+    await expect.poll(() => langs).toBeGreaterThan(0);
+    await page.waitForTimeout(300);
+    const before = langs;
+    await page.emulateMedia({ reducedMotion: 'no-preference' });
+    await cardFor(page, 'Starfall Inn').locator('.card-title').click();
+    await expect.poll(async () => (await seen(page)).ghost).toBe(true);
+    await expect(page.locator('.modal-content[data-flying]')).toHaveCount(0);
+    // После посадки ворота отдают отложенное — датчик обязан это увидеть, иначе он сломан (новый React)
+    await expect.poll(() => page.evaluate(() => window.__renders.after)).toBeGreaterThan(0);
+    expect(await page.evaluate(() => window.__renders.flying)).toBe(0);
+    expect(langs).toBe(before);
   });
 });
 

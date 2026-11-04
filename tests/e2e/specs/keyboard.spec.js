@@ -5,7 +5,7 @@ test.describe('клавиатура', () => {
     await openLibrary(page);
     await page.keyboard.press('Shift+Slash');
     await expect(page.locator('.keys-content')).toBeVisible();
-    await expect(page.locator('.keys-row')).toHaveCount(10);
+    await expect(page.locator('.keys-row')).toHaveCount(12);
     await page.keyboard.press('Escape');
     await expect(page.locator('.keys-content')).toHaveCount(0);
 

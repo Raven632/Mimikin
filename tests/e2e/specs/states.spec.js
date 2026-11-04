@@ -1,4 +1,4 @@
-import { test, expect, openLibrary, menu } from '../fixtures.js';
+import { test, expect, openLibrary, menu, openSites } from '../fixtures.js';
 
 test.describe('пусто, загрузка, ошибка', () => {
   test('пустая библиотека: экран приветствия, статистика без нулей', async ({ page }) => {
@@ -36,12 +36,13 @@ test.describe('пусто, загрузка, ошибка', () => {
     await expect(page.locator('.audit-hint').first()).toBeVisible();
   });
 
-  test('новинки без интернета — ошибка с «Ещё раз»; «Хочу поиграть» пуст и говорит, как туда попасть', async ({ page }) => {
+  test('сайт не ответил — ошибка с «Ещё раз»; «Отложенные» пуст и говорит, как туда попасть', async ({ page }) => {
     await openLibrary(page);
-    await page.locator('.nav-tab', { hasText: 'Новинки' }).click();
+    await openSites(page);
     await expect(page.locator('.catalog-content .state-error')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('.catalog-content .state-retry')).toBeVisible();
-    await page.locator('.catalog-sources .chip', { hasText: 'Хочу поиграть' }).click();
-    await expect(page.locator('.catalog-content .state-empty')).toContainText('Список «Хочу поиграть» пуст');
+    await page.locator('.catalog-sources .chip', { hasText: 'Отложенные' }).click();
+    await expect(page.locator('.catalog-content .state-empty')).toContainText('Список «Отложенные» пуст');
+    await expect(page.locator('.catalog-content .state-empty')).toContainText('во вкладке «Найти»');
   });
 });

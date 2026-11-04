@@ -1,4 +1,4 @@
-import { test, expect, openHome, openLibrary, openGame, menu } from '../fixtures.js';
+import { test, expect, openHome, openLibrary, openViewRow, openFilters, openGame, menu } from '../fixtures.js';
 
 // Подсказка data-tip в доступное имя не входит (раньше эту роль играл title), поэтому у кнопки только со
 // значком имя должно быть в aria-label / aria-labelledby. Считаем кнопки, у которых нет ни имени, ни текста
@@ -22,9 +22,18 @@ test.describe('доступные имена', () => {
     expect(await unnamed(page)).toEqual([]);
     await openLibrary(page);
     expect(await unnamed(page)).toEqual([]);
+    // С открытыми рядами «Вид» и «Фильтры»: у каждой кнопки есть имя, у «Вид» — состояние и связь с рядом
+    await openViewRow(page);
+    await openFilters(page);
+    expect(await unnamed(page)).toEqual([]);
+    const btn = page.locator('.look-btn[aria-expanded]');
+    await expect(btn).toHaveAttribute('aria-expanded', 'true');
+    await expect(page.locator(`#${await btn.getAttribute('aria-controls')}`)).toHaveClass(/look-row/);
+    await expect(page.locator('.look-row .look-grp[role="group"]')).not.toHaveCount(0);
+    await expect(page.locator('.look-row .look-opt:not([aria-pressed])')).toHaveCount(0);
   });
 
-  test('окно игры, настройки и «Новинки»: то же', async ({ page }) => {
+  test('окно игры, настройки и «Найти»: то же', async ({ page }) => {
     await openLibrary(page);
     await openGame(page, 'Starfall Inn');
     expect(await unnamed(page)).toEqual([]);

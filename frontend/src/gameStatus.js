@@ -14,4 +14,7 @@ export function autoStatus(game, now = Date.now()) {
   return '';
 }
 
+// Что написано на карточке: вписанный руками или «Играю». «Не начата» не показываем: висела бы на половине карточек
+export const shownStatus = (game) => game.status || (autoStatus(game) === 'playing' ? 'playing' : '');
+
 export const effectiveStatus = (game, now) => game.status || autoStatus(game, now);

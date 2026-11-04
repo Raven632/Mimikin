@@ -1,0 +1,336 @@
+{
+ "outfit": [
+  "dress",
+  "kimono",
+  "armor"
+ ],
+ "gown": [
+  "dress",
+  "white_dress"
+ ],
+ "wedding dress": [
+  "white_dress"
+ ],
+ "bride": [
+  "white_dress"
+ ],
+ "uniform": [
+  "school_uniform"
+ ],
+ "school uniform": [
+  "school_uniform"
+ ],
+ "school": [
+  "school_uniform",
+  "classroom"
+ ],
+ "maid": [
+  "maid"
+ ],
+ "witch": [
+  "witch_hat",
+  "robe"
+ ],
+ "mage": [
+  "robe",
+  "staff",
+  "witch_hat"
+ ],
+ "wizard": [
+  "robe",
+  "staff"
+ ],
+ "knight": [
+  "armor",
+  "sword",
+  "shield"
+ ],
+ "warrior": [
+  "armor",
+  "sword",
+  "shield"
+ ],
+ "weapon": [
+  "sword",
+  "staff",
+  "shield"
+ ],
+ "blond": [
+  "blonde_hair"
+ ],
+ "blonde": [
+  "blonde_hair"
+ ],
+ "redhead": [
+  "red_hair"
+ ],
+ "brunette": [
+  "brown_hair"
+ ],
+ "silver hair": [
+  "silver_hair",
+  "white_hair"
+ ],
+ "pigtails": [
+  "twintails"
+ ],
+ "braids": [
+  "braid",
+  "twin_braids"
+ ],
+ "spectacles": [
+  "glasses"
+ ],
+ "eyeglasses": [
+  "glasses"
+ ],
+ "cat girl": [
+  "cat_ears",
+  "animal_ears",
+  "tail"
+ ],
+ "catgirl": [
+  "cat_ears",
+  "animal_ears",
+  "tail"
+ ],
+ "fox girl": [
+  "animal_ears",
+  "tail",
+  "fox"
+ ],
+ "kitten": [
+  "cat"
+ ],
+ "kitty": [
+  "cat"
+ ],
+ "puppy": [
+  "dog"
+ ],
+ "wolf": [
+  "dog",
+  "animal_ears"
+ ],
+ "pony": [
+  "horse"
+ ],
+ "bunny": [
+  "rabbit"
+ ],
+ "hare": [
+  "rabbit"
+ ],
+ "slime": [
+  "slime_(creature)"
+ ],
+ "mermaids": [
+  "mermaid"
+ ],
+ "elves": [
+  "elf"
+ ],
+ "dragons": [
+  "dragon"
+ ],
+ "undead": [
+  "skeleton",
+  "ghost"
+ ],
+ "spirit": [
+  "ghost"
+ ],
+ "fairies": [
+  "fairy"
+ ],
+ "devil": [
+  "demon",
+  "horns"
+ ],
+ "fangs": [
+  "vampire"
+ ],
+ "wings": [
+  "wings",
+  "angel_wings",
+  "feathers"
+ ],
+ "palace": [
+  "castle"
+ ],
+ "fortress": [
+  "castle",
+  "tower"
+ ],
+ "woods": [
+  "forest",
+  "tree"
+ ],
+ "jungle": [
+  "forest"
+ ],
+ "meadow": [
+  "field",
+  "flower"
+ ],
+ "sea": [
+  "ocean",
+  "beach"
+ ],
+ "seaside": [
+  "ocean",
+  "beach"
+ ],
+ "shore": [
+  "beach",
+  "ocean"
+ ],
+ "coast": [
+  "beach",
+  "ocean"
+ ],
+ "stream": [
+  "river"
+ ],
+ "hills": [
+  "mountain"
+ ],
+ "cavern": [
+  "cave"
+ ],
+ "town": [
+  "city"
+ ],
+ "village": [
+  "city",
+  "house"
+ ],
+ "home": [
+  "house"
+ ],
+ "temple": [
+  "church"
+ ],
+ "cathedral": [
+  "church"
+ ],
+ "school room": [
+  "classroom"
+ ],
+ "bookshelf": [
+  "library",
+  "book"
+ ],
+ "books": [
+  "book"
+ ],
+ "study": [
+  "library"
+ ],
+ "bedchamber": [
+  "bedroom",
+  "bed"
+ ],
+ "lamp": [
+  "lantern"
+ ],
+ "torch": [
+  "lantern",
+  "candle"
+ ],
+ "chest": [
+  "treasure_chest"
+ ],
+ "treasure": [
+  "treasure_chest"
+ ],
+ "loot": [
+  "treasure_chest"
+ ],
+ "medicine": [
+  "potion"
+ ],
+ "elixir": [
+  "potion"
+ ],
+ "drink": [
+  "cup",
+  "potion"
+ ],
+ "flowers": [
+  "flower"
+ ],
+ "blossoms": [
+  "cherry_blossoms"
+ ],
+ "sakura": [
+  "cherry_blossoms"
+ ],
+ "stars": [
+  "starry_sky"
+ ],
+ "night sky": [
+  "starry_sky",
+  "night",
+  "moon"
+ ],
+ "evening": [
+  "sunset"
+ ],
+ "dusk": [
+  "sunset"
+ ],
+ "dawn": [
+  "sunset",
+  "sky"
+ ],
+ "storm": [
+  "rain",
+  "cloud"
+ ],
+ "clouds": [
+  "cloud"
+ ],
+ "mist": [
+  "fog"
+ ],
+ "blizzard": [
+  "snow",
+  "wind"
+ ],
+ "winter": [
+  "snow"
+ ],
+ "smiling": [
+  "smile"
+ ],
+ "sleep": [
+  "sleeping",
+  "bed"
+ ],
+ "asleep": [
+  "sleeping"
+ ],
+ "flight": [
+  "flying"
+ ],
+ "jump": [
+  "jumping"
+ ],
+ "run": [
+  "running"
+ ],
+ "walk": [
+  "walking"
+ ],
+ "guitars": [
+  "guitar"
+ ],
+ "music": [
+  "guitar",
+  "piano"
+ ],
+ "bag": [
+  "bag"
+ ]
+}

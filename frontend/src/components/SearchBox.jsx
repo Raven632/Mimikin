@@ -1,7 +1,7 @@
 import { useRef } from 'react';
 import { IconClose, IconSearch } from './icons';
 
-// Поле поиска — в библиотеке и в «Новинках»: значок слева, крестик «очистить» справа, когда есть
+// Поле поиска — в библиотеке и в «Найти»: значок слева, крестик «очистить» справа, когда есть
 // что очищать (на телефоне раньше стирали по букве). Escape в поле тоже очищает — и только его:
 // окно вокруг не закрывается (preventDefault — знак стопке слоёв, layers.js)
 const SearchBox = ({ value, onChange, placeholder, clearLabel, maxLength, inputRef, keyHint }) => {

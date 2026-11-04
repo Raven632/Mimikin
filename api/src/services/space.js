@@ -7,7 +7,7 @@ const fsp = require('fs').promises;
 const path = require('path');
 const { getFolderSize } = require('../utils/archive.js');
 const { shownTitle } = require('../utils/title.js');
-const { duplicateGroups } = require('../utils/audit.js');
+const { duplicateGroups, pairKey } = require('../utils/audit.js');
 
 const CACHE_MS = 2 * 60 * 1000;
 const DAY = 864e5;
@@ -54,8 +54,12 @@ class SpaceService {
 
     async build(now) {
         const { db, trash, uploads, gamesDir, oldDir, savesDir } = this.deps;
-        const rows = await db.get().all('SELECT * FROM games WHERE ready = 1');
+        // Игры с полки места не занимают: их файлы — в корзине (она посчитана ниже) или уже стёрты. Их прежние версии в
+        // _old — занимают: там игра есть, а не «её уже нет»
+        const all = await db.get().all('SELECT * FROM games WHERE ready = 1');
+        const rows = all.filter((r) => !r.shelved_at);
         const title = (row) => shownTitle(row).title;
+        const titles = new Map(all.map((r) => [r.id, title(r)]));
 
         // Прежние версии — по игре, сколько освободит их удаление
         const oldOf = new Map();
@@ -87,15 +91,15 @@ class SpaceService {
         const pick = (list) => list.map((g) => ({ id: g.id, title: g.title, size: g.size, playtime: g.playtime, lastPlayed: g.lastPlayed }));
         const suggest = {
             old: [...oldOf.entries()].filter(([, size]) => size > 0)
-                .map(([id, size]) => ({ id, title: byId.get(id)?.title || id, size, gone: !byId.has(id) }))
+                .map(([id, size]) => ({ id, title: titles.get(id) || id, size, gone: !titles.has(id) }))
                 .sort((a, b) => b.size - a.size),
             uploads: pending.map((u) => ({ id: u.id, name: u.name, size: u.received, of: u.size, state: u.state })),
             done: pick(games.filter((g) => g.status === 'done')),
             dropped: pick(games.filter((g) => g.status === 'dropped')),
             never: pick(games.filter((g) => !played(g) && !['wish', 'playing', 'done', 'dropped'].includes(g.status)
                 && g.addedAt && now - g.addedAt > NEVER_AFTER_DAYS * DAY)),
-            // Одна игра в нескольких папках: все копии, самые большие первыми
-            dupes: duplicateGroups(rows).map((group) => group.games.map((g) => byId.get(g.id)).filter(Boolean)
+            // Одна игра в нескольких папках: все копии, самые большие первыми. Сказали «Не дубликат» — здесь тоже не копии
+            dupes: duplicateGroups(rows, new Set((await db.get().all('SELECT a, b FROM not_duplicates')).map((p) => pairKey(p.a, p.b)))).map((group) => group.games.map((g) => byId.get(g.id)).filter(Boolean)
                 .sort((a, b) => b.size - a.size).map((g) => ({ id: g.id, title: g.title, size: g.size, playtime: g.playtime, lastPlayed: g.lastPlayed }))),
         };
         // Корзина: место вернётся, когда игру сотрут — руками или сама через 30 дней

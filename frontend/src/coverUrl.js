@@ -18,9 +18,10 @@ export function getCoverUrl(game, width = 360) {
 
 // Широкий баннер (Project Dungeon — 768×256) в плитке 16:9 обрезался по краям: показываем его целиком, а фоном — он же,
 // размытый (CSS: img.wide). Адрес — свойством --cover прямо на плитке: React им не управляет
+export const WIDE_BANNER = 2.2;
 export const fitWide = (e) => {
   const img = e.currentTarget;
-  if (!img.naturalHeight || img.naturalWidth < 2.2 * img.naturalHeight) return;
+  if (!img.naturalHeight || img.naturalWidth < WIDE_BANNER * img.naturalHeight) return;
   img.classList.add('wide');
   img.parentElement?.style.setProperty('--cover', `url(${JSON.stringify(img.currentSrc || img.src)})`);
 };

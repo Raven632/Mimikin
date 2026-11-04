@@ -1,15 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { languageTitle } from '../formatLanguage';
-import { uploadArchive, listUploads, cancelUpload, sendPassword, UploadError } from '../resumableUpload';
+import { uploadArchive, matchUpload, listUploads, cancelUpload, sendPassword, retryUpload, UploadError } from '../resumableUpload';
 import Picker from './Picker';
 import SearchBox from './SearchBox';
 import { layersOpen } from '../layers';
+import { pageKeysFree } from '../libraryKeys';
 import { confirmDialog } from '../confirm';
+import { getCoverUrl } from '../coverUrl';
 import { errorText } from '../apiError';
 import { isFormatTag } from '../formatTags';
 import TransferBar from './TransferBar';
-import { IconSliders, IconEye, IconEyeOff, IconUpload } from './icons';
+import { IconSliders, IconEye, IconEyeOff, IconTag, IconUpload } from './icons';
+import { isOwner } from '../me';
 import { fmtOf, fmtSize } from '../transferSize';
 import { pageZoom } from '../pageZoom';
 import { landingBegin, landingEnd } from '../landing';
@@ -47,19 +50,41 @@ const PasswordForm = ({ t, onSubmit, value, setValue }) => {
 // Архивы, которые принимает сервер (services/uploads.js)
 const ARCHIVE_NAME = /\.(zip|7z|rar)$/i;
 
+// От этой ширины глаз и «Добавить игру» стоят в шапке, на всех вкладках. Ниже — как раньше: глаз за «Фильтрами», добавление в меню
+const HEADER_TOOLS = '(min-width: 1100px)';
+const onWidthShift = (fn) => {
+  const media = window.matchMedia(HEADER_TOOLS);
+  media.addEventListener('change', fn);
+  return () => media.removeEventListener('change', fn);
+};
+
 const Toolbar = ({ 
   searchQuery, setSearchQuery, availableTags, selectedTag, setSelectedTag,
   currentSort, setCurrentSort, onUploadSuccess, t, showToast, onOpenGame,
-  blurCovers, setBlurCovers, canUpload,
+  blurCovers, setBlurCovers, canUpload, authed = canUpload,
   availableLangs = [], langFilter, setLangFilter, lang, openUploadRef, onTargetPicked,
+  // Вкладка «Место» (App.jsx): места на сервере не хватает — там видно, что занимает диск
+  onOpenSpace,
+  // «Теги картинок» — фильтр по тому, что нарисовано в играх (App.jsx): { n, open, ordered, onClick }, picRef — кнопка, к ней прилегает панель
+  picTags = null, picRef = null,
+  // Свои подборки (App.jsx): список есть, когда есть хоть одна
+  lists = [], listFilter = '', setListFilter,
   // На главной — только поиск (и «глаз» с «Добавить игру» на компьютере): жанры, языки и сортировка
   // относятся к библиотеке. Сама панель стоит на обеих страницах — в ней живёт загрузка архива
   filters = true,
-  // На «Новинках» строку прячем, но не убираем: в панели живёт загрузка (очередь, пароль архива, отмена,
+  // На «Найти» строку прячем, но не убираем: в панели живёт загрузка (очередь, пароль архива, отмена,
   // «Добавить игру» из меню телефона) — её карточка и перетаскивание архива выводятся поверх страницы
   hideBar = false,
+  // На главной поиск, «глаз» и «Добавить игру» стоят в строке шапки (toolbar.css, .in-header; только на компьютере). Узел
+  // тот же и остаётся на месте в дереве: поиск с главной уводит в библиотеку, и поле не должно терять фокус и набранное
+  inHeader = false,
+  // Пустая библиотека (App.jsx): поиска нет — искать нечего; у добавления своя плитка, глаз — пока есть чьи обложки размывать
+  noSearch = false, showAdd = canUpload, showEye = true,
+  // Куда в шапке ставить глаз и «Добавить игру»: узел из Header, поэтому в «Найти» они тоже есть, хотя строка скрыта
+  toolsEl = null,
 }) => {
   const fileInputRef = useRef(null);
+  const toolsWide = useSyncExternalStore(onWidthShift, () => window.matchMedia(HEADER_TOOLS).matches);
 
   // Варианты трёх списков панели. Жанры — самые частые первыми: по алфавиту
   // нужное приходилось искать среди сотни строк. Теги формата («2dcg», «japanese game») есть почти
@@ -81,6 +106,9 @@ const Toolbar = ({
   const sortOptions = [
     ['newest', t.sort_new], ['oldest', t.sort_old], ['recent', t.sort_rec], ['playtime', t.sort_playtime],
     ['rating_desc', t.sort_rat], ['name', t.sort_alp], ['size_desc', t.sort_size_desc], ['size_asc', t.sort_size_asc],
+    // Эти задают столбцы списка: в выпадающем списке — только пока выбраны, он и так длинный
+    ...[['name_desc', t.sort_name_desc], ['version_desc', t.sort_version_desc], ['version_asc', t.sort_version_asc], ['status', t.sort_status], ['status_rev', t.sort_status_rev],
+      ['playtime_asc', t.sort_playtime_asc], ['rating_asc', t.sort_rating_asc]].filter(([value]) => value === currentSort),
   ].map(([value, label]) => ({ value, label }));
 
   // Выбор архива: для новой игры или для новой версии игры из библиотеки (target — { id, title }).
@@ -101,34 +129,53 @@ const Toolbar = ({
     };
     return () => { openUploadRef.current = null; };
   }, [openUploadRef]);
-  // На телефоне жанр, язык, сортировка и «глаз» — за кнопкой «Фильтры»: в четыре ряда панель
-  // отодвигала первую игру на полэкрана. Число на кнопке — сколько фильтров включено
-  const [filtersShown, setFiltersOpen] = useState(false);
+  // Жанр, язык, подборки и теги картинок — за кнопкой «Фильтры» на любой ширине, под панелью: фильтруют не каждый день, а в ряд они
+  // занимали полпанели. Ниже 1100 за ней же сортировка и «глаз». Число на кнопке — сколько фильтров включено; открытое запоминаем
+  const [filtersShown, setFiltersShown] = useState(() => { try { return localStorage.getItem('rpg_libfilters') === '1'; } catch { return false; } });
+  const setFiltersOpen = (next) => {
+    const on = typeof next === 'function' ? next(filtersShown) : next;
+    setFiltersShown(on);
+    try { localStorage.setItem('rpg_libfilters', on ? '1' : ''); } catch { /* панель просто не запомнится */ }
+  };
   const filtersOpen = filters && filtersShown;
   // Панель прилипает к верху под шапкой (index.css, .controls-zone): фильтровать и искать можно, не
   // прокручивая к началу. Высота прилипшей шапки на компьютере и телефоне разная — меряем её и отдаём
   // в --header-stuck; прилипла ли панель — в data-stuck (тень и фон), без перерисовки React
   const zoneRef = useRef(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const header = document.querySelector('header');
     const zone = zoneRef.current;
     if (!header || !zone) return undefined;
+    const root = document.documentElement.style;
     let stuckAt = 0;
+    let fixed = false;
     const measure = () => {
       stuckAt = Math.max(0, header.offsetHeight + (parseFloat(getComputedStyle(header).top) || 0));
-      document.documentElement.style.setProperty('--header-stuck', `${stuckAt}px`);
+      root.setProperty('--header-stuck', `${stuckAt}px`);
+      // Панель в шапке: слева её держат разделы (подписи на трёх языках, числа), справа — значок загрузок и «⋯»,
+      // и то и другое меняет ширину на ходу. getBoundingClientRect — в точках экрана, стили — в точках вёрстки (pageZoom.js)
+      fixed = getComputedStyle(zone).position === 'fixed';
+      const zoom = pageZoom();
+      const left = header.querySelector('.main-nav') || header.querySelector('.brand');
+      const side = header.querySelector('.header-side');
+      if (left) root.setProperty('--header-left', `${left.getBoundingClientRect().right / zoom}px`);
+      if (side) root.setProperty('--header-right', `${(header.getBoundingClientRect().right - side.getBoundingClientRect().left) / zoom}px`);
       // Сколько сверху закрыто прилипшими шапкой и панелью: на столько отступает прокрутка к заголовку
-      // или к карточке в фокусе (html { scroll-padding-top }) — иначе они уезжали под панель
-      document.documentElement.style.setProperty('--sticky-total', `${stuckAt + zone.offsetHeight + 12}px`);
+      // или к карточке в фокусе (html { scroll-padding-top }) — иначе они уезжали под панель. Панель в шапке места не занимает
+      root.setProperty('--sticky-total', `${stuckAt + (fixed ? 0 : zone.offsetHeight) + 12}px`);
       onScroll();
     };
-    const onScroll = () => { zone.dataset.stuck = zone.getBoundingClientRect().top / pageZoom() <= stuckAt + 1 && window.scrollY > 0 ? '1' : ''; };
+    const onScroll = () => { zone.dataset.stuck = !fixed && zone.getBoundingClientRect().top / pageZoom() <= stuckAt + 1 && window.scrollY > 0 ? '1' : ''; };
     const resize = new ResizeObserver(measure);
     resize.observe(header);
     resize.observe(zone);
+    // Ширина шапки от них не меняется: появился значок загрузок, сменился язык, подгрузился шрифт
+    for (const el of header.querySelectorAll('.main-nav, .brand, .header-side')) resize.observe(el);
     window.addEventListener('scroll', onScroll, { passive: true });
+    measure();
     return () => { resize.disconnect(); window.removeEventListener('scroll', onScroll); };
-  }, []);
+    // authed: после входа в шапке появляются разделы — за ними надо следить (canUpload у человека не владельца не меняется)
+  }, [inHeader, authed]);
 
   // «/» — сразу в поиск, как на GitHub и YouTube: когда поверх страницы ничего не открыто и курсор
   // не в поле ввода
@@ -143,7 +190,23 @@ const Toolbar = ({
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
   }, []);
-  const activeFilters = (selectedTag !== 'all' ? 1 : 0) + (langFilter !== 'all' ? 1 : 0);
+  // Библиотека: начали печатать буквы или цифры — сразу в поиск. Без preventDefault: знак сам попадёт в поле и способ ввода
+  // (японский, китайский) останется при своём. Клавиша H — «Скрыть» и в другой раскладке (App.jsx, по e.code), поиск с неё не начинается
+  useEffect(() => {
+    if (!filters) return undefined;
+    const onKey = (e) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.code === 'KeyH') return;
+      if (!/^[\p{L}\p{N}]$/u.test(e.key) && !(e.key === 'Process' && /^(Key|Digit)/.test(e.code))) return;
+      if (!pageKeysFree(e) || !searchRef.current) return;
+      searchRef.current.focus();
+      // Уже что-то написано: продолжаем в конце, а не перед ним
+      const end = searchRef.current.value.length;
+      searchRef.current.setSelectionRange(end, end);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [filters]);
+  const activeFilters = (selectedTag !== 'all' ? 1 : 0) + (langFilter !== 'all' ? 1 : 0) + (listFilter ? 1 : 0) + (picTags?.n ? 1 : 0);
   const [isDragging, setIsDragging] = useState(false);
   // Загрузка: phase — start, upload, resync, retry, processing, done, failed (resumableUpload.js)
   const [upload, setUpload] = useState(IDLE);
@@ -203,6 +266,27 @@ const Toolbar = ({
     startNext();
   };
 
+  // Архив, выбранный как новая игра, бывает новой версией игры из библиотеки — иначе вторая карточка с пустыми сейвами.
+  // Спрашиваем до отправки и сразу про все, а не когда подойдёт очередь: за большой очередью человек не сидит. Остальные
+  // идут сразу, сервер не ответил — вопроса нет. Вопросов бывает несколько: в каждом — имя файла
+  const addNew = async (files) => {
+    // Человек с правом загрузки добавляет только новые игры: вопроса про новую версию ему нет, и этот адрес ему закрыт
+    if (!isOwner()) { enqueueRef.current(files); return; }
+    const answers = await Promise.all(files.map((f) => (ARCHIVE_NAME.test(f.name) ? matchUpload(f.name).catch(() => null) : null)));
+    const plain = files.filter((_, i) => !answers[i]?.match);
+    if (plain.length) enqueueRef.current(plain);
+    for (const [i, file] of files.entries()) {
+      const match = answers[i]?.match;
+      if (!match) continue;
+      const choice = await confirmDialog({
+        title: t.up_newver_title(match.title), name: file.name, text: t.up_newver_text,
+        confirmLabel: t.up_newver_replace, otherLabel: t.up_newver_separate, cover: getCoverUrl(match, 360),
+      });
+      if (choice === 'other') separateRef.current.add(file);
+      if (choice) enqueueRef.current([file], choice === true ? { id: match.id, title: match.title } : null);
+    }
+  };
+
   const handleFileSelect = (e) => {
     const files = Array.from(e.target.files || []);
     const target = targetRef.current;
@@ -217,7 +301,7 @@ const Toolbar = ({
       if (files.length > 1) showToast(t.up_one_for_update, 'error');
       enqueue(files.slice(0, 1), target);
     } else {
-      enqueue(files);
+      addNew(files);
     }
   };
 
@@ -226,6 +310,9 @@ const Toolbar = ({
   // иначе после смены языка загрузка писала бы сообщения на старом.
   const uploadFileRef = useRef(null);
   const enqueueRef = useRef(null);
+  const addNewRef = useRef(null);
+  // Архивы, про которые человек сам сказал «Добавить отдельной игрой»: «появилась вторая копия» им уже не новость
+  const separateRef = useRef(new WeakSet());
 
   // Архив можно бросить в любое место страницы, а не только на кнопку: кнопка
   // на телефоне и на широком экране — маленькая цель, а при прокрутке её вообще не видно.
@@ -267,7 +354,7 @@ const Toolbar = ({
       setIsDragging(false);
       // Несколько архивов разом — все в очередь; идёт загрузка — встанут за ней
       const files = Array.from(e.dataTransfer.files || []);
-      if (files.length) enqueueRef.current(files);
+      if (files.length) addNewRef.current(files);
     };
 
     window.addEventListener('dragstart', onStart);
@@ -314,10 +401,14 @@ const Toolbar = ({
     return () => window.removeEventListener('beforeunload', warn);
   }, [leaving]);
 
+  // Кнопка «Открыть «Место»» у тоста и строки, которым не хватило места
+  const spaceAction = onOpenSpace && isOwner() ? { label: t.space_open, onClick: onOpenSpace } : null;
+  const sizes = (x) => [fmtSize(x?.need || 0, t), fmtSize(x?.free || 0, t)];
+
   const uploadErrorText = (e) => {
     if (e.kind === 'read') return t.up_read(e.received ? fmtSize(e.received, t) : '');
     // Не распаковалось — это ответ сервера (из состояния загрузки, без кода ответа), а не сеть
-    const text = errorText(t, e.processed ? { status: 422, error: e.message } : e, { fallback: t.up_err });
+    const text = errorText(t, e.processed ? { status: 422, error: e.message, reason: e.reason, params: e.params } : e, { fallback: t.up_err });
     return e.received > 0 && !e.processed ? `${text}. ${t.up_resume_hint(fmtSize(e.received, t))}` : text;
   };
 
@@ -337,7 +428,6 @@ const Toolbar = ({
     if (lands) landingBegin();
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    let id = null;
     // Остаток времени: скорость — с начала этой передачи (при докачке — с места, где продолжили), не раньше чем через 3 с
     const clock = { at: 0, from: 0, eta: 0 };
     setUpload({ active: true, name: file.name, size: file.size, received: 0, phase: 'start', target, file });
@@ -347,7 +437,6 @@ const Toolbar = ({
         target: target?.id,
         mode: target?.mode,
         onState: (state) => {
-          if (state.id) id = state.id;
           if (state.resumed) showToast(t.up_resumed(fmtSize(state.received, t), fmtSize(state.size, t)), 'success');
           if (typeof state.received === 'number') {
             const now = Date.now();
@@ -359,6 +448,11 @@ const Toolbar = ({
         // Ответ — из поля пароля на карточке; отмена загрузки обрывает ожидание. За архивом в очереди
         // ждут другие — пароль не ждём: архив остаётся на сервере ждать пароля (его спросит список
         // «не догружено», когда очередь пройдёт), а очередь идёт дальше
+        // Оценка места не сошлась: архив с игрой может не влезть. Решает человек — сжатый репак влезет и так
+        // Человеку «всё равно» не предлагаем: сервер отвечает ему жёстким отказом
+        askSpace: isOwner() ? ({ need, free }) => confirmDialog({
+          title: t.up_space_title, name: file.name, text: t.up_space_text(...sizes({ need, free })), confirmLabel: t.up_space_anyway,
+        }) : undefined,
         askPassword: () => new Promise((resolve, reject) => {
           if (queueRef.current.length > 0) {
             reject(new UploadError('parked'));
@@ -368,7 +462,9 @@ const Toolbar = ({
           ctrl.signal.addEventListener('abort', () => reject(new UploadError('cancelled')), { once: true });
         }),
       });
-      setUpload((prev) => ({ ...prev, phase: 'done', patch: result?.patch || null }));
+      setUpload((prev) => ({ ...prev, phase: 'done', patch: result?.patch || null, copy: !!result?.copy }));
+      // Такая игра уже была: вышла вторая карточка. Человек мог хотеть обновить её — сказать об этом, а не «игра добавлена»
+      if (result?.copy && !separateRef.current.has(file)) showToast(t.up_copy(file.name), 'info');
       onUploadSuccess();
       finale = true;
       // Следующий архив из очереди мог уже занять плашку: тогда финала для этого не будет, игру ставим сразу
@@ -394,11 +490,15 @@ const Toolbar = ({
         refreshPending();
         return;
       }
-      const text = uploadErrorText(e);
-      showToast(text, 'error');
+      // Места нет: до начала — не грузим (не влезет и архив или «всё равно» не нажали); на распаковке — архив ждёт
+      // на сервере, «Повторить» у него в списке. Причина — нашими словами на любом языке, и кнопка «Место»
+      const text = e.space && e.processed ? t.up_space_unpack(...sizes(e.body))
+        : e.space ? (e.body?.hard ? t.up_space_hard : t.up_space_text)(...sizes(e.body))
+          : uploadErrorText(e);
+      showToast(text, 'error', e.space ? spaceAction : null);
       setUpload((prev) => ({ ...prev, phase: 'failed', text }));
-      // Ошибку распаковки уже показали — из списка неудачных её убираем
-      if (e.processed && id) await cancelUpload(id).catch(() => {});
+      // Отказ в распаковке остаётся в списке с сервера, пока человек его не закроет: кто отошёл на время большой загрузки,
+      // вернётся и прочтёт причину. Карточка уходит — на её месте встаёт строка этого списка
       closeLater(8000);
     } finally {
       abortRef.current = null;
@@ -433,6 +533,7 @@ const Toolbar = ({
   useEffect(() => {
     uploadFileRef.current = uploadFile;
     enqueueRef.current = enqueue;
+    addNewRef.current = addNew;
   });
 
   // Отменить идущую загрузку: полученное сервер удалит. Случайное касание на телефоне стоило бы
@@ -447,10 +548,20 @@ const Toolbar = ({
     if (upload.id) cancelUpload(upload.id).catch(() => {}).finally(refreshPending);
   };
 
-  // Убрать из списка: недогруженную или ждущую пароля — удалить с сервера (тоже с вопросом),
+  // Ждёт места: место освободили — распаковать снова. Не хватит и теперь — строка останется с новыми числами
+  const retryPending = async (u) => {
+    try {
+      await retryUpload(u.id);
+    } catch (e) {
+      showToast(errorText(t, e, { fallback: t.up_err }), 'error');
+    }
+    refreshPending();
+  };
+
+  // Убрать из списка: недогруженную или ждущую пароля или места — удалить с сервера (тоже с вопросом),
   // неудачную — просто скрыть
   const forgetPending = async (u) => {
-    if (u.state === 'uploading' || u.state === 'password') {
+    if (u.state === 'uploading' || u.state === 'password' || u.state === 'space') {
       const ok = await confirmDialog({ title: t.up_forget_title, name: u.name, text: t.up_forget_text, confirmLabel: t.up_forget, danger: true });
       if (!ok) return;
     }
@@ -465,7 +576,7 @@ const Toolbar = ({
     processing: (upload.step && t.up_steps[upload.step]) || t.up_wait,
     done: upload.target?.mode === 'patch'
       ? t.up_patched(upload.patch?.replaced ?? 0, upload.patch?.added ?? 0)
-      : upload.target ? t.up_updated : t.up_done,
+      : upload.target ? t.up_updated : upload.copy ? t.up_copy_short : t.up_done,
     failed: upload.text,
   }[upload.phase] || t.up_prog(fmtSize(upload.received || 0, t), fmtSize(upload.size || 0, t));
   // Та же загрузка, что идёт сейчас (при докачке сервер уже знает её под этим же именем), в списке второй раз не нужна
@@ -494,7 +605,10 @@ const Toolbar = ({
   const pendingItems = shownPending.map((u) => {
     const text = u.state === 'uploading' ? (u.busy ? t.up_busy_other : t.up_left)(fmtSize(u.received, t), fmtSize(u.size, t))
       : u.state === 'processing' ? (u.queued ? t.up_steps.queued : t.up_wait)
-        : u.state === 'password' ? (u.error ? t.up_pw_wrong : t.up_pw_need) : u.error;
+        : u.state === 'password' ? (u.error ? t.up_pw_wrong : t.up_pw_need)
+          : u.state === 'space' ? t.up_space_unpack(...sizes(u))
+            // Неудачная: причина из метки загрузки, как и у той, за которой следит страница (uploadErrorText)
+            : errorText(t, { status: 422, error: u.error, reason: u.reason, params: u.params }, { fallback: t.up_err });
     return {
       key: u.id, name: nameOf(u.target, u.mode, u.name), stage: u.state === 'uploading' ? 0 : 1, frac: (u.received || 0) / (u.size || 1),
       pct: u.state === 'uploading' ? Math.floor(((u.received || 0) / (u.size || 1)) * 100) : null,
@@ -502,7 +616,8 @@ const Toolbar = ({
       // В строке плашки — только «сколько из скольких»; «Не догружено: …» целиком читается в панели
       short: u.state === 'uploading' && !u.busy ? fmtOf(u.received, u.size, t) : undefined,
       bad: u.state === 'error' || (u.state === 'password' && !!u.error),
-      ask: u.state === 'password' ? 'password' : u.state === 'uploading' && !u.busy ? 'left' : null,
+      ask: u.state === 'password' ? 'password' : u.state === 'space' ? 'space' : u.state === 'uploading' && !u.busy ? 'left' : null,
+      acts: u.state === 'space' ? [{ key: 'retry', label: t.jd_retry, onClick: () => retryPending(u) }, ...(spaceAction ? [{ key: 'space', ...spaceAction, close: true }] : [])] : null,
       onPick: u.state === 'uploading' && !u.busy ? () => openUpload(u.target ? { id: u.target, title: u.target, mode: u.mode || undefined } : null) : null,
       onStop: u.state !== 'processing' && !u.busy ? () => forgetPending(u) : null,
       stopLabel: u.state === 'error' ? t.up_hide : t.tb_cancel, stopTitle: u.state === 'error' ? t.up_hide : t.up_forget,
@@ -514,14 +629,53 @@ const Toolbar = ({
     onRemove: () => setQueue(queueRef.current.filter((x) => x.key !== q.key)),
   }));
 
+  // Пока выбран тег картинок, порядок — по числу таких кадров. При открытой панели список остаётся, но выключен: иначе
+  // кнопки в ряду разъезжались бы прямо под рукой, и панель оказывалась не под своей кнопкой
+  const sortPicker = (!picTags?.ordered || picTags.open) && <Picker options={sortOptions} value={currentSort} onChange={setCurrentSort} label={t.list_sort} className="sort-order" disabled={!!picTags?.ordered} />;
+
+  // Кнопка глаза без текста, поэтому смысл — в подсказке и в aria-label:
+  // иначе назначение приходится угадывать, а экранный диктор читает «кнопка»
+  const tools = (
+    <>
+      {showEye && <button
+        type="button"
+        className={`cover-toggle ${blurCovers ? 'active' : ''}`}
+        onClick={() => setBlurCovers(v => !v)}
+        data-tip={blurCovers ? t.covers_show : t.covers_hide}
+        aria-label={blurCovers ? t.covers_show : t.covers_hide}
+        aria-pressed={blurCovers}
+      >
+        {blurCovers ? (
+          <IconEyeOff />
+        ) : (
+          <IconEye />
+        )}
+      </button>}
+
+      {/* Игры добавляет владелец и человек с правом загрузки: у остальных кнопки нет */}
+      {canUpload && showAdd && (
+        <button
+          type="button"
+          className="upload-btn"
+          aria-label={t.add_game}
+          data-tip={t.add_game}
+          onClick={() => openUpload()}
+        >
+          <IconUpload />
+          {/* На ширине ноутбука подпись прячется — кнопка значком, как «глаз», и ряд влезает в строку */}
+          <span className="upload-btn-text">{t.add_game}</span>
+        </button>
+      )}
+    </>
+  );
+
   return (
-    <div ref={zoneRef} className={`controls-zone${filtersOpen ? ' filters-open' : ''}${filters ? '' : ' compact'}${hideBar ? ' bar-hidden' : ''}`}>
-      <SearchBox
+    <div ref={zoneRef} className={`controls-zone${filtersOpen ? ' filters-open' : ''}${filters ? '' : ' compact'}${hideBar ? ' bar-hidden' : ''}${inHeader ? ' in-header' : ''}`}>
+      {!noSearch && <SearchBox
         value={searchQuery} onChange={setSearchQuery} placeholder={t.search} clearLabel={t.search_clear}
         inputRef={searchRef} keyHint="/"
-      />
+      />}
 
-      {/* Видна только на телефоне (index.css): на широком экране всё стоит в ряд и так */}
       {filters && <button
         type="button"
         className={`filters-toggle${filtersOpen ? ' open' : ''}${activeFilters ? ' active' : ''}`}
@@ -533,6 +687,9 @@ const Toolbar = ({
         {t.filters}
         {activeFilters > 0 && <span className="filters-count">{activeFilters}</span>}
       </button>}
+
+      {/* От 1100 сортировка стоит рядом с «Фильтры» и видна всегда; ниже — внутри, вместе с «глазом». Один экземпляр на ширину */}
+      {filters && toolsWide && sortPicker}
 
       <div className="toolbar-filters" id="toolbar-filters">
       {/* Три списка одного вида: жанры с поиском (их под сотню), языки и сортировка —
@@ -552,37 +709,26 @@ const Toolbar = ({
         />
       )}
 
-      <Picker options={sortOptions} value={currentSort} onChange={setCurrentSort} label={t.list_sort} className="sort-order" />
+      {lists.length > 0 && (
+        <Picker
+          options={[{ value: '', label: t.lists_all }, ...lists.map((x) => ({ value: x, label: x }))]} value={listFilter} onChange={setListFilter} label={t.lists_label}
+          searchable={lists.length > 8} searchPlaceholder={t.lists_search} emptyText={t.lists_none}
+          highlight={!!listFilter} className="list-filter"
+        />
+      )}
+
+      {picTags && (
+        <div className="picker pic-tags-tool">
+          <button ref={picRef} type="button" className={`sort-box picker-btn ${picTags.n ? 'has-value' : ''}`} aria-haspopup="dialog" aria-expanded={picTags.open} onClick={picTags.onClick}>
+            <IconTag /><span>{t.lib_pic_tags}</span>{picTags.n > 0 && <span className="tag-tool-n">{picTags.n}</span>}
+          </button>
+        </div>
+      )}
+
+      {!toolsWide && sortPicker}
       </>}
 
-      {/* Кнопка без текста, поэтому смысл — в подсказке и в aria-label:
-          иначе назначение приходится угадывать, а экранный диктор читает «кнопка» */}
-      <button
-        type="button"
-        className={`cover-toggle ${blurCovers ? 'active' : ''}`}
-        onClick={() => setBlurCovers(v => !v)}
-        data-tip={blurCovers ? t.covers_show : t.covers_hide}
-        aria-label={blurCovers ? t.covers_show : t.covers_hide}
-        aria-pressed={blurCovers}
-      >
-        {blurCovers ? (
-          <IconEyeOff />
-        ) : (
-          <IconEye />
-        )}
-      </button>
-
-      <button
-        type="button"
-        className="upload-btn"
-        aria-label={t.add_game}
-        data-tip={t.add_game}
-        onClick={() => openUpload()}
-      >
-        <IconUpload />
-        {/* На ширине ноутбука подпись прячется — кнопка значком, как «глаз», и ряд влезает в строку */}
-        <span className="upload-btn-text">{t.add_game}</span>
-      </button>
+      {toolsWide && toolsEl ? createPortal(tools, toolsEl) : tools}
       </div>
 
       <input type="file" multiple ref={fileInputRef} style={{ display: 'none' }} accept=".zip,.7z,.rar,application/zip,application/x-rar-compressed,application/vnd.rar,application/x-7z-compressed,application/octet-stream" onChange={handleFileSelect}/>

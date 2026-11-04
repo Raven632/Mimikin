@@ -11,10 +11,10 @@ Eine selbst gehostete Bibliothek für RPG-Maker-MV- und -MZ-Spiele. Archiv hochl
 
 [English](README.md) | [Русский](README.ru.md) | Deutsch
 
-[![Release](https://img.shields.io/github/v/release/Raven632/rpg-library?style=flat-square&color=c9a84c)](https://github.com/Raven632/rpg-library/releases)
-[![CI](https://img.shields.io/github/actions/workflow/status/Raven632/rpg-library/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/Raven632/rpg-library/actions)
+[![Release](https://img.shields.io/github/v/release/Raven632/Mimikin?style=flat-square&color=c9a84c)](https://github.com/Raven632/Mimikin/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/Raven632/Mimikin/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/Raven632/Mimikin/actions)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-c9a84c?style=flat-square)](LICENSE)
-![Tests](https://img.shields.io/badge/tests-287_server%2C_197_UI%2C_13_OCR-3fb950?style=flat-square)
+![Tests](https://img.shields.io/badge/tests-506_server%2C_429_UI%2C_13_OCR-3fb950?style=flat-square)
 [![docker compose up](https://img.shields.io/badge/docker_compose-up-2496ED?style=flat-square&logo=docker&logoColor=white)](#schnellstart)
 
 <img src="rest/img/demo.gif" alt="Rundgang durch die Demo-Bibliothek: Regale auf der Startseite, ein Spielfenster, die Galerie spielt eine Szene ab, das Raster der Bibliothek" width="880">
@@ -52,6 +52,7 @@ Das Logo ist ein Mimic, die Schatztruhe, die zubeißt. Er wohnt in der Kopfzeile
 - Spielstände liegen auf dem Server. Überschriebene Slots landen im „Spielstand-Verlauf“ (die letzten fünf, danach einer pro 10 Minuten, bis zu 30 je Slot). Ein offline gemachter Spielstand überschreibt nie einen neueren von einem anderen Gerät.
 - `P` merkt sich einen Moment: ein Screenshot plus ein Spielstand, von dem aus du weiterspielen kannst. Das Spiel setzt außerdem Rücksprungpunkte vor Szenen, Entscheidungen, Kämpfen und Kartenwechseln, und `Backspace` spult zurück, bis auf eine einzelne Dialogzeile. Der „Weg“ listet den Durchlauf Tag für Tag auf.
 - Ein Menü im Spiel: Turbo ×3, ein Cheat-Menü (Gruppe, Items, Variablen, Schalter, Teleport, Szenen freischalten), Speichern an jeder Stelle der Karte, Gamepad auf dem Bildschirm und echte Gamepads, Strecken und Glätten.
+- Die Bibliothek auf dem Handy öffnen: ⋯ → „Auf dem Handy öffnen“ zeigt einen QR-Code der Adresse und wie man sie zum Startbildschirm hinzufügt.
 - Spiele kommen von einem zweiten Port. Die Skripte eines Spiels erreichen die API der Bibliothek nicht und rufen keine fremden Seiten auf.
 
 ### Galerie
@@ -70,6 +71,10 @@ Das Logo ist ein Mimic, die Schatztruhe, die zubeißt. Er wohnt in der Kopfzeile
 - Uploads in jeder Größe, auch vom Handy. Ein abgebrochener Upload setzt dort fort, wo er stand, auch von einem anderen Gerät aus. Archive mit Passwort und Archive in Archiven werden entpackt.
 - Füge einen Link zu einem Datei-Hoster ein, dein MyJDownloader lädt die Datei, und die Bibliothek installiert, was ankommt. Ein Ordner `_inbox` und eine SFTP-Seedbox funktionieren genauso.
 - Beim Aktualisieren bleiben Spielstände, Spielzeit und Daten erhalten. Die alte Version wandert nach `_old` und kommt mit einem Klick zurück.
+
+- Mehrere Personen in einer Bibliothek. Der Besitzer legt sie unter Einstellungen → Benutzer an; alle sehen dieselben Spiele und haben eigene Spielstände, Momente, Notizen, Listen, Bewertungen und Spielzeit. Die Bibliothek ändern darf nur der Besitzer.
+- Eigene Sicht auf die Bibliothek: Ansichten (Details, groß, Liste, Wand) mit Gruppen nach Status, Liste oder Datum, Serien, mehrere Spiele auf einmal auswählen, eigene Listen und Notizen, ein Kalender „Meine Spieltage“ auf der Statistikseite.
+- Bild-Tags: Jedes analysierte Bild bekommt Tags aus einer festen Liste. So lässt sich die Bibliothek danach filtern, was gezeichnet ist, alle Bilder als Feed durchblättern oder mit einem eigenen Bild suchen.
 
 ### Übersetzen
 
@@ -117,7 +122,7 @@ Bibliothek und Spiele liegen auf zwei Ports. Ein Spiel erreicht seine Dateien un
 
 ## So kommt es auf den Server
 
-Jeder Push auf `main` startet vier GitHub-Actions-Jobs: API-Tests (Node, Redis, ffmpeg), OCR-Tests, Lint und Build der Oberfläche sowie 197 Playwright-Tests in Docker ohne Netzzugang. Sind alle vier grün, schiebt CI den Branch `deploy` weiter. Der Server fragt die GitHub-API nie ab. Ein systemd-Timer prüft diesen Branch jede Minute, baut neu und wartet, bis die Seite antwortet. Kommt binnen zwei Minuten keine Antwort, stellt das Skript das vorige Image wieder her und schickt eine Telegram-Meldung.
+Jeder Push auf `main` startet vier GitHub-Actions-Jobs: API-Tests (Node, Redis, ffmpeg), OCR-Tests, Lint und Build der Oberfläche sowie 429 Playwright-Tests in Docker ohne Netzzugang. Sind alle vier grün, schiebt CI den Branch `deploy` weiter. Der Server fragt die GitHub-API nie ab. Ein systemd-Timer prüft diesen Branch jede Minute, baut neu und wartet, bis die Seite antwortet. Kommt binnen zwei Minuten keine Antwort, stellt das Skript das vorige Image wieder her und schickt eine Telegram-Meldung.
 
 ```mermaid
 flowchart LR
@@ -133,8 +138,8 @@ flowchart LR
 Du brauchst Linux mit Docker Engine. Docker Desktop geht auch, aber große Archive sind durch dessen VM langsam. Ein fertiges Image gibt es nicht; Compose baut es aus diesem Repository.
 
 ```bash
-git clone https://github.com/Raven632/rpg-library.git
-cd rpg-library
+git clone https://github.com/Raven632/Mimikin.git
+cd Mimikin
 cp .env.example .env              # optional; jede Einstellung ist darin beschrieben (die Kommentare sind auf Russisch)
 docker compose up -d --build      # der erste Build lädt die OCR-Modelle, einige hundert MB
 ```
@@ -190,13 +195,107 @@ Die API startet von selbst neu, wenn sich `api/src` ändert (`node --watch`). Vi
 <summary><b>Tests</b></summary>
 
 ```bash
-(cd api && npm ci && npm test)                # 287 Server- und HTTP-Tests; braucht ffmpeg, für http.test.js auch Redis
+(cd api && npm ci && npm test)                # 506 Server- und HTTP-Tests; braucht ffmpeg, für http.test.js auch Redis
 (cd frontend && npm ci && npm run lint)       # ESLint
-tests/e2e/run.sh                              # 197 Playwright-Tests in Docker, offline, Desktop- und Handybreite
+tests/e2e/run.sh                              # 429 Playwright-Tests in Docker, offline, Desktop- und Handybreite
 (cd ocr && python -m unittest test_pipeline)  # 13 OCR-Tests; brauchen numpy, pillow, opencv-python-headless
 ```
 
 Die Servertests laufen im eingebauten Test-Runner von Node (`node:test`) und ohne Netz. Externe Quellen sind nachgebildet; Uploads und Spielserver laufen auf echten HTTP-Servern an freien Ports. Eine eigene Prüfung, `tests/compat`, öffnet jedes Spiel einer Bibliothek in Headless-Chromium und meldet die erreichte Szene. Die Screenshots oben stammen aus einer Demo-Bibliothek erfundener Spiele (`api/scripts/demo-library.js`).
+
+</details>
+
+## Betrieb
+
+<details>
+<summary><b>Windows, macOS, NAS, ARM</b></summary>
+
+Das Projekt läuft auf Linux mit Docker Engine auf x86-64. Die Hinweise unten folgen daraus, wie die anderen Systeme arbeiten; das Projekt hat sie dort nicht ausgeführt. Wenn etwas nicht stimmt, bitte ein Issue öffnen.
+
+- **Windows:** Docker Desktop mit dem WSL-2-Backend. Klonen und starten Sie im Home-Ordner von WSL, nicht unter `/mnt/c`: Ein von Windows in die VM freigegebener Ordner macht große Archive langsam.
+- **macOS:** Docker Desktop (Colima und OrbStack bieten denselben Befehl `docker`). Geben Sie der VM unter Settings → Resources mindestens 3 GB, denn die Bildanalyse rechnet nur mit diesem Teil.
+- **NAS (Synology, QNAP, Unraid, TrueNAS):** Port 80 belegt meist die eigene Seite des NAS, setzen Sie also `HTTP_PORT=8090` in `.env`. Beim Start gibt der Container den Ordner `games` an den Benutzer `node` (UID 1000). Ist Ihr NAS-Benutzer ein anderer, starten Sie den Container als dieser Benutzer: `user: "1026:100"` (Zahlen aus `id <Benutzer>`) beim Dienst `rpg-library` in `docker-compose.override.yml`, oder übergeben Sie den Ordner einmal mit `sudo chown -R 1000:1000 /pfad/zu/games`. `games` gehört auf eine Platte des NAS selbst: SQLite ist auf einer NFS- oder SMB-Freigabe nicht zuverlässig. Das Bauen des Images ist für einen NAS-Prozessor schwer.
+- **ARM (Raspberry Pi und andere Boards):** Ein 64-Bit-System ist nötig. Unter 2 GB Speicher startet die Bildanalyse nicht von selbst. Spiele und Datenbank gehören eher auf eine SSD als auf eine SD-Karte.
+- **Fedora, RHEL und andere SELinux-Systeme:** Das `:z` am Spiele-Volume steht schon in `docker-compose.yml`. Archive in `games/_inbox` kopieren; `mv` behält das Label der Datei, und der Container wird abgewiesen.
+
+</details>
+
+<details>
+<summary><b>Ports ändern</b></summary>
+
+`HTTP_PORT` und `GAME_PORT` in `.env` setzen und `docker compose up -d` ausführen. Im Container bleiben es 3000 und 3001. Stimmt der Spiele-Port nicht mit dem überein, den die Seite kennt, oder antwortet dort etwas anderes, öffnet sich ein Spiel nicht: Die Bibliothek zeigt die Adresse, die sie versucht hat, und was zu ändern ist. Beide Ports müssen in der Firewall offen sein (firewalld: `sudo firewall-cmd --permanent --add-port=80/tcp --add-port=8081/tcp && sudo firewall-cmd --reload`).
+
+</details>
+
+<details>
+<summary><b>Aktualisieren</b></summary>
+
+```bash
+git pull && docker compose up -d --build
+```
+
+Spiele, Datenbank und Spielstände bleiben im Spieleordner. Vor einem Sprung auf eine neue Hauptversion eine Sicherung anlegen („⋯ → Einstellungen → Sicherungen“). Alte Images bleiben liegen und belegen Platz; `docker image prune` entfernt sie und rührt die Daten nicht an. Ab 5.x oder älter: Spiele öffnen sich jetzt auf einem eigenen Port, `GAME_PORT`; öffnen Sie ihn dort, wo Sie `HTTP_PORT` geöffnet haben.
+
+</details>
+
+<details>
+<summary><b>Reverse-Proxy und HTTPS</b></summary>
+
+Die Bibliothek spricht reines HTTP. Außerhalb des Heimnetzes nutzen Sie Tailscale oder ein VPN oder stellen einen HTTPS-Proxy davor. Er braucht zwei Adressen, eine für die Bibliothek und eine für die Spiele, weil der Code eines Spiels die Anmeldung der Bibliothek nicht bekommen darf: `mimikin.example.com` auf Port 3000 und `games.example.com` auf Port 3001. Ein Unterordner (`/mimikin/`) geht nicht.
+
+1. Die Ports nur für den Proxy veröffentlichen, in `docker-compose.override.yml`:
+   ```yaml
+   services:
+     rpg-library:
+       ports: !override
+         - "127.0.0.1:3000:3000"
+         - "127.0.0.1:3001:3001"
+   ```
+2. Dem Server Bescheid geben, in `.env`:
+   ```bash
+   TRUST_PROXY=1                                  # ein Proxy vor dem Server; ohne Proxy weglassen
+   GAME_ORIGIN=https://games.example.com          # eine HTTPS-Seite öffnet kein Spiel über HTTP
+   ```
+3. Caddy braucht nur zwei Blöcke; Zertifikate, WebSockets und große Uploads erledigt er selbst:
+   ```caddy
+   mimikin.example.com {
+   	reverse_proxy 127.0.0.1:3000
+   }
+
+   games.example.com {
+   	reverse_proxy 127.0.0.1:3001
+   }
+   ```
+
+Bei nginx brauchen dieselben zwei Server `client_max_body_size 0` (Upload-Stücke sind 16 bis 256 MB), lange `proxy_read_timeout` und `proxy_send_timeout`, `proxy_http_version 1.1` sowie die Header `Upgrade` und `Connection` für die Live-Synchronisation.
+
+</details>
+
+<details>
+<summary><b>Sicherung und Wiederherstellung</b></summary>
+
+„⋯ → Einstellungen → Sicherungen → Sicherung herunterladen“ erzeugt ein Zip mit Datenbank und Spielständen, ohne Spiele, Ihr Passwort und Schlüssel. „Aus Sicherung wiederherstellen“ führt eine solche Datei ein: Anmeldung und Schlüssel bleiben, die bisherige Datenbank liegt 30 Tage im Papierkorb. Spiele, deren Ordner vorhanden sind, kommen vollständig zurück; die übrigen warten im Regal mit Spielzeit, Notizen und Spielständen, bis Sie das Archiv hochladen. Cover sind nicht in der Sicherung. Ein verbundener Telegram-Bot schickt dieselbe Sicherung einmal am Tag, wenn sich etwas geändert hat.
+
+Von Hand zuerst den Container anhalten (die Kopie einer laufenden Datenbank kann kaputt sein) und `library.db` (mit `-wal` und `-shm`, falls vorhanden), `_saves/` und `_media/.secrets.key` kopieren; ohne diesen Schlüssel müssen in den Einstellungen gespeicherte Schlüssel neu eingegeben werden. Eine manuelle Kopie enthält Ihre Anmeldung und verschlüsselte Schlüssel, behandeln Sie sie wie ein Passwort. `deploy/` enthält die Skripte des projekteigenen Servers und gehört nicht zur Installation.
+
+</details>
+
+<details>
+<summary><b>Bildanalyse, Modelle und der Ordner _inbox</b></summary>
+
+Der Server geht im Hintergrund die Bilder Ihrer Spiele durch: Jedes Bild bekommt einen Vektor und Tags. Bildsuche, Feed und Tags hängen davon ab. Die Analyse ist standardmäßig an und unter „⋯ → Einstellungen → Allgemein → Bildanalyse“ schaltbar (ohne Neustart). Der leise Modus braucht etwa einen Prozessorkern, der schnelle bis zu drei. Unter 2 GB Speicher startet sie nicht. Eine große Bibliothek braucht beim ersten Mal einige Tage, danach Minuten pro neuem Spiel. Die Modelle (etwa 740 MB) werden einmal von Hugging Face nach `games/_media/_models` geladen; bei ausgeschalteter Analyse wird nichts geladen.
+
+Eine Datei `.zip`, `.7z` oder `.rar` in `games/_inbox` kommt von selbst in die Bibliothek. Der Ordner wird alle 15 Sekunden geprüft, ein Archiv wird genommen, wenn sich seine Größe nicht mehr ändert. Teile wie `.part1.rar`, `.part2.rar` warten aufeinander. Ein fehlgeschlagenes Archiv landet in `_inbox/_failed`. `INBOX_DIR` verlegt den Ordner.
+
+</details>
+
+<details>
+<summary><b>Wenn etwas schiefgeht</b></summary>
+
+- **Passwort vergessen:** Es gibt keinen Mailserver, also `docker exec -it <Container> node scripts/reset-password.js` ausführen (Containername aus `docker ps`). Das Skript fragt zweimal nach dem neuen Passwort. Mit dem Namen einer Person als Argument setzt es deren Passwort zurück.
+- **Person anlegen oder sperren:** Einstellungen → Benutzer. „Anmeldung sperren“ meldet die Geräte ab und behält die Daten, „Löschen“ behält Spielstände und Notizen in Sicherungen, „Passwort zurücksetzen“ vergibt ein neues vorläufiges.
+- **Die Seite sagt, die Datenbank sei nicht aufgegangen:** Der Server bleibt erreichbar und nennt den Grund (Rechte, volle Platte, beschädigte Datei). Die Datei ändert er nicht. Der genaue Fehler steht in `docker logs <Container>`, in der Zeile, die mit `[DB]` beginnt. Kann der Container den Spieleordner nicht übernehmen, hält er früher an, mit einer Zeile, die mit `Mimikin did not start` beginnt.
+- **Ein Problem melden:** Einstellungen → Über zeigt die letzten Warnungen des Servers und die Schaltfläche „Problembericht kopieren“. Schlüssel, Cookies, Passwörter, Pfade und Spieltitel werden auf dem Server entfernt. Fügen Sie ihn in einen [Bug Report](https://github.com/Raven632/Mimikin/issues/new?template=bug_report.md) ein.
 
 </details>
 
@@ -278,7 +377,7 @@ SQLite im WAL-Modus. Telegram-Meldungen: alles außer Problemen kommt ohne Ton, 
 
 ## Stand
 
-7.0 ist der aktuelle Release. Mimikin ist ein Ein-Personen-Projekt, und ich betreibe es auf meinem eigenen Heimserver.
+7.1 ist der aktuelle Release. Mimikin ist ein Ein-Personen-Projekt, und ich betreibe es auf meinem eigenen Heimserver.
 
 Bekannte Grenzen:
 

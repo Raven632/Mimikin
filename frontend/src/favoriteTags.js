@@ -12,7 +12,10 @@ export async function loadFavoriteTags() {
   try {
     const res = await fetch('/api/settings/favorite-tags');
     if (!res.ok) return;
-    tags = (await res.json()).tags || [];
+    const next = (await res.json()).tags || [];
+    // Тот же список — тот же массив: библиотека и открытое окно не перерисовываются при каждой загрузке игр
+    if (JSON.stringify(next) === JSON.stringify(tags)) return;
+    tags = next;
     emit();
   } catch { /* нет связи — отметок просто не будет */ }
 }

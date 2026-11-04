@@ -47,14 +47,29 @@ export function toRect(F, r, uniform, z = pageZoom()) {
 const NONE = 'translate(0px, 0px) scale(1, 1)';
 const tf = (t) => (!t || t === 'none' ? NONE : t);
 
-// Куда садится призрак обложки: пропорции карточки, вписанные в видимую обложку окна. Обложка окна другой
-// пропорции (вертикальная витрина) — призрак ложится по центру, настоящая проявляется следом
+// Пропорции самой картинки карточки: у object-fit: cover карточка показывает обрезок, а окно — картинку целиком
+const naturalRatio = (from) => (from.el.naturalWidth ? from.el.naturalWidth / from.el.naturalHeight : from.rect.w / from.rect.h);
+
+// Куда садится призрак обложки: картинка целиком, вписанная в видимую обложку окна
 function ghostBox(cover, from) {
   const g = cover.tagName === 'IMG' ? visibleRect(cover) : rectOf(cover);
   if (g.w < 2 || g.h < 2) return null;
-  const a = from.rect.w / from.rect.h;
+  const a = naturalRatio(from);
   const w = Math.min(g.w, g.h * a), h = w / a;
   return { x: g.x + (g.w - w) / 2, y: g.y + (g.h - h) / 2, w, h, cover: g };
+}
+
+// Картинка карточки целиком в её масштабе и что из неё видно. Призрак — вся картинка, обрезанная clip-path до
+// вида карточки; за полёт обрезка раскрывается до целой обложки, и настоящей обложке нечем отличаться от призрака
+const FULL = 'inset(0% 0% 0% 0%)';
+function cardShot(from) {
+  const R = from.rect;
+  if (!from.cropped || !from.el.naturalWidth) return { F: R, clip: FULL };
+  const nw = from.el.naturalWidth, nh = from.el.naturalHeight;
+  const s = Math.max(R.w / nw, R.h / nh);
+  const F = { x: R.x + (R.w - nw * s) / 2, y: R.y + (R.h - nh * s) / 2, w: nw * s, h: nh * s };
+  const p = (v) => `${Math.max(0, v * 100).toFixed(3)}%`;
+  return { F, clip: `inset(${p((R.y - F.y) / F.h)} ${p((F.x + F.w - R.x - R.w) / F.w)} ${p((F.y + F.h - R.y - R.h) / F.h)} ${p((R.x - F.x) / F.w)})` };
 }
 
 const coverOf = (win) => win.querySelector('#modal-cover, .modal-placeholder');
@@ -81,21 +96,26 @@ function endFlight(win, ghost) {
 // остальное содержимое проявляется с 170 мс, пока рамка садится
 export function flyOpen({ overlay, win, ghost }, from) {
   const ctl = { phase: 'opening', seq: 0, from, overlay, win, ghost };
+  // landed — окно село на место (или полёта нет): отсюда можно тяжёлое — монтировать остальное и применять отложенные
+  // ответы сервера (flyGate.js). Отменили полёт или закрыли окно на полпути — не наступит, окно всё равно уходит
+  let land;
+  ctl.landed = new Promise((resolve) => { land = resolve; });
+  const open = () => { ctl.phase = 'open'; land(); };
   const my = ++ctl.seq;
   stop(live(win, overlay, ghost));
-  if (reducedMotion()) { ctl.phase = 'open'; return ctl; }
+  if (reducedMotion()) { open(); return ctl; }
   const kids = [...win.children];
   if (!from) {
     // Карточки не видно (ссылка ?game=, поиск, ревизия): просто появляется
     overlay.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: 'ease-out' });
-    ctl.phase = 'open';
+    open();
     return ctl;
   }
   const cover = coverOf(win);
   // Обложка окна (крупнее карточной) ещё не пришла — у img с height: auto нет высоты, окно меряется без неё и
   // призраку некуда садиться. До загрузки даём ей пропорции карточки; пришла — своя высота
   if (cover?.tagName === 'IMG' && !cover.naturalWidth) {
-    cover.style.aspectRatio = `${from.rect.w} / ${from.rect.h}`;
+    cover.style.aspectRatio = String(naturalRatio(from));
     cover.addEventListener('load', () => { cover.style.aspectRatio = ''; }, { once: true });
   }
   const W = rectOf(win);
@@ -111,15 +131,16 @@ export function flyOpen({ overlay, win, ghost }, from) {
   if (G && ghost) {
     setGhost(ghost, G, from.src);
     win.dataset.flying = '1';
-    list.push(ghost.animate([{ transform: toRect(G, from.rect, true) }, { transform: NONE }], o));
+    const shot = cardShot(from);
+    list.push(ghost.animate([{ transform: toRect(G, shot.F, true), clipPath: shot.clip }, { transform: NONE, clipPath: FULL }], o));
   }
   settled(list).then((ok) => {
     if (my !== ctl.seq) return;
     // Анимацию отменили не мы (React пересоздал узел окна): всё равно снимаем призрака и признак полёта
-    if (!ok) { endFlight(win, ghost); ctl.phase = 'open'; return; }
+    if (!ok) { endFlight(win, ghost); open(); return; }
     stop(live(win, overlay, ghost));
     endFlight(win, ghost);
-    ctl.phase = 'open';
+    open();
     // Обложка окна другой пропорции, чем у карточки: призрак лёг по центру, настоящая проявляется за 80 мс
     if (G && (Math.abs(G.w - G.cover.w) > 2 || Math.abs(G.h - G.cover.h) > 2)) {
       cover.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 80 });
@@ -143,6 +164,7 @@ export function flyClose(ctl, onDone) {
   const cur = {
     win: wasOpening ? getComputedStyle(win).transform : 'none',
     ghost: wasOpening && ghost?.classList.contains('fly') ? getComputedStyle(ghost).transform : 'none',
+    clip: wasOpening && ghost?.classList.contains('fly') ? (getComputedStyle(ghost).clipPath || FULL).replace(/^none$/, FULL) : FULL,
     ov: num(overlay),
     kids: win.children[0] ? num(win.children[0]) : 1,
   };
@@ -172,7 +194,8 @@ export function flyClose(ctl, onDone) {
   if (inside && ghost) {
     setGhost(ghost, G, target.src);
     win.dataset.flying = '1';
-    list.push(ghost.animate([{ transform: tf(cur.ghost) }, { transform: toRect(G, target.rect, true) }], o));
+    const shot = cardShot(target);
+    list.push(ghost.animate([{ transform: tf(cur.ghost), clipPath: cur.clip }, { transform: toRect(G, shot.F, true), clipPath: shot.clip }], o));
   }
   // Отмена чужая (узел окна пересоздан) — окно всё равно закрываем: прозрачный слой перехватывал бы клики
   settled(list).then(finish);

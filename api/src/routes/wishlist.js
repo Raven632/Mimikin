@@ -12,16 +12,16 @@ const failed = (res, e, what) => {
 // Весь список
 router.get('/', async (req, res) => {
     try {
-        res.json(await wishlistService.list());
+        res.json(await wishlistService.list(req.person));
     } catch (e) {
         failed(res, e, 'Список');
     }
 });
 
-// Отложить игру из окна новинок — со всем, что окно о ней показывало
+// Отложить игру из вкладки «Найти» — со всем, что вкладка о ней показывала
 router.post('/', async (req, res) => {
     try {
-        res.json(await wishlistService.add(req.body));
+        res.json(await wishlistService.add(req.body, req.person));
     } catch (e) {
         failed(res, e, 'Добавление');
     }
@@ -30,7 +30,7 @@ router.post('/', async (req, res) => {
 // Убрать игру: ключ вида «itch:<адрес игры>» — в адресе запроса
 router.delete('/', async (req, res) => {
     try {
-        res.json({ removed: await wishlistService.remove(req.query.key) });
+        res.json({ removed: await wishlistService.remove(req.query.key, req.person) });
     } catch (e) {
         failed(res, e, 'Удаление');
     }

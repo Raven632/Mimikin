@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { effectiveStatus } from '../gameStatus';
 import { formatPlaytime } from '../formatPlaytime';
 import StateView from './StateView';
+import PlayDays from './PlayDays';
 import { FORMAT_TAGS } from '../formatTags';
 import { IconStarSolid } from './icons';
 
@@ -21,7 +22,7 @@ const Bar = ({ label, value, max, text }) => (
 // и называем строкой под заголовком — чтобы ничего не пропадало молча
 
 // Вкладка «Статистика» окна «Статистика и ревизия» (LibraryModal): окно, крестик и Escape — там
-const StatsPanel = ({ games, t, lang }) => {
+const StatsPanel = ({ games, t, lang, onOpenGame }) => {
   // Считаем один раз на изменение списка: перебор 80 игр дёшев, но в рендере он был бы на каждый чих
   const s = useMemo(() => {
     const tags = {};
@@ -45,7 +46,8 @@ const StatsPanel = ({ games, t, lang }) => {
     const formatTags = Object.entries(tags).filter(([tag, n]) => FORMAT_TAGS.has(tag) && n >= games.length / 2).sort(byCount);
     return {
       total: games.length,
-      gb: games.reduce((a, g) => a + (g.size || 0), 0) / 1073741824,
+      // Сколько на диске: у игр с полки файлов нет
+      gb: games.reduce((a, g) => a + (g.shelf ? 0 : g.size || 0), 0) / 1073741824,
       seconds: games.reduce((a, g) => a + (g.playtime || 0), 0),
       launched: games.filter(g => g.lastPlayed).length,
       rated: games.filter(g => g.rating > 0),
@@ -106,6 +108,8 @@ const StatsPanel = ({ games, t, lang }) => {
             <p className="stats-after">{t.stats_launched_line(s.launched, s.total)}</p>
           </>
         )}
+
+        <PlayDays games={games} t={t} locale={locale} onOpenGame={onOpenGame} />
 
         {s.rated.length > 0 && (
           <>

@@ -4,8 +4,8 @@ import { useLayer } from '../layers';
 import { useCoversHidden } from '../coversHidden';
 import { errorText, httpError } from '../apiError';
 import StateView from './StateView';
-import { IconClose, IconChevronLeft, IconChevronRight, IconHeart, IconExpand, IconShuffle, IconPlay, IconPause, IconFilm, IconLoop, IconSound, IconMute } from './icons';
-import { STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage } from '../galleryView';
+import { IconClose, IconChevronLeft, IconChevronRight, IconHeart, IconExpand, IconShuffle, IconPlay, IconPause, IconFilm, IconLoop, IconSimilar, IconSound, IconMute } from './icons';
+import { STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage, similarPictures } from '../galleryView';
 import MetaLine from './MetaLine';
 import { VideoSeek } from './VideoSeek';
 import { useVideoControl } from '../videoControl';
@@ -248,6 +248,7 @@ const FavoritesGallery = ({ games, t, onClose }) => {
             {STEPS.map((s) => (
               <button key={s} type="button" className={`gallery-play fav-step${step === s ? ' on' : ''}`} aria-pressed={step === s} onClick={() => pickStep(s)} data-tip={t.favs_step_hint}>{t.favs_step(s)}</button>
             ))}
+            {!isVideo(current.file) && <button type="button" className="gallery-play" onClick={() => similarPictures(current.game, current.file)} data-tip={t.pics_similar_hint}><IconSimilar /> {t.pics_similar}</button>}
             <button type="button" className="gallery-play gallery-fav on" aria-pressed="true" onClick={() => unfavorite(current)} aria-label={t.favs_remove} data-tip={t.favs_remove}><IconHeart /></button>
             <button type="button" className="gallery-play" onClick={fullscreen} aria-label={t.favs_fullscreen} data-tip={t.favs_fullscreen}><IconExpand /></button>
             <button type="button" className="gallery-play" onClick={close} aria-label={t.gallery_back} data-tip={t.gallery_back}><IconClose /></button>

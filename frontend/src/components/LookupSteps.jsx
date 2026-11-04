@@ -9,7 +9,7 @@ const LookupSteps = ({ steps, running, t }) => {
         <li key={`${i}-${s.site}`} className={`lookup-step ${s.result}`}>
           <b>{SITES[s.site] || s.site}</b>
           {': '}
-          {s.by === 'link' ? t.lookup_by_link : s.by === 'code' ? t.lookup_by_code(s.q) : t.lookup_by_title(s.q)}
+          {s.by === 'link' ? t.lookup_by_link : t.lookup_by_title(s.q)}
           {', '}
           {t[`lookup_${s.result}`]}
         </li>

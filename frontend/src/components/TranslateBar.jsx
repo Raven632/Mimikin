@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { errorText, httpError } from '../apiError';
+import { errorText, httpError, serverWords } from '../apiError';
 import { confirmDialog } from '../confirm';
 import { useLayer } from '../layers';
 import { useClosing } from '../useClosing';
@@ -10,6 +10,11 @@ import PicturesPanel from './PicturesPanel';
 import { IconClose, IconSettings } from './icons';
 
 const LANGS = ['en', 'ru', 'de'];
+// Почему встал перевод: код («engine:DeepL:403» — служба отказала, api/src/services/translate.js) или текст сервера
+const tlErrorLine = (t, error) => {
+  const refused = /^engine:([^:]+):(\d+)$/.exec(error);
+  return t.tl_error[error] || t.tl_error_other(refused ? t.tl_engine_refused(refused[1], Number(refused[2])) : serverWords(t, error));
+};
 // Разделы окна «Настройки перевода»
 const SECTIONS = ['lang', 'check', 'lines', 'pics', 'game', 'file'];
 const ENGINE_NAMES = { deepl: 'DeepL', microsoft: 'Microsoft', google: 'Google', libre: 'LibreTranslate' };
@@ -181,7 +186,7 @@ const TranslateBar = ({ game, t, lang, notify, known = false, onRunning, onLang 
     : st.state === 'queued' ? t.tl_state.queued
       : st.state === 'done' ? t.tl_state.done(st.total)
         : st.state === 'paused' ? t.tl_state.paused(st.done, st.total) : '';
-  const errorLine = st.state === 'error' ? (t.tl_error[st.error] || t.tl_error_other(st.error)) : '';
+  const errorLine = st.state === 'error' ? tlErrorLine(t, st.error) : '';
   const canResume = (st.state === 'paused' || (st.state === 'error' && st.error !== 'no-data')) && st.engines?.length > 0;
   const pauseBtn = running && <button type="button" className="meta-status-btn subtle" disabled={busy} onClick={() => act(() => post(`${base}/pause`))}>{t.tl_pause}</button>;
   const resumeBtn = canResume && <button type="button" className="meta-status-btn" disabled={busy} onClick={() => act(() => post(`${base}/resume`))}>{t.tl_resume}</button>;

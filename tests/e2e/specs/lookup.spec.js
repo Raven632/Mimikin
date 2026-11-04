@@ -1,4 +1,4 @@
-import { test, expect, openLibrary, openGame } from '../fixtures.js';
+import { test, expect, openLibrary, openGame, openTab } from '../fixtures.js';
 
 // Данные игры, которых поиск не нашёл: «Как искали» и «Возможно, это она». Сети в тестах нет — что
 // ответили бы сайты, подставляем
@@ -99,7 +99,7 @@ test.describe('поиск данных: почему не нашлось', () =>
   });
 });
 
-test('очередь поиска: по полосе «Сбор метаданных» — что ищется, что дальше, «Искать первой» и пауза', async ({ page }) => {
+test('очередь поиска: по полосе «Ищу данные игр» — что ищется, что дальше, «Искать первой» и пауза', async ({ page }) => {
   let state = {
     paused: false, left: 2,
     current: { id: 'Clockwork_Vale', title: 'Clockwork Vale', startedAt: Date.now(), steps: [{ site: 'steam', by: 'title', q: 'Clockwork Vale', result: 'found' }] },

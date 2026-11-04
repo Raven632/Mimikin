@@ -1,11 +1,11 @@
 const express = require('express');
-const { SAVES_DIR } = require('../config/index.js');
 const { isSafeSegment } = require('../utils/validate.js');
 const { requireAuth } = require('./auth.js');
-const { createJournal } = require('../utils/journal.js');
+const personStores = require('../utils/personStores.js');
 
 // «Путь» по игре для окна игры в библиотеке: записи и кадры сцен. Пишет их сама игра (сервер игр, routes/play.js)
-const store = createJournal(SAVES_DIR);
+const store = personStores.owner.journal;
+const mine = (req) => personStores.storesFor(req.person).journal;
 
 const router = express.Router();
 router.use(requireAuth);
@@ -16,15 +16,15 @@ router.param('entry', (req, res, next, value) => (store.validId(value) ? next() 
 
 router.get('/:id', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.json(await store.list(req.params.id));
+    res.json(await mine(req).list(req.params.id));
 });
 // «Ещё не видели»: сколько сцен комнаты воспоминаний открыто (последний счёт игры); нет — null
 router.get('/:id/room', async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
-    res.json(await store.room(req.params.id));
+    res.json(await mine(req).room(req.params.id));
 });
 router.get('/:id/:entry/thumb', async (req, res) => {
-    const file = await store.thumb(req.params.id, req.params.entry);
+    const file = await mine(req).thumb(req.params.id, req.params.entry);
     if (!file) return res.status(404).end();
     res.sendFile(file, { maxAge: '7d' });
 });

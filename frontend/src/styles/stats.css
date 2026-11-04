@@ -327,6 +327,10 @@ a.audit-item { text-decoration: none; }
 
 .audit-item-static { cursor: default; }
 
+/* «Склеить» и «Не дубликат» под парой копий */
+.audit-pair-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.audit-pair-actions .audit-retry { margin: 0; }
+
 .audit-group-why { font-size: var(--fs-xs); color: var(--gold-muted); letter-spacing: 0.04em; margin: 0 0 4px 2px; }
 
 .audit-coverage { color: var(--text); }
@@ -387,6 +391,38 @@ a.audit-item { text-decoration: none; }
 }
 
 .check-mark svg { width: 12px; height: 12px; }
+
+/* «Мои игровые дни»: сетка прокручивается вбок сама, страница нет. Отступ внутри прокрутки — для рамки фокуса, иначе её обрежет */
+.days-sum { margin: 0 0 12px; font-size: var(--fs-md); color: var(--text); }
+.days-scroll { overflow-x: auto; padding: 3px; scrollbar-color: var(--gold-dim, #6f5a2a) transparent; }
+.days-grid { display: grid; grid-template-rows: 16px repeat(7, 15px); grid-auto-flow: column; grid-auto-columns: 15px; gap: 3px; width: max-content; }
+.days-month { width: 0; font-size: 11px; line-height: 16px; color: var(--text-dim); white-space: nowrap; }
+.days-cell { display: block; width: 15px; height: 15px; padding: 0; border: 0; border-radius: 2px; background: #1a1620; }
+button.days-cell { cursor: pointer; }
+.days-cell.l1 { background: #4a3b1c; }
+.days-cell.l2 { background: #7a6030; }
+.days-cell.l3 { background: #c9a84c; }
+.days-cell.l4 { background: #f0d080; }
+.days-cell.none { visibility: hidden; }
+.days-cell.on { outline: 2px solid var(--text); outline-offset: 1px; }
+.days-cell:focus-visible { outline: 2px solid var(--gold-light); outline-offset: 1px; }
+.days-scale { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); }
+.days-scale .days-cell:first-of-type { margin-left: 4px; }
+.days-scale .days-cell:last-of-type { margin-right: 4px; }
+.days-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid rgba(201,168,76,0.15); }
+.days-box h4 { margin: 0 0 8px; font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+.days-game { display: grid; grid-template-columns: 64px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; padding: 5px 0; border: 0; border-bottom: 1px solid rgba(232,223,200,0.08); background: none; color: var(--text); font: inherit; font-size: var(--fs-sm); text-align: left; cursor: pointer; }
+.days-game:hover .days-game-name { color: var(--gold-light); }
+.days-game:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.days-game-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.days-game-time, .days-list span:last-child { color: var(--text-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.days-thumb { display: block; width: 64px; height: 40px; overflow: hidden; border-radius: 2px; background: #1c1a21; }
+.days-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.covers-hidden .days-thumb img { filter: blur(12px) brightness(0.55) saturate(0.7); }
+/* Текстовый вид календаря: длинный год не растягивает окно, а прокручивается одной остановкой Tab */
+.days-list { max-height: 180px; margin: 14px 0 0; padding: 0 4px 0 0; overflow-y: auto; list-style: none; font-size: var(--fs-sm); color: var(--text); }
+.days-list:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+.days-list li { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; }
 
 @media (max-width: 700px) {
   .stat-bar-label { flex-basis: 45%; }

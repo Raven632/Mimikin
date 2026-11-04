@@ -96,7 +96,22 @@
   "баня": "bathhouse",
   "бан": "bathhouse",
   "туалет": "toilet",
-  "душев": "shower"
+  "душев": "shower",
+  "невест": "bride",
+  "свадьб": "wedding",
+  "свадеб": "wedding",
+  "блондин": "blonde",
+  "брюнет": "brunette",
+  "рыж": "redhead",
+  "униформ": "uniform",
+  "монахин": "nun",
+  "волк": "wolf",
+  "кошкодев": "catgirl",
+  "спящ": "sleeping",
+  "спит": "sleeping",
+  "огромн": "huge",
+  "маленьк": "small",
+  "больш": "big"
  },
  "de": {
   "dienstmädchen": "maid",
@@ -180,6 +195,14 @@
   "blumen": "flowers",
   "schiff": "ship",
   "toilette": "toilet",
-  "weinen": "crying"
+  "weinen": "crying",
+  "braut": "bride",
+  "hochzeit": "wedding",
+  "blond": "blonde",
+  "rothaarig": "redhead",
+  "schuluniform": "school uniform",
+  "schlafend": "sleeping",
+  "riesig": "huge",
+  "groß": "big"
  }
 }

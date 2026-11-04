@@ -1,20 +1,12 @@
 import { test, expect } from '../fixtures.js';
 import { mockGallery, openTrio, watchLayers, layers } from '../galleryMock.js';
+import { touch } from '../scene.js';
+import { openGame, openLibrary } from '../fixtures.js';
 
 // Телефон: картинка идёт за пальцем, у края втрое слабее; ось выбирается после 10 точек; отпустили — доезд или возврат.
 // Касания — через CDP (настоящие pointer-события pointerType=touch)
 const img = (page) => page.locator('.gallery-view > img:not(.gallery-layer)');
 const shift = (page) => img(page).evaluate((el) => new DOMMatrixReadOnly(getComputedStyle(el).transform).m41);
-
-async function touch(page) {
-  const cdp = await page.context().newCDPSession(page);
-  const send = (type, x, y) => cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y, id: 1 }] });
-  return {
-    down: (x, y) => send('touchStart', x, y),
-    move: (x, y) => send('touchMove', x, y),
-    up: () => send('touchEnd'),
-  };
-}
 
 test.describe('телефон: галерея за пальцем', () => {
   test.beforeEach(async ({ page }) => { await mockGallery(page); });
@@ -76,5 +68,91 @@ test.describe('телефон: галерея за пальцем', () => {
     await expect(img(page)).toHaveAttribute('src', /p2\.png/);
     await expect(page.locator('.gallery-layer')).toHaveCount(0);
     expect(await shift(page)).toBe(0);
+  });
+
+  test('полоса тегов листается пальцем и кадр не перелистывает; свайп вне панели листает', async ({ page }) => {
+    await page.route(/\/api\/gallery\/[^/]+\/tags\?f=/, (route) => route.fulfill({ json: { tags: ['sword', 'glasses', 'cow_print', 'boots', 'gloves', 'long_hair', 'night', 'red_hair'].map((tag) => ({ tag, p: 0.9 })) } }));
+    await openTrio(page);
+    await page.locator('.gallery-bar .gallery-play', { hasText: 'Теги' }).click();
+    const strip = page.locator('.gallery-tags');
+    await expect(strip.locator('.chip')).toHaveCount(8);
+    const box = await strip.boundingBox();
+    const y = box.y + box.height / 2;
+    const t = await touch(page);
+    await t.down(box.x + box.width - 20, y);
+    for (let x = box.x + box.width - 40; x > box.x + 40; x -= 30) await t.move(x, y);
+    await t.up();
+    // Кадр тот же, полоса уехала
+    await expect.poll(() => strip.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+    await new Promise((r) => setTimeout(r, 300));
+    await expect(img(page)).toHaveAttribute('src', /p1\.png/);
+    // Вне панели — как раньше
+    await t.down(300, 300);
+    await t.move(280, 300);
+    await t.move(120, 300);
+    await new Promise((r) => setTimeout(r, 150));
+    await t.up();
+    await expect(img(page)).toHaveAttribute('src', /p2\.png/);
+  });
+
+  test('панель тегов в галерее — лист снизу на всю ширину; нажатие на затемнение закрывает, плитка не открывается', async ({ page }) => {
+    await page.route(/\/api\/gallery\/[^/]+\/tags$/, (route) => route.fulfill({ json: { files: ['p1.png'], tags: [{ tag: 'sword', f: [0] }, { tag: 'maid', f: [0] }] } }));
+    await openLibrary(page);
+    await openGame(page, 'Starfall Inn');
+    await page.locator('.act-gallery').click();
+    await page.locator('.gallery-tools .gallery-play[aria-haspopup="dialog"]').click({ timeout: 20_000 });
+    const panel = page.locator('.tag-panel');
+    await expect(panel.locator('.tag-row')).toHaveCount(2);
+    const box = await panel.boundingBox();
+    const size = page.viewportSize();
+    expect(box.x).toBe(0);
+    expect(box.width).toBe(size.width);
+    expect(Math.round(box.y + box.height)).toBe(size.height);
+    await page.touchscreen.tap(size.width / 2, 40);
+    await expect(panel).toHaveCount(0);
+    await expect(page.locator('.gallery-view')).toHaveCount(0);
+  });
+
+  test('игру ещё не разобрали: кнопка «Теги» с подписью на месте, панель объясняет почему тегов нет', async ({ page }) => {
+    await page.route(/\/api\/gallery\/[^/]+\/tags$/, (route) => route.fulfill({ json: { files: [], tags: [] } }));
+    await openLibrary(page);
+    await openGame(page, 'Starfall Inn');
+    await page.locator('.act-gallery').click();
+    const btn = page.locator('.gallery-tools .tag-tool');
+    await expect(btn).toBeVisible({ timeout: 20_000 });
+    await expect(btn.locator('.tool-label')).toBeVisible();
+    await expect(btn).toHaveText('Теги');
+    await btn.click();
+    await expect(page.locator('.tag-none')).toHaveText('Теги появятся, когда сервер разберёт картинки этой игры');
+    await expect(page.locator('.tag-panel input')).toHaveCount(0);
+  });
+
+  test('свайп в окне игры и в галерее не двигает страницу сзади', async ({ page }) => {
+    await openLibrary(page);
+    await page.evaluate(() => { document.body.style.minHeight = '4000px'; window.scrollTo(0, 500); });
+    const y = () => page.evaluate(() => Math.round(window.scrollY));
+    await expect.poll(y).toBe(500);
+    await openGame(page, 'Starfall Inn');
+    const before = await y();
+    const t = await touch(page);
+    const swipe = async (from, to) => { await t.down(195, from); for (let k = 1; k <= 8; k++) await t.move(195, from + ((to - from) * k) / 8); await t.up(); await new Promise((r) => setTimeout(r, 300)); };
+    await swipe(300, 600);
+    await swipe(600, 300);
+    expect(await y()).toBe(before);
+    await page.locator('.act-gallery').click();
+    await expect(page.locator('.gallery').first()).toBeVisible();
+    await swipe(300, 600);
+    await swipe(600, 300);
+    await swipe(300, 600);
+    expect(await y()).toBe(before);
+  });
+
+  test('сервер не ответил про теги: кнопки «Теги» нет, панель не врёт, что игру ещё не разобрали', async ({ page }) => {
+    await page.route(/\/api\/gallery\/[^/]+\/tags$/, (route) => route.fulfill({ status: 500, json: { error: 'tags-failed' } }));
+    await openLibrary(page);
+    await openGame(page, 'Starfall Inn');
+    await page.locator('.act-gallery').click();
+    await expect(page.locator('.gallery-tile').first()).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('.gallery-tools .tag-tool')).toHaveCount(0);
   });
 });

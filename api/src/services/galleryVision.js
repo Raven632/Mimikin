@@ -1,11 +1,6 @@
-const fs = require('fs');
-const fsp = fs.promises;
-const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
-const { Readable, Transform } = require('stream');
-const { pipeline } = require('stream/promises');
-const { OFFLINE } = require('../config/index.js');
+const { ModelHolder, registerModels, downloadModel, modelFile, modelFailed } = require('./galleryModels.js');
 
 // Что нарисовано на картинке — для галереи: сцена или экран игры (меню, статус, карточка персонажа, фон без людей,
 // карта, титры, предмет). По файлам их не отличить — все во весь экран и плотные, — а по рисунку можно. Модель CLIP
@@ -13,9 +8,13 @@ const { OFFLINE } = require('../config/index.js');
 // (galleryVisionLabels.json), их модель «текста» серверу не нужна. Всё на самом сервере, без сети: модель скачивается
 // один раз в _media/_models и проверяется по контрольной сумме. Нет модуля onnxruntime-node или модели — служба
 // выключена, галерея работает как без неё
-const MODEL_URL = 'https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx';
-const MODEL_SHA256 = '583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299';
-const MODEL_FILE = 'clip-vit-b32-vision-q8.onnx';
+const MODEL = {
+    url: 'https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx',
+    name: 'clip-vit-b32-vision-q8.onnx',
+    sha256: '583fd1110a514667812fee7d684952aaf82a99b959760c8d7dca7e0ab9839299',
+    size: 89117001,
+};
+registerModels([MODEL]);
 const SIZE = 224;
 // Нормировка CLIP (preprocessor_config.json модели)
 const MEAN = [0.48145466, 0.4578275, 0.40821073];
@@ -25,7 +24,6 @@ const LABELS = require('./galleryVisionLabels.json');
 // visionPass к готовым ответам, а сами ответы остаются
 const VERSION = crypto.createHash('sha1').update(JSON.stringify(LABELS)).digest('hex').slice(0, 12);
 const TIMEOUT_MS = 30 * 1000;
-const DOWNLOAD_MS = 10 * 60 * 1000;
 
 let ort = null;
 try { ort = require('onnxruntime-node'); } catch { /* модуля нет — без распознавания */ }
@@ -33,11 +31,13 @@ try { ort = require('onnxruntime-node'); } catch { /* модуля нет — б
 class GalleryVision {
     constructor() {
         this.mediaDir = '';
-        this.session = null;
-        this.loading = null;
+        this.hold = new ModelHolder(() => this.open());
         this.failedAt = 0;
         this.queue = Promise.resolve();
         this.version = VERSION;
+        // Векторы кадров для поиска зависят только от модели, не от подписей: разбор всех кадров (gallery.js, picturePass)
+        // сверяется с ней
+        this.embedModel = MODEL.sha256.slice(0, 12);
     }
 
     setDependencies({ mediaDir }) {
@@ -50,49 +50,19 @@ class GalleryVision {
     }
 
     // Модель: скачать один раз (не в OFFLINE), проверить сумму, открыть. Не вышло — час не пробуем снова
-    async model() {
-        if (this.session) return this.session;
+    async open() {
         if (!this.available || Date.now() - this.failedAt < 60 * 60 * 1000) return null;
-        if (!this.loading) {
-            this.loading = (async () => {
-                const file = path.join(this.mediaDir, '_models', MODEL_FILE);
-                // Файл оборвался или испорчен — скачать заново, а не падать на нём каждый час
-                if (await fsp.access(file).then(() => true, () => false) && (await this.hash(file)) !== MODEL_SHA256) await fsp.rm(file, { force: true });
-                if (!(await fsp.access(file).then(() => true, () => false))) {
-                    if (OFFLINE) throw new Error('OFFLINE: модель не скачиваем');
-                    await this.download(file);
-                }
-                this.session = await ort.InferenceSession.create(file, { intraOpNumThreads: 1, interOpNumThreads: 1 });
-                return this.session;
-            })().catch((e) => {
-                this.failedAt = Date.now();
-                console.warn(`[Галерея] распознавание картинок выключено: ${e.message}`);
-                return null;
-            }).finally(() => { this.loading = null; });
-        }
-        return this.loading;
-    }
-
-    async hash(file) {
-        const h = crypto.createHash('sha256');
-        await pipeline(fs.createReadStream(file), h);
-        return h.digest('hex');
-    }
-
-    // Потоком во временный файл, с суммой по ходу; зависшее соединение обрывается — очередь распознавания не встаёт
-    async download(file) {
-        await fsp.mkdir(path.dirname(file), { recursive: true });
-        const res = await fetch(MODEL_URL, { redirect: 'follow', signal: AbortSignal.timeout(DOWNLOAD_MS) });
-        if (!res.ok || !res.body) throw new Error(`модель: HTTP ${res.status}`);
-        const h = crypto.createHash('sha256');
-        const tmp = `${file}.${process.pid}.tmp`;
         try {
-            await pipeline(Readable.fromWeb(res.body), new Transform({ transform(chunk, enc, done) { h.update(chunk); done(null, chunk); } }), fs.createWriteStream(tmp));
-            if (h.digest('hex') !== MODEL_SHA256) throw new Error('модель: не та контрольная сумма');
-            await fsp.rename(tmp, file);
-        } finally {
-            await fsp.rm(tmp, { force: true });
+            return await ort.InferenceSession.create(await modelFile(MODEL, this.mediaDir), { intraOpNumThreads: 1, interOpNumThreads: 1 });
+        } catch (e) {
+            this.failedAt = modelFailed();
+            console.warn(`[Галерея] распознавание картинок выключено: ${e.message}`);
+            return null;
         }
+    }
+
+    download(file) {
+        return downloadModel(MODEL, file);
     }
 
     // Пиксели 224×224 (короткая сторона — 224, середина), RGB — ffmpeg
@@ -119,8 +89,7 @@ class GalleryVision {
     // картинки (512 чисел, длина 1) модель всё равно считает — отдаём его в seen.embed для поиска по картинкам
     score(file, seen = {}) {
         // По одной: модели хватает одного ядра, остальные — играм и страницам
-        const run = this.queue.then(async () => {
-            const session = await this.model();
+        const run = this.queue.then(() => this.hold.use(async (session) => {
             if (!session) return null;
             const raw = await this.pixels(file);
             const px = new Float32Array(3 * SIZE * SIZE);
@@ -134,7 +103,7 @@ class GalleryVision {
             const ex = logits.map((l) => Math.exp(l - m));
             const z = ex.reduce((a, b) => a + b, 0);
             return ex.slice(0, LABELS.scene.length).reduce((a, b) => a + b, 0) / z;
-        });
+        }));
         this.queue = run.catch(() => {});
         return run;
     }

@@ -328,7 +328,7 @@ if (!window.__rpgPluginHookInstalled) {
         let lang = null;
         try { lang = new URLSearchParams(location.search).get('lang'); } catch (_) {}
         if (!known(lang)) try { lang = localStorage.getItem('rpg_lang'); } catch (_) {}
-        return known(lang) ? lang : 'ru';   // 'ru' — как и в самой библиотеке по умолчанию
+        return known(lang) ? lang : 'en';   // Без ?lang игру открывают только мимо библиотеки: она передаёт язык всегда
     })()];
 
     // Имя игры для её данных — папка игры. Её называет сервер (window.__RPG), без него — первая часть
@@ -341,6 +341,10 @@ if (!window.__rpgPluginHookInstalled) {
         try { return decodeURIComponent(first) || 'unknown'; } catch (_) { return first || 'unknown'; }
     })();
     const LEGACY_GAME_ID = GAME_ID.replace(/[^a-zA-Z0-9._\-а-яА-Я]/g, '_');
+    // Не владелец: сервер называет человека (window.__RPG.who). Хранилище браузера общее у всех, кто сидит в одном
+    // браузере, поэтому всё, что игра кладёт в него, живёт под его именем — чужой сейв из кэша человеку не подставится.
+    // У владельца WHO пуст, и ключи те же, что всегда
+    const WHO = (window.__RPG && window.__RPG.who) ? String(window.__RPG.who).replace(/[^a-zA-Z0-9_-]/g, '') : '';
 
     // Настройки, которые запоминаются для каждой игры: «Касания по игре», «Растянуть экран»,
     // раскрытая клавиатура в полоске ⌨. Раньше они сбрасывались при каждом запуске, и в
@@ -1101,10 +1105,11 @@ if (!window.__rpgPluginHookInstalled) {
         let cloudFetchFailed = false; 
         const cloudInitStartedAt = Date.now();
 
-        const QUEUE_KEY = `_rpg_offline_queue_${gameId}`;
+        const QUEUE_KEY = `_rpg_offline_queue_${WHO ? WHO + '_' : ''}${gameId}`;
         function getQueue() { try { return JSON.parse(localStorage.getItem(QUEUE_KEY) || '{}'); } catch(e) { return {}; } }
         // Очередь под прежним, «исправленным» именем игры (см. GAME_ID) — в очередь под настоящим
-        if (LEGACY_GAME_ID !== gameId) {
+        // (человеку не нужна: до него очередей под прежним именем не было)
+        if (LEGACY_GAME_ID !== gameId && !WHO) {
             try {
                 const legacyKey = `_rpg_offline_queue_${LEGACY_GAME_ID}`;
                 const legacy = JSON.parse(localStorage.getItem(legacyKey) || 'null');
@@ -1314,6 +1319,13 @@ if (!window.__rpgPluginHookInstalled) {
         }
 
         function injectMZEngine() {
+            // Сейвы MZ лежат в IndexedDB под ключом движка; человеку — с его приставкой (приставка спереди: MZ режет ключи по
+            // префиксу forageKey('') и такой срез остаётся верным)
+            if (WHO && typeof StorageManager.forageKey === 'function' && !StorageManager.forageKey.__rpgWho) {
+                const _forageKey = StorageManager.forageKey;
+                StorageManager.forageKey = function() { return WHO + '.' + _forageKey.apply(this, arguments); };
+                StorageManager.forageKey.__rpgWho = true;
+            }
             const _saveToForage = StorageManager.saveToForage; 
             StorageManager.saveToForage = function(saveName, zip) { uploadToCloud(`MZ_${saveName}`, zip); return _saveToForage.apply(this, arguments); };
             const _loadFromForage = StorageManager.loadFromForage; 
@@ -1436,7 +1448,7 @@ if (!window.__rpgPluginHookInstalled) {
         if (!ls || !P || P.__rpgGameStorage) return;
         const raw = { get: P.getItem, set: P.setItem, remove: P.removeItem, key: P.key, clear: P.clear };
         const lengthOf = Object.getOwnPropertyDescriptor(P, 'length').get;
-        const NS = `rpgm:${GAME_ID}:`;
+        const NS = `rpgm:${WHO ? WHO + '/' : ''}${GAME_ID}:`;
         const ours = (k) => /^(rpg_|rpgfix|_rpg|rpgm:)/.test(k);
         const rget = (k) => { try { return raw.get.call(ls, k); } catch (_) { return null; } };
         const rkeys = () => { const out = []; try { for (let i = 0; i < lengthOf.call(ls); i++) out.push(raw.key.call(ls, i)); } catch (_) {} return out; };
@@ -1462,8 +1474,9 @@ if (!window.__rpgPluginHookInstalled) {
         // игры (MV пишет его в список сохранений): переносим их к ней один раз, пока их нет
         // в её части. Чужие не трогаем — их заберёт своя игра
         let mvAdopted = false;
+        // Человеку общие ключи не переносим: они остались от владельца или другого человека в этом браузере
         function adoptMvSaves() {
-            if (mvAdopted) return;
+            if (mvAdopted || WHO) return;
             const DONE = NS + '~mv';
             if (rget(DONE)) { mvAdopted = true; return; }
             // Название — из данных игры: до их загрузки не понять, какие сейвы её
@@ -1509,7 +1522,7 @@ if (!window.__rpgPluginHookInstalled) {
                 }
             }
             let v = rget(NS + k);
-            if (v === null && !mvSave(k) && !seen.has(k)) {
+            if (v === null && !mvSave(k) && !seen.has(k) && !WHO) {
                 markSeen(k);
                 const shared = rget(k);
                 if (shared !== null) { try { raw.set.call(ls, NS + k, shared); } catch (_) {} v = shared; }
@@ -3067,7 +3080,12 @@ if (!window.__rpgPluginHookInstalled) {
         hint.innerHTML = `<i></i>${T.loading}`;
         document.body.appendChild(hint);
 
+        // Страница без движка RPG Maker (своя сборка на HTML): сцен не будет, и надпись висела бы все две минуты. У настоящей
+        // игры движок может подгружаться и после load (MZ сам подключает скрипты), но main.js или rpg_core есть в странице всегда
+        const noEngine = () => document.readyState === 'complete' && typeof SceneManager === 'undefined'
+            && !document.querySelector('script[src*="main.js"], script[src*="rpg_core"], script[src*="rmmz_"]');
         const done = () => {
+            if (noEngine()) return true;
             // Игра упала — показывает свой экран ошибки, наша надпись там лишняя
             if (typeof Graphics !== 'undefined' && Graphics._errorPrinter && Graphics._errorPrinter.innerHTML.trim()) return true;
             if (typeof SceneManager === 'undefined' || !SceneManager._scene) return false;
@@ -3490,6 +3508,10 @@ if (!window.__rpgPluginHookInstalled) {
             try { if ($gameMessage.hasText && $gameMessage.hasText()) text = plainText($gameMessage._texts.join(' ')); } catch (e) { /* без реплики */ }
             return text ? short(text, 70) : mapName();
         };
+        // Реплика, как она видна на экране: плагины перевода подменяют allText, а не _texts
+        const sayNow = () => {
+            try { return plainText($gameMessage.allText ? $gameMessage.allText() : ($gameMessage._texts || []).join(' ')); } catch (e) { return ''; }
+        };
         const hidden = () => !!(window.__rpgPanic && window.__rpgPanic.isOn());
         // Сейв возможен на карте, не посреди перехода: как у «Запомнить момент» всегда
         const onMapNow = () => {
@@ -3523,12 +3545,13 @@ if (!window.__rpgPluginHookInstalled) {
         // кадров и отправка — потом. kind: mark — момент, shot — снимок (на карте становится моментом: сейв есть), auto —
         // точка перемотки. actual — кадр как на экране (снимок P); иначе в меню — карта под ним. side — точка сбоку
         // истории («До перемотки», «Где вышли»): в её сейве путь идёт от неё, а игра дальше — от прежней. null — сейва
-        // здесь не сделать
-        function capture({ kind, why = '', label = '', actual = false, side = false }) {
+        // здесь не сделать. quick — страницу вот-вот заморозят («Где вышли»): сначала сейв, потом кадр 320 точек сразу
+        // строкой (toBlob и FileReader могут уже не успеть), чтобы отправка ушла в том же обработчике
+        function capture({ kind, why = '', label = '', actual = false, side = false, quick = false }) {
             const saveable = onMapNow();
             if (kind !== 'shot' && !saveable) return null;
-            let canvas = null;
-            try { canvas = sceneCanvas(kind === 'auto' ? 480 : 0, actual); } catch (e) { canvas = null; }
+            const frame = () => { try { return sceneCanvas(quick ? 320 : kind === 'auto' ? 480 : 0, actual); } catch (e) { return null; } };
+            let canvas = quick ? null : frame();
             if (kind === 'shot' && !canvas) return null;
             let value = '';
             let chain = {};
@@ -3549,6 +3572,12 @@ if (!window.__rpgPluginHookInstalled) {
             }
             let playtime = 0;
             try { playtime = $gameSystem.playtime(); } catch (e) { /* без времени */ }
+            if (quick) {
+                canvas = frame();
+                let small = '';
+                try { small = canvas ? canvas.toDataURL('image/jpeg', 0.72) : ''; } catch (e) { small = ''; }
+                return { kind, why, label: label || labelNow(), map: mapName(), value, thumb: small, shot: '', playtime, side, ...chain };
+            }
             const thumb = jpegOf(canvas && kind !== 'auto' ? scaledCanvas(canvas, 480) : canvas, 0.75);
             const shot = kind !== 'auto' ? jpegOf(canvas, 0.9) : Promise.resolve('');
             return { kind: kind === 'shot' && saveable ? 'mark' : kind, why, label: label || labelNow(), map: mapName(), value, thumb, shot, playtime, side, ...chain };
@@ -3565,9 +3594,15 @@ if (!window.__rpgPluginHookInstalled) {
             sending = run.catch(() => {});
             return run;
         }
-        async function send(body) {
+        // urgent — «Где вышли» в обработчике сворачивания: мимо очереди (зависший прежний запрос на iOS не держит её) и
+        // без await до fetch — кадры уже строки, запрос стартует, пока страницу не заморозили. keepalive переживает
+        // закрытие вкладки, но у браузера на него до 64 КБ байтов (не знаков: японские имена и строки — по 3 байта) на всё,
+        // что в полёте, — тело больше идёт без него. Браузер всё же отклонил (рядом летит отчёт об ошибке, тоже keepalive) —
+        // тот же запрос сразу без keepalive: иначе точка пропала бы, а новой следом не будет (capture уже поставил stateAt)
+        async function send(body, { urgent = false } = {}) {
             const { side, ...rest } = body;
-            const ready = { ...rest, parent: present(body.parent), thumb: await body.thumb, shot: await body.shot };
+            const plain = typeof body.thumb === 'string' && typeof body.shot === 'string';
+            const ready = { ...rest, parent: present(body.parent), ...(plain ? {} : { thumb: await body.thumb, shot: await body.shot }) };
             const fail = (err) => {
                 if (body.id) lost.set(body.id, ready.parent);
                 repoint(body);
@@ -3576,7 +3611,11 @@ if (!window.__rpgPluginHookInstalled) {
             let res;
             try {
                 // Сервер принял и молчит — не держим очередь: за этой точкой стоят P, «Путь» и «Где вышли»
-                res = await fetch(url(), { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(ready), ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(60000) } : {}) });
+                const json = JSON.stringify(ready);
+                const opts = { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: json, ...(typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? { signal: AbortSignal.timeout(60000) } : {}) };
+                const bytes = typeof Blob !== 'undefined' ? new Blob([json]).size : json.length * 3;
+                const keepalive = urgent && bytes < 60000;
+                res = await fetch(url(), { ...opts, keepalive }).catch((e) => { if (!keepalive) throw e; return fetch(url(), opts); });
             } catch (e) { throw fail(e); }
             if (res.status === 409) throw fail(Object.assign(new Error('full'), { full: true }));
             if (!res.ok) throw fail(new Error(String(res.status)));
@@ -3869,8 +3908,7 @@ if (!window.__rpgPluginHookInstalled) {
             noted = true;
             if (replay) { replay = false; edge = null; return; }
             if (skipping()) { edge = null; return; }
-            let text = '';
-            try { text = plainText($gameMessage.allText ? $gameMessage.allText() : ($gameMessage._texts || []).join(' ')); } catch (e) { text = ''; }
+            const text = sayNow();
             if (!text) return;
             let who = '';
             try { who = plainText($gameMessage.speakerName ? $gameMessage.speakerName() : ''); } catch (e) { who = ''; }
@@ -4487,25 +4525,35 @@ if (!window.__rpgPluginHookInstalled) {
         let firstRun = false;
         try { firstRun = !localStorage.getItem('rpgfix_keys_seen'); } catch (e) { /* без хранилища — без карточки */ }
         if (firstRun) whenGameShown(() => setTimeout(keysCard, 1500));
-        // «Где вышли»: уходя из игры (в библиотеку, «Назад», «Выход» игры) и когда вкладку убрали (другая вкладка,
-        // телефон заблокировали, вкладку закрыли — тогда как получится). «Продолжить» в библиотеке предложит её, если она
-        // свежее сейвов и моментов: сыгранное после перемотки без сохранения не пропадёт. Сбоку истории, раз в 30 с
-        // Только если после последней точки или загрузки играли (жали клавиши, касались) и не посреди события — как
-        // обычный сейв: продолжать с середины сцены — не то, что ждут от «Продолжить». Уходя из игры — без паузы в 30 с
+        // «Где вышли»: уходя из игры (в библиотеку, «Назад», «Выход» игры), когда вкладку убрали (другая вкладка, телефон
+        // заблокировали) и когда страницу выгружают (pagehide). «Играть» в библиотеке продолжит с неё, если она свежее
+        // сейвов и моментов: сыгранное после перемотки без сохранения не пропадёт. Сбоку истории. Посреди сцены — тоже, на
+        // той же реплике (mid; загрузка отмотает её, rewindMessage): iPhone выгружает свёрнутую вкладку, и сцена иначе
+        // начиналась бы со старого сейва. Только если после последней точки или загрузки играли (жали клавиши, касались):
+        // capture ставит stateAt, так что второе сворачивание или pagehide следом без игры новой точки не дают. У старой MV
+        // без времени ввода (inputAt — Infinity) это не держит: там точка не чаще раза в 30 с (уходят нашими кнопками — не
+        // чаще раза в 1,5 с, как у всех), иначе сворачивание и pagehide следом (уход кнопкой и pagehide рамки) дали бы
+        // две-три одинаковые точки, а «Где вышли» хранится всего три. Вернулись во вкладку — счёт заново: иначе у старой MV
+        // второй уход меньше чем через 30 с после первого (свернули, вернулись, поиграли, свернули) терялся
         let exitAt = 0;
-        function exitPoint(leaving = false) {
-            if (hidden() || (!leaving && Date.now() - exitAt < 30e3) || inputAt() <= stateAt) return NONE;
-            try { if ($gameMap.isEventRunning()) return NONE; } catch (e) { return NONE; }
+        function exitPoint() {
+            const at = inputAt();
+            if (hidden() || at <= stateAt || Date.now() - exitAt < (at === Infinity && !leaving ? 30e3 : 1500)) return NONE;
+            let mid = false;
+            try { mid = !!$gameMap.isEventRunning(); } catch (e) { return NONE; }
             let body = null;
-            try { body = capture({ kind: 'auto', why: 'exit', side: true }); } catch (e) { body = null; }
+            try { body = capture({ kind: 'auto', why: 'exit', side: true, quick: true, label: mid ? short(sayNow(), 118) : '' }); } catch (e) { body = null; }
             if (!body) return NONE;
             exitAt = Date.now();
-            return post(body).then((r) => (r && r.id) || null, () => null);
+            // standalone — для строки в журнале сервера: «iPhone · веб-приложение» или браузер (как отчёт об ошибке)
+            let standalone = false;
+            try { standalone = !!(navigator.standalone || matchMedia('(display-mode: standalone)').matches); } catch (e) { /* без этого */ }
+            return send({ ...body, mid, standalone }, { urgent: true }).then((r) => (r && r.id) || null, () => null);
         }
-        leaveHooks.push(() => exitPoint(true));
+        leaveHooks.push(() => exitPoint());
         // Закрывают вкладку, а последний ввод был больше чем через 3 минуты после сейва, момента или точки (не «сейчас»: кто
         // бросил игру и ушёл, того не держим) — браузер переспросит: «Где вышли» при
-        // закрытии записывается как получится и не посреди события. Уходят нашими кнопками (leaving), под «Скрыть» или у
+        // закрытии записывается как получится (pagehide ниже). Уходят нашими кнопками (leaving), под «Скрыть» или у
         // старой MV без времени ввода — не спрашиваем
         window.addEventListener('beforeunload', (e) => {
             const at = inputAt();
@@ -4513,7 +4561,8 @@ if (!window.__rpgPluginHookInstalled) {
             e.preventDefault();
             e.returnValue = '';
         });
-        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') exitPoint(); });
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') exitPoint(); else exitAt = 0; });
+        window.addEventListener('pagehide', () => exitPoint());
 
         // Чит-меню перед «Открыть все сцены» запоминает момент — откат одним нажатием
         window.__rpgMoments = { remember, roomScan };

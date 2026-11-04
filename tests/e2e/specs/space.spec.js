@@ -8,7 +8,7 @@ test('«Место»: полоса диска, что можно убрать �
   const panel = page.locator('.space-panel');
   await expect(panel.locator('.space-legend')).toContainText('Игры');
   await expect(panel.locator('.space-legend')).toContainText('Свободно');
-  await expect(panel).toContainText('Удалённая игра 30 дней лежит в корзине и место не освобождает');
+  await expect(panel).toContainText('Удалённая игра и файлы игры с полки 30 дней лежат в корзине и место не освобождают');
   const section = (title) => panel.locator('.stats-section', { hasText: title });
   await expect(section('Пройдены')).toContainText('2');
   await expect(section('Брошены')).toContainText('1');

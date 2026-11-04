@@ -60,8 +60,10 @@ async function writeAtomic(file, data) {
     await fsp.rename(tmp, file);
 }
 
-// now — часы (в тестах свои)
-function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
+// now — часы (в тестах свои). revOf(game) — версия папки игры (строка, routes/marks.js: её inode): у «Где вышли»
+// посреди сцены (mid) она запоминается, а в списке такая точка из прежней версии игры — stale. Её список команд
+// события мог поменяться: «Играть» сам с неё не продолжит (frontend resumePoint.js)
+function createMarkStore(savesDir, { now: clock = () => Date.now(), revOf = async () => '' } = {}) {
     // Игра — имя папки, без путей и без точки в начале (там служебное: .deleted)
     const validGame = (game) => { const g = String(game || ''); return !!g && g === path.basename(g) && !g.startsWith('.'); };
     const dirOf = (game) => path.join(savesDir, '.marks', String(game));
@@ -111,6 +113,9 @@ function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
         if (!validGame(game)) return [];
         const names = await fsp.readdir(dirOf(game)).catch(() => []);
         const out = [];
+        // Версию игры спрашиваем один раз и только если есть с чем сравнить
+        let rev = null;
+        const revNow = async () => { if (rev === null) rev = String(await revOf(game).catch(() => '')); return rev; };
         for (const name of names) {
             const id = name.endsWith('.json') ? name.slice(0, -5) : '';
             if (!validId(id)) continue;
@@ -123,6 +128,7 @@ function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
                 thumb: !!meta.thumb, full: !!meta.full, save: meta.save !== false, playtime: Number(meta.playtime) || 0,
                 line: meta.line || '', ...(meta.also?.length ? { also: meta.also } : {}),
                 ...(meta.answer ? { answer: meta.answer } : {}), ...(meta.cancel ? { cancel: true } : {}),
+                ...(meta.mid ? { mid: true } : {}), ...(meta.mid && meta.rev !== (await revNow()) ? { stale: true } : {}),
             });
         }
         return out.sort((a, b) => b.at - a.at || (a.id < b.id ? 1 : -1));
@@ -201,7 +207,7 @@ function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
     function create(game, body = {}) {
         return validGame(game) ? queued(game, () => createNow(game, body)) : Promise.resolve({ error: 'bad-value' });
     }
-    async function createNow(game, { label, map, value: data, thumb: small, shot: big, kind = 'mark', why = '', playtime = 0, id: wanted, parent, line } = {}) {
+    async function createNow(game, { label, map, value: data, thumb: small, shot: big, kind = 'mark', why = '', playtime = 0, id: wanted, parent, line, mid } = {}) {
         if (!KINDS.includes(kind)) return { error: 'bad-value' };
         const saved = typeof data === 'string' && data.length > 0;
         if ((kind !== 'shot' && !saved) || (saved && data.length > MAX_VALUE)) return { error: 'bad-value' };
@@ -231,6 +237,8 @@ function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
         await writeAtomic(fileOf(game, id, 'json'), JSON.stringify({
             kind, why: WHY.includes(why) ? why : '', label: clean(label, LABEL_MAX), map: clean(map, 80), at: now,
             thumb: !!jpg, full: !!full, save: saved, playtime: Math.max(0, Math.floor(Number(playtime) || 0)), line: run, parent: from,
+            // «Где вышли» посреди сцены — с версией игры (rev — только от сервера, не из тела)
+            ...(kind === 'auto' && why === 'exit' && mid === true ? { mid: true, rev: String(await revOf(game).catch(() => '')) } : {}),
         }));
         if (saved) await linkTree(game, id, from);
         if (kind === 'auto') await thin(game);
@@ -326,4 +334,8 @@ function createMarkStore(savesDir, { now: clock = () => Date.now() } = {}) {
     return { list, value, thumb, shot: shotFile, create, keep, setAnswer, rename, remove, trail, validId };
 }
 
-module.exports = { createMarkStore, MAX_MARKS, MAX_AUTO, SMALL_KEEP };
+// Версия игры для revOf — inode её папки: обновление и патч кладут папку заново (два переименования, services/uploads.js
+// swapIn), inode новый; включение перевода папку не трогает. Папки нет — ''
+const folderRev = (gamesDir) => (game) => fsp.stat(path.join(gamesDir, String(game))).then((s) => String(s.ino), () => '');
+
+module.exports = { createMarkStore, folderRev, MAX_MARKS, MAX_AUTO, SMALL_KEEP };

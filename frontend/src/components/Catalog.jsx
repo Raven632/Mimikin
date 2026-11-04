@@ -3,28 +3,47 @@ import { useLayer } from '../layers';
 import { useClosing } from '../useClosing';
 import Picker from './Picker';
 import { timeAgo } from '../formatAgo';
-import { IconStar, IconClose, IconArrowLeft, IconGrid, IconRows, IconSliders, IconStarSolid, IconPlus } from './icons';
+import { IconBookmark, IconBookmarkSolid, IconClose, IconArrowLeft, IconGrid, IconRows, IconSliders, IconPlus } from './icons';
 import StateView from './StateView';
 import { flash } from '../pulse';
 import { catalogItem, fmtCount } from '../catalogItems';
 import { fitWide } from '../coverUrl';
 import MetaLine from './MetaLine';
 import { HelpMark } from './Help';
+import { isOwner } from '../me';
+import { findStartTab, useFindModes, writeFindMemory } from '../findData';
 
 const options = (list) => list.map(([value, label]) => ({ value, label }));
-// «Хочу поиграть»: недавно отложенные — первыми
+// «Отложенные»: недавно отложенные — первыми
 const sortWish = (list) => [...list].sort((a, b) => b.addedAt - a.addedAt);
-// Запись списка — в вид карточки новинок: то, что показывало окно, плюс ключ и «в библиотеке»
+// Запись списка — в вид карточки выдачи: то, что показывало окно, плюс ключ и «в библиотеке»
 const wishItem = (e) => ({ ...e.info, source: e.source, key: e.key, url: e.url, game: e.game });
 
-// Новинки игр на RPG Maker с itch.io: свежие, популярные, со скидкой, по тегам. Показывает, что
+// «Найти»: игры на RPG Maker с itch.io — свежие, популярные, со скидкой, по тегам. Показывает, что
 // из этого уже есть в библиотеке. Скачивать — на самом itch.io.
-// Понравившееся откладывают звёздочкой в «Хочу поиграть» — это вторая вкладка.
-// initialSource — с какой вкладки открыть: itch | list
-// asPage — «Новинки» страницей (вкладка в шапке рядом с «Главной» и «Библиотекой»), а не окном поверх: без крестика
+// Понравившееся откладывают закладкой в «Отложенные» — это второй режим. Окно игры и закладка общие у обоих. Смена режима ничего
+// не сбрасывает: фильтры живут здесь, и вернувшись на itch.io, человек застаёт их такими, как оставил.
+// initialSource — с какого режима открыть: itch | list (findStartTab в findData.js и переходы извне)
+// asPage — «Найти» страницей (вкладка в шапке рядом с «Главной» и «Библиотекой»), а не окном поверх: без крестика
 // и затемнения, «назад» закрывает только открытую игру
-const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, onWishRemove, onClose, onOpenGame, asPage = false }) => {
-  const [source, setSource] = useState(initialSource);   // itch | list
+// libraryCount — сколько игр в библиотеке: «Скрыть мои» без них не нужна. wishReady / recheckStart — страница перезагрузилась прямо на
+// этой вкладке, пока список «Отложенных» ещё не пришёл
+const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, onWishRemove, onClose, onOpenGame, asPage = false, libraryCount = 0, wishReady = false, recheckStart = false }) => {
+  // Подробности страницы игры идут через ScraperAPI владельца, кредиты тратятся за каждую (api/src/utils/access.js): остальным их не просим
+  const owner = isOwner();
+  const [wantMode, setWantMode] = useState(initialSource === 'list' ? 'list' : 'sites');   // sites | list
+  // Страница перезагрузилась прямо на этой вкладке: начало считали, когда список «Отложенных» ещё не пришёл, и правило про пустой список
+  // не сработало. Пришёл — один раз считаем заново, если человек сам ещё ничего не нажал
+  const [startPending, setStartPending] = useState(recheckStart);
+  if (startPending && wishReady) {
+    setStartPending(false);
+    const start = findStartTab({ wishEmpty: !wishlist.length }) === 'list' ? 'list' : 'sites';
+    if (start !== wantMode) setWantMode(start);
+  }
+  // Без интернета у сервера выдачи itch.io нет, остаются «Отложенные». Пока ответа нет, считаем, что интернет есть
+  const offline = !!useFindModes().data?.offline;
+  const mode = offline ? 'list' : wantMode;
+  const source = mode === 'list' ? 'list' : 'itch';
   const [itchSort, setItchSort] = useState('popular');
   const [itchDays, setItchDays] = useState(0);
   const [itchPrice, setItchPrice] = useState('');
@@ -34,9 +53,10 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
   const [items, setItems] = useState([]);
   const [page, setPage] = useState(1);
   const [more, setMore] = useState(false);
-  const [state, setState] = useState(initialSource === 'list' ? 'ready' : 'loading');   // loading | more | ready | error | limited
-  // «Хочу поиграть» снимаем, когда открыли вкладку: убранная звёздочкой игра остаётся на месте
-  // до ухода с вкладки — её можно вернуть той же звёздочкой
+  const [feedState, setState] = useState('loading');   // loading | more | ready | error | limited
+  const state = source === 'list' ? 'ready' : feedState;
+  // «Отложенные» снимаем, когда открыли вкладку: убранная закладкой игра остаётся на месте
+  // до ухода с вкладки — её можно вернуть той же закладкой
   const [listSnap, setListSnap] = useState(() => (initialSource === 'list' ? sortWish(wishlist) : []));
   const [open, setOpen] = useState(null);            // игра в подробном просмотре
   const [shot, setShot] = useState(0);               // какая картинка там крупно: 0 — обложка
@@ -47,7 +67,7 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
   // Сеткой (обложки крупно) или списком (строка на игру, как поиск Steam) — помним на этом устройстве
   const [view, setView] = useState(() => { try { return localStorage.getItem('mimikin.catalog.view') === 'list' ? 'list' : 'grid'; } catch { return 'grid'; } });
   const pickView = (v) => { setView(v); try { localStorage.setItem('mimikin.catalog.view', v); } catch { /* приватный режим */ } };
-  // Пояснение к источнику видно, пока его не закроют «?»; закрыли — помним, и над сеткой место для игр
+  // Пояснение к режиму видно, пока его не закроют «?»; закрыли — помним, и над сеткой место для игр
   const [help, setHelp] = useState(() => { try { return localStorage.getItem('mimikin.catalog.hint') !== 'off'; } catch { return true; } });
   const toggleHelp = () => setHelp((v) => { try { localStorage.setItem('mimikin.catalog.hint', v ? 'off' : 'on'); } catch { /* приватный режим */ } return !v; });
   const request = useRef(0);
@@ -101,7 +121,7 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
   // Страница выдачи: запрос, ответ — в список (в колбэке). Её зовёт и эффект смены фильтров:
   // «загружается» к тому времени уже выставлено при отрисовке (ниже)
   const fetchPage = (nextPage) => {
-    // «Хочу поиграть» грузить не нужно: список уже есть
+    // «Отложенные» грузить не нужно: список уже есть
     if (source === 'list') return;
     const my = ++request.current;
     lastPage.current = nextPage;
@@ -118,17 +138,21 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
   };
 
   // Фильтры сменились — прежний список уже не про них: «загружается» выставляем при отрисовке,
-  // а сам запрос — эффектом
-  const filtersKey = JSON.stringify([source, itchSort, itchDays, itchPrice, itchPlatform, itchTags]);
+  // а сам запрос — эффектом. Выдача нужна только режиму itch.io; вернулись из «Отложенных» с теми же фильтрами — лента на месте, без запроса
+  const filtersKey = JSON.stringify([itchSort, itchDays, itchPrice, itchPlatform, itchTags]);
+  const feedOn = mode === 'sites';
   const [loadedFor, setLoadedFor] = useState(null);
-  if (loadedFor !== filtersKey) {
+  if (feedOn && loadedFor !== filtersKey) {
     setLoadedFor(filtersKey);
-    if (source !== 'list') {
-      setState('loading');
-      setItems([]);
-    }
+    setState('loading');
+    setItems([]);
   }
-  useEffect(() => { fetchPage(1); }, [filtersKey]); // eslint-disable-line react-hooks/exhaustive-deps
+  const askedFor = useRef(null);
+  useEffect(() => {
+    if (!feedOn || askedFor.current === filtersKey) return;
+    askedFor.current = filtersKey;
+    fetchPage(1);
+  }, [filtersKey, feedOn]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Escape и «назад» закрывают сначала подробный просмотр, потом окно (layers.js). Раскрытый
   // список фильтра Escape забирает себе — окно тогда не закрывается
@@ -143,14 +167,26 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
     if (asPage) window.scrollTo(0, open ? 0 : listScroll.current);
   }, [open, asPage]);
 
+  // Клавиатура: откуда открыли игру, туда и вернуться. Список на это время спрятан, и фокус иначе пропал бы, а Tab бросил бы наверх страницы
+  const backButton = useRef(null);
+  const openedFrom = useRef(null);
+  const openKey = open?.key;
+  // Прокрутка уже на месте (выше): фокус её не двигает
+  useEffect(() => {
+    if (!asPage) return;
+    if (openKey) backButton.current?.focus({ preventScroll: true });
+    else if (openedFrom.current?.isConnected) openedFrom.current.focus({ preventScroll: true });
+  }, [openKey, asPage]);
+
   // Игру открыли — подтягиваем её страницу: кадры, теги, оценку, описание (через ScraperAPI,
-  // если он есть)
+  // если он есть, и только у владельца)
   const openItem = (item) => {
     if (asPage) listScroll.current = window.scrollY;
+    if (!open) openedFrom.current = document.activeElement;
     setShot(0);
     setDetails(null);
     setOpen(item);
-    if (!itchMeta.details) return;
+    if (!itchMeta.details || !owner) return;
     // 429 с budget — дневной запас ScraperAPI на страницы itch.io кончился: скажем об этом
     fetch(`/api/itch/game?url=${encodeURIComponent(item.url)}`)
       .then(r => (r.ok ? r.json() : r.status === 429 ? r.json().then(b => (b.budget ? 'budget' : false), () => false) : false))
@@ -158,18 +194,17 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
       .catch(() => setDetails(false));
   };
 
-  // Карточки прежней вкладки убираем сразу: у выдачи и у списка разные поля
-  const switchSource = (next) => {
-    if (next === source) return;
+  // Нажатия в шапке — выбор человека, его и помним (findData.js). Режим, открытый извне (тег в окне игры), не выбор и память не меняет
+  const chooseMode = (next) => {
+    setStartPending(false);
+    if (next === mode) return;
     setOpen(null);
-    setItems([]);
-    setMore(false);
-    setState(next === 'list' ? 'ready' : 'loading');
     if (next === 'list') setListSnap(sortWish(wishlist));
-    setSource(next);
+    setWantMode(next);
+    writeFindMemory(next);
   };
 
-  // --- Хочу поиграть ---
+  // --- Отложенные ---
   const wished = new Set(wishlist.map(x => x.key));
   const toggleWish = (item) => (wished.has(item.key) ? onWishRemove?.(item.key) : onWishAdd?.(item));
 
@@ -193,11 +228,13 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
 
   const owned = (item) => item.game && <span className="catalog-owned">{t.cat_in_lib}</span>;
 
-  // На телефоне списки фильтров — под кнопкой «Фильтры», как в библиотеке: пять списков занимали
-  // больше половины экрана, и игры начинались ниже середины. На число — сколько фильтров включено.
-  // На широком экране кнопки нет, списки стоят в ряд
-  const [filtersOpen, setFiltersOpen] = useState(false);
-  const activeFilters = (itchDays ? 1 : 0) + (itchPrice ? 1 : 0) + (itchPlatform ? 1 : 0) + itchTags.length;
+  // Списки фильтров — под кнопкой «Фильтры» на любой ширине, как в библиотеке: пять списков занимали
+  // больше половины экрана, и игры начинались ниже середины. На кнопке — сколько фильтров включено. Раскрытое помним на этом устройстве
+  const [filtersOpen, setFiltersOpen] = useState(() => { try { return localStorage.getItem('mimikin.catalog.filters') === '1'; } catch { return false; } });
+  const toggleFilters = () => setFiltersOpen((v) => { try { localStorage.setItem('mimikin.catalog.filters', v ? '0' : '1'); } catch { /* приватный режим */ } return !v; });
+  // «Скрыть мои» сужает выдачу так же, как фильтр, поэтому считается в числе на кнопке; при пустой библиотеке её нет вовсе
+  const hideInFilters = libraryCount > 0;
+  const activeFilters = (itchDays ? 1 : 0) + (itchPrice ? 1 : 0) + (itchPlatform ? 1 : 0) + itchTags.length + (hideInFilters && hideOwned ? 1 : 0);
 
   const detail = open && (() => {
     const page = details && typeof details === 'object' ? details : null;
@@ -206,20 +243,20 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
     const line = [open.genre || page?.genre, page?.developer || open.creator, priceLabel(open), ...(open.platforms || []).map(platformLabel),
       t.cat_updated(timeAgo(open.updatedAt, lang))];
     const about = page?.description || open.description;
-    // Клик по тегу — искать ещё игры с ним (теги из фильтра; из «Хочу поиграть» — на вкладку новинок)
+    // Клик по тегу — искать ещё игры с ним (теги из фильтра; из «Отложенных» — в выдачу itch.io)
     const tags = (page?.tags || []).map(name => {
       const slug = name.toLowerCase().replace(/\s+/g, '-');
       const usable = itchMeta.tags.includes(slug) && !itchTags.includes(slug) && itchTags.length < 3;
       return (
         <button key={name} type="button" className="tag tag-link" disabled={!usable}
-          onClick={() => { if (source !== 'itch') switchSource('itch'); addTag(slug); setOpen(null); }}>{name}</button>
+          onClick={() => { if (mode !== 'sites') setWantMode('sites'); addTag(slug); setOpen(null); }}>{name}</button>
       );
     });
     // Окно игры в две колонки (на широком экране): слева картинки, справа название, сведения, кнопки и теги —
     // главное видно без прокрутки; описание — под обеими. На телефоне — одной колонкой в том же порядке
     return (
       <div className="catalog-detail">
-        <button type="button" className="catalog-back" onClick={() => setOpen(null)}><IconArrowLeft /> {t.cat_back}</button>
+        <button ref={backButton} type="button" className="catalog-back" onClick={() => setOpen(null)}><IconArrowLeft /> {t.cat_back}</button>
         <div className="catalog-detail-grid">
           <div className="catalog-detail-head">
             <h2 className="stats-title catalog-detail-title">{open.title}</h2>
@@ -246,7 +283,7 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
             <div className="catalog-detail-meta"><MetaLine parts={line} /></div>
             <div className="catalog-detail-meta">
               {page?.rating && <span>{t.itch_rating(page.rating.value, fmtCount(page.rating.count))}</span>}
-              {itchMeta.details && details === null && <span>{t.itch_details_loading}</span>}
+              {owner && itchMeta.details && details === null && <span>{t.itch_details_loading}</span>}
               {details === 'budget' && <span>{t.itch_budget}</span>}
               {owned(open)}
             </div>
@@ -255,7 +292,7 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
               <div className="catalog-detail-actions-row">
                 <button type="button" className={`meta-status-btn catalog-wish-btn${wished.has(open.key) ? ' on' : ''}`}
                   aria-pressed={wished.has(open.key)} onClick={(e) => { if (!wished.has(open.key)) flash([e.currentTarget]); toggleWish(open); }}>
-                  <IconStar /> {wished.has(open.key) ? t.wish_in : t.wish_add}
+                  <IconBookmark /> {wished.has(open.key) ? t.wish_in : t.wish_add}
                 </button>
                 {open.game && (
                   <button type="button" className="meta-status-btn" onClick={() => onOpenGame(open.game.id)}>{t.cat_open_game}</button>
@@ -277,12 +314,15 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
   const chosenChips = source === 'itch'
     ? itchTags.map(tag => ({ key: tag, label: tag.replace(/-/g, ' '), name: tag, drop: () => setItchTags(prev => prev.filter(x => x !== tag)) }))
     : [];
-  // Что показываем сеткой: выдачу сайта или снятый список — с актуальными данными тех игр,
+  // Что показываем сеткой: выдачу itch.io или снятый список — с актуальными данными тех игр,
   // что в нём остались
   const current = new Map(wishlist.map(e => [e.key, e]));
   // Список пришёл позже, чем открыли вкладку, — показываем его как есть
   const snap = listSnap.length ? listSnap : sortWish(wishlist);
   const shown = (source === 'list' ? snap.map(e => wishItem(current.get(e.key) || e)) : items).filter((x) => !hideOwned || !x.game);
+  // Без сети и без отложенных смотреть нечего: вид и «?» не нужны, остаётся пояснение под пустым списком
+  const offlineEmpty = offline && !wishlist.length;
+  const showHideRow = mode === 'list' && libraryCount > 0;
 
   const body = (
     <>
@@ -290,31 +330,35 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
             остаётся, и «Назад» возвращает туда же, где остановились */}
         {detail}
         <div hidden={!!open}>
-          {/* Шапка в одну строку: название, вкладки, справа — вид и «?» с пояснением */}
+          {/* Шапка в одну строку: название, режимы вкладками, справа — вид и «?» с пояснением.
+              Без сети itch.io видно, но нажать нельзя: человек понимает, что он есть */}
           <div className="catalog-head">
             <h2 className="stats-title">{t.cat_title}</h2>
-            <div className="filter-chips catalog-sources">
-              {[['itch', t.src_itch], ['list', <><IconStarSolid /> {t.wish_title}{wishlist.length ? ` ${wishlist.length}` : ''}</>]].map(([key, label]) => (
-                <button key={key} type="button" aria-pressed={source === key} onClick={() => switchSource(key)}
-                  className={`chip ${source === key ? 'active' : ''}${key === 'list' ? ' catalog-wish-tab' : ''}`}>{label}</button>
-              ))}
+            <div className="filter-chips catalog-sources" role="group" aria-label={t.find_modes_label}>
+              <button type="button" aria-pressed={mode === 'sites'} disabled={offline} onClick={() => chooseMode('sites')}
+                className={`chip ${mode === 'sites' ? 'active' : ''}${offline ? ' chip-empty' : ''}`}>{t.find_mode.sites}</button>
+              <button type="button" aria-pressed={mode === 'list'} onClick={() => chooseMode('list')}
+                className={`chip ${mode === 'list' ? 'active' : ''} catalog-wish-tab`}><IconBookmarkSolid /> {t.wish_title}{wishlist.length ? ` ${wishlist.length}` : ''}</button>
             </div>
-            <div className="catalog-tools">
-              <div className="catalog-view" role="group" aria-label={t.cat_view}>
-                <button type="button" aria-pressed={view === 'grid'} data-tip={t.cat_view_grid} aria-label={t.cat_view_grid} onClick={() => pickView('grid')}><IconGrid /></button>
-                <button type="button" aria-pressed={view === 'list'} data-tip={t.cat_view_list} aria-label={t.cat_view_list} onClick={() => pickView('list')}><IconRows /></button>
+            {!offlineEmpty && (
+              <div className="catalog-tools">
+                <div className="catalog-view" role="group" aria-label={t.cat_view}>
+                  <button type="button" aria-pressed={view === 'grid'} data-tip={t.cat_view_grid} aria-label={t.cat_view_grid} onClick={() => pickView('grid')}><IconGrid /></button>
+                  <button type="button" aria-pressed={view === 'list'} data-tip={t.cat_view_list} aria-label={t.cat_view_list} onClick={() => pickView('list')}><IconRows /></button>
+                </div>
+                {!offline && <HelpMark className="catalog-help" t={t} help={{ open: help, toggle: toggleHelp, id: 'catalog-hint', close: () => { if (help) toggleHelp(); } }} />}
               </div>
-              <HelpMark className="catalog-help" t={t} help={{ open: help, toggle: toggleHelp, id: 'catalog-hint', close: () => { if (help) toggleHelp(); } }} />
-            </div>
+            )}
           </div>
-          {help && <p className="audit-hint catalog-hint" id="catalog-hint">{text.hint}</p>}
+          {offline && !offlineEmpty && <p className="find-line find-offline-line">{t.find_offline}</p>}
+          {help && !offline && <p className="audit-hint catalog-hint" id="catalog-hint">{text.hint}</p>}
 
-          {source === 'itch' && (
+          {mode === 'sites' && (
             <div className="catalog-filters">
               <button
                 type="button"
                 className={`filters-toggle${filtersOpen ? ' open' : ''}${activeFilters ? ' active' : ''}`}
-                onClick={() => setFiltersOpen((v) => !v)}
+                onClick={toggleFilters}
                 aria-expanded={filtersOpen}
                 aria-controls="catalog-filters"
               >
@@ -331,6 +375,12 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
                   options={tagOptions} value="all" onChange={addTag} label={t.cat_tag_with}
                   searchable searchPlaceholder={t.cat_tag_search} emptyText={t.cat_tag_none}
                 />
+                {hideInFilters && (
+                  <label className="catalog-check">
+                    <input type="checkbox" role="switch" checked={hideOwned} onChange={toggleHideOwned} />
+                    <span>{t.cat_hide_owned}</span>
+                  </label>
+                )}
               </div>
             </div>
           )}
@@ -344,13 +394,15 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
             </div>
           )}
 
-          {/* «Скрыть мои» — игры, что уже в библиотеке, из выдачи уходят */}
-          <div className="catalog-actions">
-            <label className="catalog-check">
-              <input type="checkbox" role="switch" checked={hideOwned} onChange={toggleHideOwned} />
-              <span>{t.cat_hide_owned}</span>
-            </label>
-          </div>
+          {/* «Скрыть мои» — игры, что уже в библиотеке, из списка уходят. В выдаче она внутри «Фильтры»: там фильтры и без того есть */}
+          {showHideRow && !offlineEmpty && (
+            <div className="catalog-actions">
+              <label className="catalog-check">
+                <input type="checkbox" role="switch" checked={hideOwned} onChange={toggleHideOwned} />
+                <span>{t.cat_hide_owned}</span>
+              </label>
+            </div>
+          )}
 
           {state === 'loading' && <StateView kind="loading" title={text.loading} />}
           {(state === 'error' || state === 'limited') && (
@@ -359,12 +411,12 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
           {state === 'ready' && shown.length === 0 && (hideOwned && (source === 'list' ? wishlist.length : items.length) > 0
             ? <StateView title={t.cat_all_owned} hint={t.cat_all_owned_hint} />
             : source === 'list'
-              ? <StateView title={t.wish_empty_title} hint={t.wish_empty} />
+              ? <StateView title={t.wish_empty_title} hint={offline ? t.find_offline_empty : t.wish_empty} />
               : <StateView title={t.cat_empty} hint={t.cat_empty_hint} />)}
 
           {state !== 'loading' && shown.length > 0 && (
             <div className={view === 'list' ? 'catalog-rows' : 'catalog-grid'}>
-              {/* Звёздочка — рядом с карточкой, а не внутри: кнопка в кнопке недопустима */}
+              {/* Закладка — рядом с карточкой, а не внутри: кнопка в кнопке недопустима */}
               {shown.map(item => {
                 const meta = [item.genre, item.creator];
                 const stat = (item.platforms || []).map(platformLabel).join(', ');
@@ -409,7 +461,7 @@ const Catalog = ({ t, lang, initialSource = 'itch', wishlist = [], onWishAdd, on
                     )}
                     <button type="button" className={`catalog-wish${wished.has(item.key) ? ' on' : ''}`} aria-pressed={wished.has(item.key)}
                       data-tip={wished.has(item.key) ? t.wish_star_remove : t.wish_star_add} aria-label={wished.has(item.key) ? t.wish_star_remove : t.wish_star_add}
-                      onClick={(e) => { if (!wished.has(item.key)) flash([e.currentTarget]); toggleWish(item); }}><IconStar /></button>
+                      onClick={(e) => { if (!wished.has(item.key)) flash([e.currentTarget]); toggleWish(item); }}><IconBookmark /></button>
                   </div>
                 );
               })}

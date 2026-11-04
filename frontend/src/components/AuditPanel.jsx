@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatRetry } from '../formatRetry';
 import { timeAgo } from '../formatAgo';
 import LibraryCheck from './LibraryCheck';
+import MergeCopies from './MergeCopies';
 import StateView from './StateView';
 
 const GB = 1073741824;
@@ -24,7 +25,7 @@ const Section = ({ title, hint, count, children }) => {
 // только показ и переход к игре, чтобы найденное можно было сразу починить.
 // Вкладка окна «Статистика и ревизия» (LibraryModal): окно, крестик и Escape — там.
 // Сверху — полная проверка (LibraryCheck): сервер проверяет и сам, понемногу, а она — все игры сразу
-const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCancelCheck }) => {
+const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCancelCheck, onChanged }) => {
   const [data, setData] = useState(null);
   const [failed, setFailed] = useState(false);
   // «Ещё раз» после ошибки — собрать ревизию заново
@@ -51,6 +52,22 @@ const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCa
   }, [checkFinished, reload]);
 
   const openGame = (id) => onOpenGame(id);
+
+  // Пара копий, которую склеивают (окно MergeCopies), и что вышло у прошлой склейки
+  const [merging, setMerging] = useState(null);
+  const [merged, setMerged] = useState(null);
+  const [dismissFailed, setDismissFailed] = useState(false);
+  // Ответ храним на сервере; пара уходит из списка, когда он это подтвердил, а не раньше
+  const dismissPair = async (pair) => {
+    const [a, b] = pair.games.map((g) => g.id);
+    const res = await fetch('/api/games/duplicates/dismiss', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ a, b }),
+    }).catch(() => null);
+    setDismissFailed(!res?.ok);
+    if (res?.ok) setReload((n) => n + 1);
+  };
 
   // Ошибки в играх с настоящих устройств (rpg-fixes присылает, services/gameErrors.js хранит)
   const [gameErrors, setGameErrors] = useState([]);
@@ -146,6 +163,7 @@ const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCa
   );
 
   const improvable = data?.improvable || [];
+  const dupePairs = (data?.duplicates || []).flatMap((group) => group.pairs);
   const nothing = data
     && !data.broken.length && !data.duplicates.length && !data.missing.length
     && !data.partial.length && !improvable.length && !data.never.length && !data.orphans.length && !gameErrors.length;
@@ -198,16 +216,22 @@ const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCa
               {list(data.broken)}
             </Section>
 
-            <Section title={t.audit_dupes} hint={t.audit_dupes_hint} count={data.duplicates.length}>
-              {data.duplicates.map(group => (
-                <div key={group.games.map(g => g.id).join('|')} className="audit-group">
-                  <div className="audit-group-why">{group.why.map(w => t.audit_dupes_why[w]).join(', ')}</div>
-                  {group.games.map(item => (
+            {merged && <div className="audit-retry-done" role="status">{t.merge_done(merged)}</div>}
+            <Section title={t.audit_dupes} hint={t.audit_dupes_hint} count={dupePairs.length}>
+              {dismissFailed && <div className="audit-hint" role="alert">{t.audit_dupes_dismiss_failed}</div>}
+              {dupePairs.map(pair => (
+                <div key={pair.games.map(g => g.id).join('|')} className="audit-group">
+                  <div className="audit-group-why">{pair.why.map(w => t.audit_dupes_why[w]).join(', ')}</div>
+                  {pair.games.map(item => (
                     <button key={item.id} type="button" className="audit-item" onClick={() => openGame(item.id)}>
                       <span className="audit-item-name">{item.title || item.id}</span>
                       <span className="audit-item-size">{item.size > 0 ? fmtSize(item.size) : item.id}</span>
                     </button>
                   ))}
+                  <div className="audit-pair-actions">
+                    <button type="button" className="audit-retry" onClick={() => { setMerged(null); setMerging(pair); }}>{t.audit_dupes_merge}</button>
+                    <button type="button" className="audit-retry" onClick={() => dismissPair(pair)}>{t.audit_dupes_dismiss}</button>
+                  </div>
                 </div>
               ))}
             </Section>
@@ -246,6 +270,13 @@ const AuditPanel = ({ t, lang, games = [], onOpenGame, check, onStartCheck, onCa
               {list(data.heavy, 10)}
             </Section>
           </>
+        )}
+        {merging && (
+          <MergeCopies
+            pair={merging} t={t}
+            onClose={() => setMerging(null)}
+            onDone={(title) => { setMerging(null); setMerged(title); setReload((n) => n + 1); onChanged?.(); }}
+          />
         )}
     </>
   );

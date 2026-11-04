@@ -6,14 +6,18 @@ import { getCoverUrl, getMediaUrl } from '../coverUrl';
 import { formatPlaytime } from '../formatPlaytime';
 
 import { launchGame, withIntro, launchSignal } from '../launchGame';
-import { flightFrom, flyOpen, flyClose, flyCancel } from '../windowFly';
+import { flightFrom, flyOpen, flyClose, flyCancel, reducedMotion, OPEN_MS } from '../windowFly';
+import { createGate } from '../flyGate';
 
-import { IconEdit, IconDownload, IconUpload, IconTrash, IconRefresh, IconImage, IconClose, IconChevronLeft, IconChevronRight, IconStarSolid, IconPlay, IconCheck, IconMore } from './icons';
+import { IconEdit, IconDownload, IconUpload, IconTrash, IconRefresh, IconImage, IconClose, IconChevronLeft, IconChevronRight, IconStarSolid, IconPlay, IconCheck, IconMore, IconShelf, IconSaveDown, IconSaveUp, IconPatch, IconHistory, IconPlus } from './icons';
 import GameEdit from './GameEdit';
 // Открывают редко — грузим при первом открытии
 const SaveHistory = lazy(() => import('./SaveHistory'));
 const GameGallery = lazy(() => import('./GameGallery'));
-import { autoStatus } from '../gameStatus';
+import GameInside from './GameInside';
+import GameNotes from './GameNotes';
+import GameLists from './GameLists';
+import { autoStatus, shownStatus } from '../gameStatus';
 
 import { describeMeta, metaParts } from '../formatRetry';
 import { languageLine, languageName } from '../formatLanguage';
@@ -25,6 +29,10 @@ import { errorText, httpError } from '../apiError';
 import { flash, flashStars } from '../pulse';
 import { linkIcon, siteName, splitLinks } from '../gameLinks';
 import BrandMark from './BrandMark';
+import { shelfDaysLeft } from '../shelf';
+import { fmtSize } from '../transferSize';
+import { isOwner } from '../me';
+import GameSeries from './GameSeries';
 import ShotsPanel from './ShotsPanel';
 import PathPanel from './PathPanel';
 import { useShots } from '../shotsList';
@@ -37,7 +45,7 @@ import { useCoversHidden } from '../coversHidden';
 import { placeOf } from '../playProgress';
 import { favoritesOf, useFavoriteTags } from '../favoriteTags';
 import { IconHeart } from './icons';
-import { loadKnownLangs, useKnownLangs } from '../knownLangs';
+import { useKnownLangs } from '../knownLangs';
 import MetaLine from './MetaLine';
 
 const ROMAN_NUMERALS = ['Ⅰ','Ⅱ','Ⅲ','Ⅳ','Ⅴ','Ⅵ','Ⅶ','Ⅷ','Ⅸ','Ⅹ','Ⅺ','Ⅻ'];
@@ -53,7 +61,9 @@ const MODAL_TABS = ['overview', 'path', 'shots', 'info', 'translate'];
 // вне компонента: ref с постоянной функцией вызывается раз при открытии, а не на каждой перерисовке
 const revealOnOpen = (el) => el?.scrollIntoView({ block: 'nearest' });
 
-const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDelete, onTagClick, onUploadNewVersion, onUploadPatch, from, t, lang, showToast }) => {
+const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDelete, onShelve, onRestoreShelf, onShelfMatch, onTagClick, lists = [], onListOpen, onUploadNewVersion, onUploadPatch, from, t, lang, showToast, series, onOpenGame, onSeries }) => {
+  // Правка, файлы игры, поиск данных и перевод — владельца (api/src/utils/access.js). Человеку этих кнопок нет
+  const owner = isOwner();
   const [showAllTags, setShowAllTags] = useState(false);
   // Звезда под курсором: подсвечиваем, какой будет оценка, ещё до клика
   const [hoverStar, setHoverStar] = useState(0);
@@ -73,10 +83,37 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   const ghostRef = useRef(null);
   const flight = useRef(null);
   const fromRef = useRef(from);
+  // Полёт 240 мс — кадры дороже нескольких миллисекунд не успевают. Пока окно летит, ответы сервера не ставят состояние
+  // (ворота: run откладывает, release применяет разом), а тяжёлое и невидимое (кадры, полоса перевода)
+  // монтируется после посадки. Без полёта окно открыто сразу, ничего не ждёт. Размеры при этом не меняются:
+  // места под отложенное остаются теми же (см. .screen-thumb.pending)
+  const [gate] = useState(() => createGate(!from || reducedMotion()));
+  const hold = gate.run;
+  const [landed, setLanded] = useState(gate.open);
   useLayoutEffect(() => {
-    flight.current = flyOpen({ overlay: overlayRef.current, win: contentRef.current, ghost: ghostRef.current }, fromRef.current);
-    return () => flyCancel(flight.current);
-  }, []);
+    const ctl = flyOpen({ overlay: overlayRef.current, win: contentRef.current, ghost: ghostRef.current }, fromRef.current);
+    flight.current = ctl;
+    const land = () => { gate.release(); setLanded(true); };
+    // Страховка: анимация зависла (фоновая вкладка Safari, сбой WAAPI) — окно всё равно получает кадры и ответы
+    // сервера. release и setLanded(true) повторно безвредны
+    const guard = setTimeout(land, OPEN_MS + 300);
+    if (ctl.phase === 'open') land(); else ctl.landed.then(land);
+    return () => { clearTimeout(guard); flyCancel(ctl); };
+  }, [gate]);
+  // Окно выросло из карточки: сначала показываем её обложку (уже в кэше браузера), крупную — когда она расшифрована.
+  // Иначе крупная грузилась бы заново посреди полёта, и всё под обложкой прыгало, когда она приходит
+  const bigCover = getCoverUrl(game, 720);
+  const [coverReady, setCoverReady] = useState(null);
+  const [startCover] = useState(() => (from?.src ? { id: game.id, src: from.src } : null));
+  useEffect(() => {
+    if (!bigCover) return undefined;
+    let alive = true;
+    const im = new Image();
+    im.src = bigCover;
+    const done = () => { if (alive) hold(() => setCoverReady(bigCover)); };
+    im.decode().then(done, done);
+    return () => { alive = false; };
+  }, [bigCover, hold]);
   // Перешли стрелкой на другую игру: карточка, из которой окно выросло, — уже не эта игра. Закрытие тогда
   // просто гаснет, а не сажает чужую обложку в старую карточку
   const openedId = useRef(game.id);
@@ -118,13 +155,6 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
       }
     } catch { /* не дата — покажем как есть */ }
     return dateStr;
-  };
-
-  const formatSize = (bytes) => {
-    if (!bytes) return t.meta_unknown;
-    const mb = bytes / (1024 * 1024);
-    if (mb > 1024) return (mb / 1024).toFixed(2) + ' GB';
-    return mb.toFixed(2) + ' MB';
   };
 
   // Ссылка ведёт прямо на архив, но сначала HEAD: иначе отказ (два архива уже собираются, вход, 404) браузер
@@ -190,12 +220,26 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   };
   const [isPlaying, setIsPlaying] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  // «Добавить в серию» из меню «⋯» открывает выбор игры в блоке серии на «Обзоре». Вместе с игрой: у другой выбор закрыт
+  const [seriesAddFor, setSeriesAddFor] = useState(null);
+  // «Моя игра» на телефоне свёрнута в строку над вкладками (game.css), на компьютере она видна всегда. Другая игра — снова свёрнута
+  const [mineOpenFor, setMineOpenFor] = useState(null);
+  const mineOpen = mineOpenFor === game.id;
   // «Бэкап», «Импорт», «Удалить» — в меню «⋯»: нужны редко, а «Удалить» не должно стоять
   // рядом с частой кнопкой, где его легко нажать по ошибке
   const [moreOpen, setMoreOpen] = useState(false);
   // Вкладка правой колонки — вместе с игрой, для которой её выбрали: другая игра — снова «Обзор»
   const [tabOf, setTabOf] = useState({ id: game.id, key: 'overview' });
-  const tab = tabOf.id === game.id ? tabOf.key : 'overview';
+  // На полке файлов нет — переводить нечего: вкладки «Перевод» нет
+  // Снимки, моменты и перемотка — и для вкладок, и для числа на «Моментах»
+  const askedTab = tabOf.id === game.id ? tabOf.key : 'overview';
+  const myShots = useShots(game.id, askedTab === 'path' || askedTab === 'shots' ? askedTab : '', hold);
+  // У игры, которую не запускали, «Путь» и «Моменты» — только абзац о том, что будет потом. Сейвы тоже считаем: импорт из «⋯» даёт комнату
+  // воспоминаний, а её читает «Путь». На полке кнопки «Играть» и сейвов не читаем, поэтому вкладки там не прячем
+  const [savesOf, setSavesOf] = useState(null);
+  const hasPath = !!game.shelf || autoStatus(game) !== 'new' || (myShots.items || []).length > 0 || savesOf === game.id;
+  const tabs = MODAL_TABS.filter((key) => (key !== 'translate' || (!game.shelf && owner)) && ((key !== 'path' && key !== 'shots') || hasPath));
+  const tab = tabOf.id === game.id && tabs.includes(tabOf.key) ? tabOf.key : 'overview';
   const setTab = (key) => setTabOf({ id: game.id, key });
   const tabsRef = useRef(null);
   // Лента вкладок листается вбок (на телефоне «Прохождения» и «Перевод» уходят за край): затухание у того края,
@@ -219,6 +263,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   const [scrolledAt, setScrolledAt] = useState(null);
   const viewKey = `${game.id}:${isEditing}`;
   const scrolled = scrolledAt === viewKey;
+  // Длинное описание раскрыто — вместе с игрой: у другой оно снова свёрнуто
   const [descOpenId, setDescOpenId] = useState(null);
   const descOpen = descOpenId === game.id;
   // Длинное — точно больше четырёх строк: в строку шириной 72ch входит знаков 85–90, четыре строки — около 350;
@@ -230,22 +275,19 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   const [badImg, setBadImg] = useState({});
   const markBad = (src) => setBadImg((m) => (m[src] ? m : { ...m, [src]: true }));
   const shots = (game.screens || []).map((src, i) => ({ src, i })).filter((x) => !badImg[x.src]);
-  // Кадр для полосы сверху окна — первый, что загрузился
-  const strip = shots[0]?.src;
   // Стрелки по вкладкам — как у любого списка вкладок: фокус и выбор вместе
   const onTabsKey = (e) => {
-    const at = MODAL_TABS.indexOf(tab);
-    const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: MODAL_TABS.length - 1 }[e.key];
+    const at = tabs.indexOf(tab);
+    const to = { ArrowRight: at + 1, ArrowLeft: at - 1, Home: 0, End: tabs.length - 1 }[e.key];
     if (to === undefined) return;
     e.preventDefault();
-    const next = MODAL_TABS[(to + MODAL_TABS.length) % MODAL_TABS.length];
+    const next = tabs[(to + tabs.length) % tabs.length];
     setTab(next);
     tabsRef.current?.querySelector(`#tab-${next}`)?.focus();
   };
   // «Скриншоты»: снимки и моменты из самой игры (перемотка в число не входит — её ставит игра сама)
   // Перечитываем, когда открывают «Путь» или «Скриншоты»: после игры там новые снимки и точки («Путь» по ним знает,
   // откуда можно играть)
-  const myShots = useShots(game.id, tab === 'path' || tab === 'shots' ? tab : '');
   const shotsCount = (myShots.items || []).filter((m) => m.kind !== 'auto').length;
   // Идёт ли перевод этой игры (сообщает TranslateBar) — точка на ярлыке «Перевод»
   const [tlRun, setTlRun] = useState({ id: null, on: false });
@@ -260,12 +302,14 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   const [savesSeen, setSavesSeen] = useState(0);
   // Галерея из файлов игры — поверх всего окна
   const [galleryOpen, setGalleryOpen] = useState(initial === 'gallery');
+  const [galleryTag, setGalleryTag] = useState('');   // открыли галерею тегом из «Что на картинках»
   // Любимые теги («Настройки → Общие») — первыми в списке тегов и с сердцем
   const favorites = useFavoriteTags();
   const favTags = favoritesOf(game.tags, favorites);
   // Игра на языке, который человек знает, — полосу перевода не показываем, пока не попросит
   const knownLangs = useKnownLangs();
-  useEffect(() => { loadKnownLangs(); }, []);
+  // Окно их не спрашивает: ответ шёл мимо ворот и перерисовывал окно посреди полёта. Хранилище заполняется
+  // вместе с играми (App.jsx), так что полоса перевода после посадки знает язык с первого кадра
   const knownLang = knownLangs.includes(game.textLang?.main);
   const orderedTags = [...favTags, ...(game.tags || []).filter((tag) => !favTags.includes(tag))];
   const moreRef = useRef(null);
@@ -287,7 +331,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   // Последняя прежняя версия ушла в запас из-за патча — «Вернуть» тогда значит «убрать патч»
   const [oldPatch, setOldPatch] = useState('');
   useEffect(() => {
-    if (!moreOpen || !game.oldVersions) return;
+    if (!owner || !moreOpen || !game.oldVersions) return;
     fetch(`/api/games/${encodeURIComponent(game.id)}/old`)
       .then((res) => res.json())
       .then((data) => {
@@ -296,16 +340,16 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
         setOldPatch(versions.at(-1)?.patch || '');
       })
       .catch(() => {});
-  }, [moreOpen, game.id, game.oldVersions]);
+  }, [owner, moreOpen, game.id, game.oldVersions]);
   // Есть ли сейвы Mimikin для архива: только тогда предлагаем выбор «с сейвами / без»
   const [archiveSaves, setArchiveSaves] = useState({ id: null, n: 0 });
   useEffect(() => {
-    if (!moreOpen) return;
+    if (!owner || !moreOpen) return;
     fetch(`/api/games/${encodeURIComponent(game.id)}/archive-info`)
       .then((res) => res.json())
       .then((data) => setArchiveSaves({ id: game.id, n: data.saves || 0 }))
       .catch(() => {});
-  }, [moreOpen, game.id]);
+  }, [owner, moreOpen, game.id]);
   const hasArchiveSaves = archiveSaves.id === game.id && archiveSaves.n > 0;
   const handleRestoreOld = async () => {
     if (!(await confirmDialog({ title: t.old_restore_title, name: game.displayTitle || game.title, text: t.old_restore_text, confirmLabel: t.saves_restore }))) return;
@@ -318,7 +362,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
     }
   };
   const handleDeleteOld = async () => {
-    if (!(await confirmDialog({ title: t.old_delete_title, name: game.displayTitle || game.title, text: t.old_delete_text, confirmLabel: t.old_delete(oldSize ? formatSize(oldSize) : ''), danger: true }))) return;
+    if (!(await confirmDialog({ title: t.old_delete_title, name: game.displayTitle || game.title, text: t.old_delete_text, confirmLabel: t.old_delete(oldSize ? fmtSize(oldSize, t) : ''), danger: true }))) return;
     try {
       const res = await fetch(`/api/games/${encodeURIComponent(game.id)}/old`, { method: 'DELETE' });
       if (!res.ok) throw new Error();
@@ -359,7 +403,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
         notify(t.import_success, 'success');
         onUpdateGame(index, game);
       } else {
-        notify(errorText(t, { status: res.status, error: data.error }, { fallback: t.import_fail }), 'error');
+        notify(errorText(t, httpError(res, data), { fallback: t.import_fail }), 'error');
       }
     } catch {
       notify(t.err_net, 'error');
@@ -400,6 +444,28 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   // «Избранное», и промахнуться было проще простого
   const handleDelete = async () => {
     if (await onDelete?.(game)) handleCloseModal();
+  };
+
+  // «На полку» (App.jsx, handleShelveGame): окно остаётся открытым — сразу видно, что стало и как вернуть.
+  // На полке: файлы ещё в корзине — «Вернуть» кладёт их назад; нет — свой архив
+  const shelf = game.shelf || null;
+  const shelfDays = shelfDaysLeft(game);
+  const shelfFiles = shelfDays > 0;
+  const [shelfBusy, setShelfBusy] = useState(null);
+  const restoreShelf = async () => {
+    const id = game.id;
+    setShelfBusy(id);
+    await onRestoreShelf?.(shelf.key);
+    setShelfBusy((v) => (v === id ? null : v));
+  };
+  const busyShelf = shelfBusy === game.id;
+  // «Похоже, это … с полки» (App.jsx, handleShelfMatch): «это она» — окно переходит на ту игру, она снова на месте
+  const [matchBusy, setMatchBusy] = useState(null);
+  const answerMatch = async (accept) => {
+    const id = game.id;
+    setMatchBusy(id);
+    await onShelfMatch?.(game, accept);
+    setMatchBusy((v) => (v === id ? null : v));
   };
 
   // Слои окна (layers.js): Escape и «назад» закрывают верхний — картинку, галерею, меню «⋯»,
@@ -463,23 +529,33 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
             onDone={() => setIsEditing(false)}
           />
         ) : (
-        <div className={`modal-header${strip ? ' has-strip' : ''}`} onScroll={(e) => setScrolledAt(e.currentTarget.scrollTop > 8 ? viewKey : null)}>
-          {/* Полоса сверху, как в Steam: настоящий кадр из игры, затемнённый; обложка заходит на неё. Обложка в окне и так
-              есть, так что ею полосу не заполняем — одна картинка дважды. Нет кадров — нет полосы. На узком окне её нет */}
-          {strip && <div className="modal-strip" aria-hidden="true"><img src={getMediaUrl(strip, 720)} alt="" /></div>}
+        <div className="modal-header" onScroll={(e) => setScrolledAt(e.currentTarget.scrollTop > 8 ? viewKey : null)}>
           {/* Левая колонка: обложка, под ней своё и источники. Обложки у нас широкие — одна обложка оставляла под собой
               пустую колонку во всю высоту окна; своё здесь видно с любой вкладки */}
-          <aside className="modal-side">
+          <aside className={`modal-side${mineOpen ? ' mine-open' : ''}`}>
             <div className="modal-cover-wrapper">
               {coverUrl && !badImg[coverUrl] ? (
-                <img id="modal-cover" src={coverUrl} alt={game.displayTitle || game.title} onError={() => markBad(coverUrl)} />
+                <img id="modal-cover" src={coverReady !== coverUrl && startCover?.id === game.id ? startCover.src : coverUrl} alt={game.displayTitle || game.title} decoding="async" onError={() => markBad(coverUrl)} />
               ) : (
                 <div className="cover-placeholder modal-placeholder"><BrandMark size={64} /></div>
               )}
             </div>
 
+            {/* Только телефон: окно там открывают запустить игру или понять, что это такое, поэтому своё — одной строкой, а вкладки на первом экране */}
+            <button type="button" className="mine-fold" aria-expanded={mineOpen} aria-controls="modal-mine" onClick={() => setMineOpenFor(mineOpen ? null : game.id)}>
+              <span className="mine-fold-title">{t.mine_title}</span>
+              <span className="mine-fold-facts">
+                {/* Заметка свёрнута вместе со своим: без значка казалось бы, что она пропала */}
+                {game.notes && <span className="mine-fold-note" role="img" aria-label={t.notes_label}><IconEdit /></span>}
+                {formatPlaytime(game.playtime, t) && <span>{formatPlaytime(game.playtime, t)}</span>}
+                {game.rating > 0 && <span className="mine-fold-rating"><IconStarSolid /> {game.rating}</span>}
+                {shownStatus(game) && <span>{t[`status_${shownStatus(game)}`]}</span>}
+              </span>
+              <IconChevronRight />
+            </button>
+
             {/* Своё: когда играл, где остановился, сколько наиграно и осталось, оценка, статус */}
-            <section className="modal-mine" aria-labelledby="modal-mine-title">
+            <section className="modal-mine" id="modal-mine" aria-labelledby="modal-mine-title">
               <h3 className="modal-side-title" id="modal-mine-title">{t.mine_title}</h3>
               <div className="modal-facts">
                 {game.lastPlayed > 0 && (
@@ -544,10 +620,13 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                   </div>
                 </div>
               </div>
+              <GameLists game={game} all={lists} t={t} onPatch={onPatch} onOpen={onListOpen} />
             </section>
 
-            {/* Источники — строками: сайт, что он дал (оценка, код, число картинок); непривязанные — одной строкой ниже */}
-            <section className="modal-src" aria-labelledby="modal-src-title">
+            <GameNotes key={`notes-${game.id}`} game={game} t={t} onPatch={onPatch} />
+
+            {/* Источники — строками: сайт, что он дал (оценка, код, число картинок). Непривязанные не перечисляем: действия у такой строки нет */}
+            {sources.some((x) => x.url) && <section className="modal-src" aria-labelledby="modal-src-title">
               <h3 className="modal-side-title" id="modal-src-title">{t.src_title}</h3>
               {sources.filter((x) => x.url).map((x) => (
                 <a key={x.key} className="src-row" href={x.url} target="_blank" rel="noopener noreferrer" data-tip={[x.info, x.hint].filter(Boolean).join('\n') || x.url}>
@@ -556,8 +635,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                   {x.info && <span className="src-row-info">{x.info}</span>}
                 </a>
               ))}
-              {sources.some((x) => !x.url) && <p className="src-off">{t.src_off(sources.filter((x) => !x.url).map((x) => x.name).join(', '))}</p>}
-            </section>
+            </section>}
           </aside>
 
           <div className="modal-info">
@@ -580,7 +658,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                   {game.originalTitle && <div className="modal-original-title" lang="ja">{game.originalTitle}</div>}
                 </div>
 
-                {/* Главное — одной строкой под названием: кто сделал, когда, версия. Подробное — во вкладке «Сведения» */}
+                {/* Главное — одной строкой под названием: кто сделал, когда, оценка, версия. Подробное — во вкладке «Сведения» */}
                 {(() => {
                   const items = [
                     game.developer && <span key="dev" className="modal-summary-dev">{game.developer}</span>,
@@ -597,26 +675,43 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                   if (!shown.length && !mimikinTl) return null;
                   return (
                     <div className="modal-ids">
-                      {shown.map((c, i) => (
-                        <span key={c} className={`modal-lang${i === 0 ? ' main' : ''}`} data-tip={info.length ? languageName(c, lang) : undefined}>{info.length ? langsLabel([c]) : c}</span>
-                      ))}
+                      {/* Языки текста — одной плашкой, а не шестью рамками: переносится целиком, рядом с кодом */}
+                      {shown.length > 0 && (
+                        <span className="lang-set">
+                          {shown.map((c, i) => (
+                            <span key={c} className={`modal-lang${i === 0 ? ' main' : ''}`} data-tip={info.length ? languageName(c, lang) : undefined}>{info.length ? langsLabel([c]) : c}</span>
+                          ))}
+                        </span>
+                      )}
                       {mimikinTl && <span className="modal-lang tl" data-tip={t.code_mimikin_tl(languageName(mimikinTl, lang))}><BrandMark size={16} />{langsLabel([mimikinTl])}</span>}
                     </div>
                   );
                 })()}
 
-                {/* Действия — рядом, как в RomM: «Играть», «Продолжить с…», галерея, правка, «⋯» */}
+                {/* Действия: «Играть» со стрелкой «Продолжить с…» (одна кнопка, две цели), дальше значки — галерея, правка, «⋯».
+                    На десктопе значки без слов, подпись — в подсказке; на телефоне подсказок нет, там слово под значком */}
                 <div className="modal-actions">
-                  <button id="modal-play-btn" onClick={handlePlay} disabled={isPlaying}>
-                  <IconPlay /><span>{isPlaying ? t.launching : t.play}</span>
-                </button>
-                  <ContinueFrom key={`from-${game.id}`} game={game} t={t} lang={lang} notify={notify} open={initial === 'saves'} reload={savesSeen} onPlay={playFrom} onHistory={() => setHistoryOpen(true)} />
-                  <button type="button" onClick={() => setGalleryOpen(true)} className="grimoire-action-btn" data-tip={t.gallery_title}><IconImage />{t.gallery_btn}</button>
-                  <button type="button" onClick={() => { setMoreOpen(false); setIsEditing(true); }} className="grimoire-action-btn" data-tip={t.edit_meta}><IconEdit />{t.edit_btn}</button>
+                  {/* На полке вместо «Играть» — как её вернуть: из корзины сразу или своим архивом. Галереи нет:
+                      её картинки — в файлах игры */}
+                  {shelf ? (owner ? (
+                    <button id="modal-play-btn" className="shelf-play" disabled={busyShelf}
+                      onClick={shelfFiles ? restoreShelf : () => onUploadNewVersion?.(game)}>
+                      {shelfFiles ? <><IconRefresh /><span>{t.shelf_restore}</span></>
+                        : <><IconUpload /><span>{t.shelf_upload}</span></>}
+                    </button>
+                  ) : null) : (
+                    <ContinueFrom key={`from-${game.id}`} game={game} t={t} lang={lang} notify={notify} open={initial === 'saves'} reload={savesSeen} onPlay={playFrom} onHistory={() => setHistoryOpen(true)} onSaves={(any) => { if (any) setSavesOf(game.id); }}>
+                      <button id="modal-play-btn" onClick={handlePlay} disabled={isPlaying}>
+                        <IconPlay /><span>{isPlaying ? t.launching : t.play}</span>
+                      </button>
+                    </ContinueFrom>
+                  )}
+                  {!shelf && <button type="button" onClick={() => setGalleryOpen(true)} className="icon-btn act-gallery" aria-label={t.gallery_btn} data-tip={t.gallery_btn}><IconImage /><span className="icon-btn-word">{t.gallery_btn}</span></button>}
+                  {owner && <button type="button" onClick={() => { setMoreOpen(false); setIsEditing(true); }} className="icon-btn act-edit" aria-label={t.edit_btn} data-tip={t.edit_btn}><IconEdit /><span className="icon-btn-word">{t.edit_btn}</span></button>}
                   <div className="modal-more" ref={moreRef}>
                     <button
                       type="button"
-                      className={`grimoire-action-btn modal-more-btn${moreOpen ? ' open' : ''}`}
+                      className={`icon-btn modal-more-btn${moreOpen ? ' open' : ''}`}
                       onClick={() => setMoreOpen(v => !v)}
                       aria-haspopup="menu"
                       aria-expanded={moreOpen}
@@ -627,33 +722,76 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                     </button>
                     {moreOpen && (
                       <div className="modal-more-list" role="menu" ref={revealOnOpen}>
-                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(handleBackup)}><IconDownload />{t.backup}</button>
-                        {/* Обычные ссылки: загрузку ведёт сам браузер (полоса, пауза, телефон). С сейвами — по умолчанию, первым */}
-                        {[...(hasArchiveSaves ? [[t.archive_dl_saves, '?saves=1'], [t.archive_dl_plain, '']] : [[t.archive_dl, '']])].map(([label, q]) => (
-                          <a key={q} role="menuitem" className="modal-more-item" href={`/api/games/${encodeURIComponent(game.id)}/archive${q}`} download onClick={handleArchive}>
-                            <IconDownload /><span>{label}</span>
-                            {game.size > 0 && <span className="modal-more-size">{formatSize(game.size)}</span>}
+                        {/* Три группы через тонкую черту: сейвы, файлы игры, убрать. Значки не повторяются: у сейвов — дискета,
+                            у игры — стрелки, у патча — кусочек пазла; размер — один раз, у «Скачать игру». С полки — только
+                            то, чему файлы не нужны: сейвы, удалить прежнюю версию, удалить игру */}
+                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(handleBackup)}><IconSaveDown />{t.saves_download}</button>
+                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => importRef.current.click())}><IconSaveUp />{isImporting ? t.import_wait : t.import}</button>
+                        {owner && !shelf && <>
+                          <div className="modal-more-sep" role="separator" />
+                          {/* Обычные ссылки: загрузку ведёт сам браузер (полоса, пауза, телефон). С сейвами — по умолчанию;
+                              без них — тихой строкой под ней, а не вторым таким же пунктом */}
+                          <a role="menuitem" className="modal-more-item" href={`/api/games/${encodeURIComponent(game.id)}/archive${hasArchiveSaves ? '?saves=1' : ''}`} download onClick={handleArchive}>
+                            <IconDownload /><span>{t.archive_dl}</span>
+                            {game.size > 0 && <span className="modal-more-size">{fmtSize(game.size, t)}</span>}
                           </a>
-                        ))}
-                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => importRef.current.click())}><IconUpload />{isImporting ? t.import_wait : t.import}</button>
-                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => onUploadNewVersion?.(game))}><IconRefresh />{t.update_game}</button>
-                        <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => onUploadPatch?.(game))}><IconUpload />{t.patch_game}</button>
-                        {game.oldVersions > 0 && (
-                          <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(handleRestoreOld)}><IconRefresh />{oldPatch ? t.old_restore_patch(oldPatch.replace(/\.(zip|7z|rar)$/i, '')) : t.old_restore}</button>
+                          {hasArchiveSaves && (
+                            <a role="menuitem" className="modal-more-item modal-more-sub" href={`/api/games/${encodeURIComponent(game.id)}/archive`} download onClick={handleArchive}>
+                              <span>{t.archive_dl_plain}</span>
+                            </a>
+                          )}
+                          <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => onUploadNewVersion?.(game))}><IconRefresh />{t.update_menu}</button>
+                          <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => onUploadPatch?.(game))}><IconPatch />{t.patch_game}</button>
+                          {game.oldVersions > 0 && (
+                            <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(handleRestoreOld)}><IconHistory />{oldPatch ? t.old_restore_patch(oldPatch.replace(/\.(zip|7z|rar)$/i, '')) : t.old_restore}</button>
+                          )}
+                        </>}
+                        {owner && <div className="modal-more-sep" role="separator" />}
+                        {owner && !series && <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => { setTab('overview'); setSeriesAddFor(game.id); })}><IconPlus />{t.series_add}</button>}
+                        {owner && !shelf && <button type="button" role="menuitem" className="modal-more-item" onClick={() => runMore(() => onShelve?.(game))}><IconShelf />{t.shelf_btn}</button>}
+                        {owner && game.oldVersions > 0 && (
+                          <button type="button" role="menuitem" className="modal-more-item danger" onClick={() => runMore(handleDeleteOld)}><IconTrash />{t.old_delete(oldSize ? fmtSize(oldSize, t) : '')}</button>
                         )}
-                        {game.oldVersions > 0 && (
-                          <button type="button" role="menuitem" className="modal-more-item danger" onClick={() => runMore(handleDeleteOld)}><IconTrash />{t.old_delete(oldSize ? formatSize(oldSize) : '')}</button>
-                        )}
-                        <button type="button" role="menuitem" className="modal-more-item danger" onClick={() => runMore(handleDelete)}><IconTrash />{t.delete_btn}</button>
+                        {owner && <button type="button" role="menuitem" className="modal-more-item danger" onClick={() => runMore(handleDelete)}><IconTrash />{t.delete_btn}</button>}
                       </div>
                     )}
                   </div>
                   <input type="file" ref={importRef} accept=".zip" style={{ display: 'none' }} onChange={handleImportSelect} />
                 </div>
 
+                {/* На полке: когда убрали, что осталось, где файлы. «Вернуть» — в кнопке выше, здесь — другой путь: свой архив
+                    вместо старых файлов */}
+                {shelf && (
+                  <div className="meta-status shelf-note">
+                    <div className="meta-status-text">
+                      <b><IconShelf />{t.shelf_label}</b>
+                      <span>{t.shelf_since(timeAgo(shelf.at, lang))}</span>
+                      <span>{shelfFiles ? t.shelf_files(shelfDays) : t.shelf_no_files}</span>
+                    </div>
+                    {owner && shelfFiles && <div className="catalog-update-actions">
+                      <button type="button" className="meta-status-btn" disabled={busyShelf} onClick={() => onUploadNewVersion?.(game)}>{t.shelf_upload}</button>
+                    </div>}
+                  </div>
+                )}
+
+                {/* Загружена как новая, а похоже, это игра с полки: то же название (utils/audit.js).
+                    Спросить, перенести ли сюда её сейвы, моменты и время — вид как у «Похоже, это …» по файлам */}
+                {game.shelfMatch && (
+                  <div className="meta-status file-guess shelf-match">
+                    <div className="meta-status-text">
+                      <b>{t.shelf_match_title(game.shelfMatch.title)}</b>
+                      <span>{t.shelf_match_text(game.shelfMatch.why.map((w) => t.shelf_match_why[w]).filter(Boolean).join(', '), formatPlaytime(game.shelfMatch.playtime, t))}</span>
+                    </div>
+                    <div className="catalog-update-actions">
+                      <button type="button" className="meta-status-btn" disabled={matchBusy === game.id} onClick={() => answerMatch(true)}>{t.shelf_match_yes}</button>
+                      <button type="button" className="meta-status-btn subtle" disabled={matchBusy === game.id} onClick={() => answerMatch(false)}>{t.shelf_match_no}</button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Если метаданные не полные — видно, почему и что будет дальше. Раньше
                     это было не узнать: пометки «не найдено» жили в Redis и никуда не выводились */}
-                {(() => {
+                {owner && (() => {
                   const info = describeMeta(game.meta, t, lang);
                   if (!info) return null;
                   const busy = info.searching || searchQueued;
@@ -686,10 +824,10 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                   );
                 })()}
 
-                {/* Вкладки: окно влезает в экран, а не тянется лентой из сведений, кадров, тегов, перевода и прохождений
+                {/* Вкладки: окно влезает в экран, а не тянется лентой из сведений, кадров, тегов и перевода
                     одного веса. Уведомления выше — то, на что надо ответить, — видны на любой вкладке */}
                 <div className="modal-tabs" role="tablist" aria-label={t.modal_tabs} ref={tabsRef} onKeyDown={onTabsKey}>
-                  {MODAL_TABS.map((key) => (
+                  {tabs.map((key) => (
                     <button key={key} type="button" role="tab" id={`tab-${key}`} aria-selected={tab === key} aria-controls={tab === key ? 'modal-tab-panel' : undefined}
                       tabIndex={tab === key ? 0 : -1} className={`modal-tab${tab === key ? ' active' : ''}`} onClick={() => setTab(key)}>
                       {t.modal_tab[key]}
@@ -713,12 +851,15 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                       </button>
                     )}
 
+                    <GameSeries key={`series-${game.id}`} game={game} series={series} owner={owner} adding={seriesAddFor === game.id} setAdding={(on) => setSeriesAddFor(on ? game.id : null)} t={t} onOpen={onOpenGame} onChange={onSeries} />
+
                     {shots.length > 0 && <div className="modal-section-label">{t.fact_screens}</div>}
                     {shots.length > 0 && (
                       <div className="game-screens">
                         {shots.map(({ src, i }) => (
-                          <button key={src} type="button" className="screen-thumb" onClick={() => setLightbox(i)} data-tip={t.screens_open}>
-                            <img src={getMediaUrl(src, 360)} alt={`${game.displayTitle || game.title} — ${i + 1}`} loading="lazy" onError={() => markBad(src)} />
+                          // До посадки окна — пустая плитка того же размера: сетка не двигается, когда приходят картинки
+                          <button key={src} type="button" className={`screen-thumb${landed ? '' : ' pending'}`} onClick={() => setLightbox(i)} data-tip={t.screens_open} aria-label={landed ? undefined : `${game.displayTitle || game.title} — ${i + 1}`}>
+                            {landed && <img src={getMediaUrl(src, 360)} alt={`${game.displayTitle || game.title} — ${i + 1}`} loading="lazy" decoding="async" onError={() => markBad(src)} />}
                           </button>
                         ))}
                       </div>
@@ -752,6 +893,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                         <span className="tag" style={{ opacity: 0.5, borderColor: 'transparent' }}>{t.no_tags}</span>
                       )}
                     </div>
+                    {landed && !shelf && <GameInside key={`inside-${game.id}`} game={game} t={t} onPick={(tag) => { setGalleryTag(tag); setGalleryOpen(true); }} />}
                     </>
                   )}
                   {tab === 'info' && (
@@ -764,7 +906,8 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
                         // Язык неизвестен — поля нет: «Язык: —» ничего не говорит
                         languageLine(game, t, lang) && [t.meta_lang, <span className="meta-value">{languageLine(game, t, lang)}</span>],
                         game.version && [t.meta_version, <span className="meta-value">{game.version}</span>],
-                        [t.meta_size, <span className="meta-value">{formatSize(game.size)}</span>],
+                        // Тот же вид, что в меню «⋯»: единицы и запятая — по языку (transferSize.js)
+                        [t.meta_size, <span className="meta-value">{game.size ? fmtSize(game.size, t) : t.meta_unknown}</span>],
                         [t.meta_added, <span className="meta-value">{formatDate(game.addedAt)}</span>],
                       ].filter(Boolean).map(([label, value]) => (
                         <div key={label} className="meta-item">
@@ -777,18 +920,18 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
 
                     </>
                   )}
-                  {tab === 'path' && <PathPanel key={`path-${game.id}`} game={game} t={t} lang={lang} shots={myShots} onPlay={playFrom} />}
+                  {tab === 'path' && <PathPanel key={`path-${game.id}`} game={game} t={t} lang={lang} shots={myShots} onPlay={shelf ? null : playFrom} />}
                   {tab === 'shots' && (
-                    <ShotsPanel key={`shots-${game.id}`} game={game} t={t} lang={lang} shots={myShots} notify={notify} onPlay={playFrom}
-                      onCover={(coverPath) => onUpdateGame(index, { ...game, cover: coverPath })} />
+                    <ShotsPanel key={`shots-${game.id}`} game={game} t={t} lang={lang} shots={myShots} notify={notify} onPlay={shelf ? null : playFrom}
+                      onCover={owner ? (coverPath) => onUpdateGame(index, { ...game, cover: coverPath }) : undefined} />
                   )}
                   {/* Перевод игры: язык, ход, готовый файл перевода (TranslateBar.jsx). Скрыт, а не убран, на других вкладках:
                       иначе полоса теряла бы своё («Всё равно перевести», проверку), а ход перевода — на точке ярлыка.
                       key — своя полоса у каждой игры: «Всё равно перевести» не переносится на следующую */}
                   <div hidden={tab !== 'translate'}>
-                    <TranslateBar key={game.id} game={game} t={t} lang={lang} notify={notify} known={knownLang}
-                      onLang={(l) => setMimikin((p) => (p.id === game.id && p.lang === l ? p : { id: game.id, lang: l }))}
-                      onRunning={(on) => setTlRun((p) => (p.id === game.id && p.on === on ? p : { id: game.id, on }))} />
+                    {landed && !shelf && owner && <TranslateBar key={game.id} game={game} t={t} lang={lang} notify={notify} known={knownLang}
+                      onLang={(l) => setMimikin((p) => ((p.id === game.id ? p.lang : null) === l ? p : { id: game.id, lang: l }))}
+                      onRunning={(on) => setTlRun((p) => ((p.id === game.id && p.on) === on ? p : { id: game.id, on }))} />}
                   </div>
                 </div>
 
@@ -802,7 +945,7 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
       {/* Просмотрщик рисуем прямо в body: у окна игры есть backdrop-filter, а он
           становится точкой отсчёта для position: fixed внутри — картинка выросла бы
           не во весь экран, а в рамку окна за вычетом его отступов */}
-      {galleryOpen && <Suspense fallback={null}><GameGallery game={game} t={t} onClose={() => setGalleryOpen(false)} /></Suspense>}
+      {galleryOpen && <Suspense fallback={null}><GameGallery game={game} t={t} initialTag={galleryTag} onClose={() => { setGalleryOpen(false); setGalleryTag(''); }} /></Suspense>}
 
       {lightbox !== null && game.screens?.length > 0 && createPortal(
         <div ref={lightboxRef} className={`lightbox${hidden ? ' covers-hidden' : ''}`} role="dialog" aria-modal="true" aria-label={game.displayTitle || game.title} tabIndex={-1} onClick={(e) => { e.stopPropagation(); setLightbox(null); }}>

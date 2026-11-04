@@ -126,7 +126,8 @@ const RULES = {
 // seedbox — забор архивов с seedbox (services/seedbox.js): что с ним сейчас и «проверить сейчас»
 // updates — новая версия на GitHub и «Обновить» (services/updates.js)
 // server() — что задаётся только на сервере (.env): для «О программе», без значений секретов
-function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, services = null, seedbox = null, relay = null, updates = null, server = null } = {}) {
+// problemReport(браузер) — журнал и отчёт о проблеме для «О программе», уже очищенные (services/problemReport.js)
+function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, services = null, seedbox = null, relay = null, updates = null, server = null, problemReport = null } = {}) {
     const router = express.Router();
     const describe = () => ({
         version,
@@ -135,6 +136,16 @@ function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, serv
     });
 
     router.get('/', (req, res) => res.json(describe()));
+
+    router.get('/problem-report', async (req, res) => {
+        if (!problemReport) return res.status(404).json({ error: 'Нет' });
+        try {
+            res.set('Cache-Control', 'no-store').json(await problemReport(req.get('user-agent') || ''));
+        } catch (e) {
+            console.error('[Настройки]', e.message);
+            res.status(500).json({ error: 'Не удалось' });
+        }
+    });
 
     // Службы: есть ли ключ, отвечает ли, сколько осталось и когда обновится. ?fresh=1 — спросить заново
     router.get('/services', async (req, res) => {
@@ -217,7 +228,7 @@ function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, serv
         const name = String(req.body?.name || '');
         const o = OPTIONS[name];
         if (!o) return res.status(404).json({ error: 'Такой настройки нет' });
-        if (describeOptions()[name].fromEnv) return res.status(409).json({ error: 'Задано в .env на сервере — менять нужно там' });
+        if (describeOptions()[name].fromEnv) return res.status(409).json({ error: 'Задано в .env на сервере — менять нужно там', reason: 'from-env' });
         const raw = req.body?.value ?? null;
         const value = checkOption(name, raw);
         if (value === undefined) return res.status(400).json({ error: o.type === 'int' ? `Нужно целое число от ${o.min} до ${o.max}` : 'Непонятное значение', reason: 'bad' });
@@ -242,7 +253,7 @@ function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, serv
         try {
             res.json(await updates.update());
         } catch (e) {
-            res.status(e.status || 500).json({ error: e.message });
+            res.status(e.status || 500).json({ error: e.message, reason: e.reason, params: e.params });
         }
     });
 
@@ -251,7 +262,7 @@ function createSettingsRouter(dbService, { checks = {}, onSaved = () => {}, serv
         const name = req.params.name;
         const rule = RULES[name];
         if (!rule) return res.status(404).json({ error: 'Такой настройки нет' });
-        if (secretFromEnv(name)) return res.status(409).json({ error: 'Задано в .env на сервере — менять нужно там' });
+        if (secretFromEnv(name)) return res.status(409).json({ error: 'Задано в .env на сервере — менять нужно там', reason: 'from-env' });
         let value = rule.clean(String(req.body?.key || '').trim());
         if (value && !rule.valid(value)) return res.status(400).json({ error: rule.bad, reason: 'bad' });
         let checked = null;

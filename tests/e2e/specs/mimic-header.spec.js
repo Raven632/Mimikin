@@ -20,7 +20,8 @@ async function boot(page, { time = new Date('2026-10-03T12:00:00Z'), path = '/' 
   await page.goto(path);
   await expect(page.locator('.shelf-card').first()).toBeVisible();
   const now = await page.evaluate(() => Date.now());
-  await page.clock.pauseAt(new Date(now + 100));
+  // С запасом: пока команда дойдёт до страницы, часы идут, а назад pauseAt не умеет
+  await page.clock.pauseAt(new Date(now + 2000));
 }
 
 // [мс от начала, кадр, что поверх (null — ничего)] — идём по часам вперёд и сверяем
@@ -61,6 +62,10 @@ test.describe('мимик в шапке: движение включено', () 
 
   test('покой: открыт, глаза видны; спустя 20–40 с моргает или глядит и возвращается', async ({ page }) => {
     await boot(page);
+    // Таймер покоя завели при показе страницы, а до остановки часов прошло неизвестно сколько (boot даёт 2 с
+    // и больше): окно «20–40 с» сдвигалось, и первое движение иногда приходило до проверки на 19 с или
+    // кончалось до конца цикла. Возврат на вкладку заводит его заново от остановленных часов
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     expect(await frame(page)).toBe('OPEN');
     expect((await eyes(page)).length).toBeGreaterThan(0);
     await page.clock.runFor(19_000);
@@ -334,12 +339,12 @@ test.describe('мимик в шапке: движение включено', () 
     expect(await frame(page)).toBe('OPEN');
     await page.locator('.brand').click();
     await timeline(page, [[1, 'W', null], [170, 'W', 'p0'], [250, 'W', 'p1'], [330, 'WR', 'p2'], [410, 'WR', 'p3']]);
-    await expect(page.locator('.picker-content')).toHaveCount(0);
+    await expect(page.locator('.play-pick')).toHaveCount(0);
     await page.clock.runFor(100);
     // Окно рисует React вне часов: отпускаем их
     await page.clock.resume();
-    await expect(page.locator('.picker-content')).toBeVisible();
-    await expect(page.locator('.picker-content h3')).not.toHaveText('');
+    await expect(page.locator('.play-pick')).toBeVisible();
+    await expect(page.locator('.pick-name')).not.toHaveText('');
   });
 
   test('щелчки медленнее (5 за 2,4 с) секрета не дают', async ({ page }) => {
@@ -349,7 +354,7 @@ test.describe('мимик в шапке: движение включено', () 
       await page.clock.runFor(600);
     }
     await page.clock.runFor(1000);
-    await expect(page.locator('.picker-content')).toHaveCount(0);
+    await expect(page.locator('.play-pick')).toHaveCount(0);
   });
 
   test('«Играть» на карточке: нажато — W; отпущено — глоток SHUT, HALF; увёл курсор с нажатой — W опустилась', async ({ page }) => {
@@ -406,18 +411,22 @@ test.describe('мимик в шапке: ночь', () => {
     await page.mouse.up();
     expect(await mood(page, 'error')).toBe('now');
     await timeline(page, [[1, 'K-:D'], [90, 'K+:D'], [170, 'D']]);
-    // 06:00:01 — день
+    // 06:00:01 — день. Днём раз в 20–40 с он глядит в сторону (меньше секунды): если 70 с кончились посреди взгляда — даём его досмотреть
     await page.clock.runFor(70_000);
+    for (let i = 0; i < 10 && (await frame(page)) !== 'OPEN'; i++) await page.clock.runFor(200);
     expect(await frame(page)).toBe('OPEN');
   });
 
   test('ночью покой — только медленное моргание глаз под крышкой (320 мс), раз в 40–80 с', async ({ page }) => {
     await boot(page, { time: new Date('2026-10-03T02:30:00Z') });
     expect(await frame(page)).toBe('D');
-    await page.clock.runFor(39_000);
+    // Отсчёт покоя начинаем заново от остановленных часов (как в дневном тесте), иначе моргание могло прийти
+    // чуть раньше 40 с от этой точки
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
+    await page.clock.runFor(36_000);
     expect(await frame(page)).toBe('D');
     let seen = null;
-    for (let t = 0; t < 42_000 && !seen; t += 80) {
+    for (let t = 0; t < 45_000 && !seen; t += 80) {
       await page.clock.runFor(80);
       const f = await frame(page);
       if (f !== 'D') seen = f;
@@ -438,17 +447,24 @@ test.describe('мимик на входе', () => {
     const brand = page.locator('.auth-brand svg');
     await expect(brand).toBeVisible();
     const now = await page.evaluate(() => Date.now());
-    await page.clock.pauseAt(new Date(now + 100));
+    // С запасом: пока команда дойдёт до страницы, часы идут, а назад pauseAt не умеет
+  await page.clock.pauseAt(new Date(now + 2000));
     expect(await brand.getAttribute('data-frame')).toBe('SLEEP');
     await page.clock.runFor(60_000);
     expect(await brand.getAttribute('data-frame')).toBe('SLEEP');
     await page.locator('input[name=username]').pressSequentially('d');
     let t = 0;
-    for (const [ms, f] of [[1, 'B:OPEN'], [90, 'OPEN'], [410, 'B:OPEN'], [570, 'OPEN']]) {
+    for (const [ms, f] of [[1, 'B:OPEN'], [90, 'OPEN'], [410, 'B:OPEN']]) {
       await page.clock.runFor(ms - t);
       t = ms;
       expect(await brand.getAttribute('data-frame'), `${ms} мс`).toBe(f);
     }
+    // Пока он спал, на входе мог начаться покой — моргание или взгляд (вторая пауза выпадает на ~62 с) — и
+    // дойти до конца уже после нажатия. Печать идущую последовательность не обрывает, поэтому последний
+    // кадр ждём, а не требуем ровно на 570 мс
+    await page.clock.runFor(160);
+    for (let i = 0; i < 10 && (await brand.getAttribute('data-frame')) !== 'OPEN'; i++) await page.clock.runFor(200);
+    expect(await brand.getAttribute('data-frame')).toBe('OPEN');
   });
 });
 
@@ -478,7 +494,7 @@ test.describe('мимик: «уменьшить движение»', () => {
     await boot(page);
     for (let i = 0; i < 5; i += 1) await page.locator('.brand').click();
     await page.clock.resume();
-    await expect(page.locator('.picker-content')).toBeVisible();
+    await expect(page.locator('.play-pick')).toBeVisible();
     expect(await frame(page)).toBe('OPEN');
     expect(await over(page)).toBeNull();
   });

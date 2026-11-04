@@ -15,8 +15,8 @@ const TRASH_DIR = process.env.TRASH_DIR || path.join(GAMES_DIR, '_trash');
 // «Входящие»: архив, положенный сюда (JDownloader, торрент-клиент, по сети), библиотека принимает сама (services/inbox.js)
 const INBOX_DIR = process.env.INBOX_DIR || path.join(GAMES_DIR, '_inbox');
 
-// OFFLINE=1 — сервер не ходит в интернет сам: не ищет данные игр, не проверяет обновления программы.
-// Для автотестов и демо-библиотеки (scripts/demo-library.js): там нечего искать,
+// OFFLINE=1 — сервер не ходит в интернет сам: не ищет данные игр, не проверяет обновления программы, ленты
+// сайтов пусты (utils/offline.js). Для автотестов и демо-библиотеки (scripts/demo-library.js): там нечего искать,
 // а тесты не должны зависеть от чужих сайтов
 const OFFLINE = process.env.OFFLINE === '1';
 

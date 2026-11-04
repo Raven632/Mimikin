@@ -18,7 +18,7 @@ function deviceOf(ua = '', standalone = false) {
 
 // Адрес файла — от папки игры: ключ сервера игр и сам адрес сервера в журнале не нужны
 function shortSource(src = '') {
-    return String(src).replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/^\/g\/[0-9a-f]{32}\//, '/').slice(0, 300);
+    return String(src).replace(/^[a-z]+:\/\/[^/]+/i, '').replace(/^\/g\/(?:u[0-9a-f]{16})?[0-9a-f]{32}\//, '/').slice(0, 300);
 }
 
 class GameErrors {
@@ -54,7 +54,7 @@ class GameErrors {
         const device = deviceOf(ua, !!body.standalone);
         // Числа в тексте (номера, координаты) не делают ошибку другой
         const sig = crypto.createHash('sha1').update([kind, message.replace(/\d+/g, '#'), source, line, device].join('\n')).digest('hex');
-        const stack = String(body.stack || '').replace(/[a-z]+:\/\/[^/\s]+\/g\/[0-9a-f]{32}/gi, '').slice(0, 2000);
+        const stack = String(body.stack || '').replace(/[a-z]+:\/\/[^/\s]+\/g\/(?:u[0-9a-f]{16})?[0-9a-f]{32}/gi, '').slice(0, 2000);
         const res = await this.db().run(
             `INSERT INTO game_errors (game, sig, device, kind, message, source, line, stack, scene, count, first_at, last_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)

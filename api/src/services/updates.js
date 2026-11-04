@@ -9,7 +9,7 @@ const { secret } = require('../utils/secrets.js');
 // в режиме HTTP API или совместимый — адрес его /v1/update и ключ из «О программе» (зашифрованы, utils/secrets.js,
 // updater) или из UPDATE_URL и UPDATE_TOKEN в .env. Без помощника — команда:
 // для готового образа (MIMIKIN_IMAGE задаёт сборка образа, build-arg в Dockerfile) и для сборки из исходников
-const REPO = process.env.UPDATE_REPO || 'Raven632/rpg-library';
+const REPO = process.env.UPDATE_REPO || 'Raven632/Mimikin';
 const CHECK_MS = 6 * 60 * 60 * 1000;
 // Не вышло спросить (сеть, лимит GitHub) — повторим скоро, а не через 6 часов: иначе точка о новой версии пропадёт надолго
 const RETRY_MS = 10 * 60 * 1000;
@@ -66,11 +66,13 @@ class UpdateService {
         const url = raw ? `https://raw.githubusercontent.com/${REPO}/${path}` : `https://api.github.com/repos/${REPO}${path}`;
         const res = await this.fetch(url, { headers: { 'User-Agent': 'Mimikin', Accept: raw ? 'text/plain' : 'application/vnd.github+json' }, signal: AbortSignal.timeout(15000) });
         if (res.status === 404) return null;
-        if (!res.ok) throw new Error(`GitHub ответил ${res.status}`);
+        if (!res.ok) throw Object.assign(new Error(`GitHub ответил ${res.status}`), { reason: 'github-refused', params: { status: res.status } });
         return raw ? res.text() : res.json();
     }
 
-    // { current, latest, newer, notes, url, date, checkedAt, error, how } — how: 'button' | 'image' | 'source'
+    // { current, latest, newer, notes, url, date, checkedAt, error, reason, params, how } — how: 'button' | 'image' | 'source'.
+    // reason — что случилось, кодом: текст на языке человека делает страница. Закрытый репозиторий и «ещё ни одного выпуска» —
+    // не сбой: error пустой, а спрашиваем снова как обычно, раз в 6 часов
     async status(fresh = false) {
         const base = { current: this.current, how: this.how(), image: this.env.MIMIKIN_IMAGE || '' };
         if (this.env.OFFLINE === '1') return { ...base, off: true, offline: true };
@@ -79,17 +81,23 @@ class UpdateService {
         try {
             const tags = await this.github('/tags?per_page=50');
             // Закрытый репозиторий для чужих — то же «не найдено»
-            if (!tags) throw new Error('репозиторий на GitHub не найден или закрыт');
+            if (!tags) return this.quiet(base, 'repo-closed');
             const best = tags.map((tg) => ({ tag: tg.name, v: parse(tg.name) })).filter((x) => x.v)
                 .reduce((a, x) => (!a || newer(x.v, a.v) ? x : a), null);
-            if (!best) throw new Error('на GitHub нет выпусков');
+            if (!best) return this.quiet(base, 'no-releases');
             const cur = parse(this.current) || [0, 0, 0];
             const isNewer = newer(best.v, cur);
             const notes = isNewer ? notesOf(await this.github(`${best.tag}/CHANGELOG.md`, true).catch(() => ''), best.v) : [];
             this.cache = { latest: show(best.v), newer: isNewer, notes, url: `https://github.com/${REPO}/blob/${best.tag}/CHANGELOG.md`, checkedAt: Date.now(), error: '' };
         } catch (e) {
-            this.cache = { latest: '', newer: false, notes: [], url: '', checkedAt: Date.now(), error: e.message };
+            this.cache = { latest: '', newer: false, notes: [], url: '', checkedAt: Date.now(), error: e.message, reason: e.reason || 'github-down', params: e.params };
         }
+        return { ...base, ...this.cache };
+    }
+
+    // Проверять не по чему, но ничего не сломалось
+    quiet(base, reason) {
+        this.cache = { latest: '', newer: false, notes: [], url: '', checkedAt: Date.now(), error: '', reason };
         return { ...base, ...this.cache };
     }
 
@@ -101,14 +109,14 @@ class UpdateService {
     // Помощник сам скачает образ и перезапустит контейнер — этот ответ уходит раньше, чем сервер выключится
     async update() {
         const helper = this.helper();
-        if (!helper) throw Object.assign(new Error('Помощник обновления не настроен'), { status: 409 });
+        if (!helper) throw Object.assign(new Error('Помощник обновления не настроен'), { status: 409, reason: 'updater-none' });
         // Watchtower отвечает, только когда обновил, а скачивание образа — минуты: не дождались — значит, обновляет
         const res = await this.fetch(helper.url, {
             // Без переходов по перенаправлению: ключ — только тому адресу, что вписан
             method: 'POST', headers: helper.token ? { Authorization: `Bearer ${helper.token}` } : {}, redirect: 'manual', signal: AbortSignal.timeout(15000),
         }).catch((e) => (e.name === 'TimeoutError' ? { ok: true } : { ok: false, down: e.message }));
-        if (res.down) throw Object.assign(new Error(`Помощник обновления недоступен (${new URL(helper.url).host}): ${res.down}`), { status: 502 });
-        if (!res.ok) throw Object.assign(new Error(`Помощник обновления ответил ${res.status}`), { status: 502 });
+        if (res.down) throw Object.assign(new Error(`Помощник обновления недоступен (${new URL(helper.url).host}): ${res.down}`), { status: 502, reason: 'updater-down', params: { host: new URL(helper.url).host } });
+        if (!res.ok) throw Object.assign(new Error(`Помощник обновления ответил ${res.status}`), { status: 502, reason: 'updater-refused', params: { status: res.status } });
         return { started: true };
     }
 }

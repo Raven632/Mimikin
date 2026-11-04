@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { useCallback, useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { flushSync } from 'react-dom'
 import { socket } from './socket'
 import Header from './components/Header'
 import { JdDownloads } from './components/JdProgress'
@@ -13,38 +14,63 @@ import Tip from './components/Tip'
 import { confirmDialog } from './confirm'
 import { errorText, httpError } from './apiError'
 import { getCoverUrl } from './coverUrl'
+import { fmtSize } from './transferSize'
+import { useLibraryLook } from './libraryLook'
+import { groupGames, pageOfGroups } from './libraryGroups'
+import { detectSeries } from './gameSeries'
+import { ListHead, LookSwitch } from './components/LibraryLook'
+import LibraryLetters from './components/LibraryLetters'
+import LibrarySelect from './components/LibrarySelect'
+import { useLibrarySelect } from './librarySelect'
+import { showCard, useLibraryKeys } from './libraryKeys'
+import LibraryMast from './components/LibraryMast'
 import { loadLocale, locale, savedLang } from './locales'
 import StorageMonitor from './components/StorageMonitor';
 import ContinueCard from './components/ContinueCard';
+import RecentPlayed from './components/RecentPlayed';
 import { loadFavoriteTags } from './favoriteTags';
+import { findStartTab } from './findData';
+import { loadKnownLangs } from './knownLangs';
 const LibraryModal = lazy(() => import('./components/LibraryModal'));
 const SettingsModal = lazy(() => import('./components/SettingsModal'));
 const ShortcutsHelp = lazy(() => import('./components/ShortcutsHelp'));
+// Отдельным куском вместе с пакетом QR-кода: окно открывают редко, основной бандл не растёт
+const PhoneLink = lazy(() => import('./components/PhoneLink'));
 const LookupQueue = lazy(() => import('./components/LookupQueue'));
 import GameFrame from './components/GameFrame';
 import MimicLoader from './components/MimicLoader';
 import { useDelayedShow } from './useDelayedShow';
 const loadPicker = () => import('./components/PlayPicker');
+// Порядок столбца «Статус» в списке — как в статистике (StatsPanel)
+const STATUS_ORDER = ['playing', 'done', 'dropped', 'wish', 'new'];
+// Версии — как текст с числами: «1.10» новее «1.9». Точное сравнение (api/src/utils/version.js) живёт на сервере, а для порядка строк хватает этого
+const VERSIONS = new Intl.Collator('en', { numeric: true });
 const PlayPicker = lazy(loadPicker);
 const FavoritesGallery = lazy(() => import('./components/FavoritesGallery'));
 const PictureSearch = lazy(() => import('./components/PictureSearch'));
+const PictureFeed = lazy(() => import('./components/PictureFeed'));
+const LineSearch = lazy(() => import('./components/LineSearch'));
 import { launchGame, withIntro, cancelLaunch, launchSignal } from './launchGame';
 import LaunchIntro from './components/LaunchIntro';
 import { latestOf, launchPoint, loadResume } from './resumePoint';
 import { hideOnLeave } from './coversHidden';
 import { mood } from './mimicMood';
 import { layersOpen, useLayer } from './layers';
-import { IconStats, IconUpload, IconDice, IconSettings, IconFavorites, IconSearch } from './components/icons';
+import { IconStats, IconUpload, IconDice, IconSettings, IconFavorites, IconImage, IconSearch, IconLines, IconPhone } from './components/icons';
+import { pollJobs } from './jdJobs';
 import JdLinkPanel from './components/JdLinkPanel';
-import { effectiveStatus } from './gameStatus';
+import { effectiveStatus, shownStatus } from './gameStatus';
 import StatusChips from './components/StatusChips';
+import ListBar from './components/ListBar';
 const Catalog = lazy(() => import('./components/Catalog'));
 import { languageKey } from './formatLanguage';
 import CheckStrip from './components/CheckStrip';
 import Shelves from './components/Shelves';
+import LineShelf from './components/LineShelf';
 import Welcome from './components/Welcome';
 import StateView from './components/StateView';
 import { checkSummary } from './checkSummary';
+import { currentMe, isOwner, loadMe, forgetPreferences, personChanged } from './me';
 
 // Закладка «В Mimikin» открывает библиотеку с #jd=<адрес страницы файла>. Адрес забираем сразу и стираем из строки браузера:
 // иначе он остался бы в записи истории, и «назад» из окна подтверждения возвращал бы его снова
@@ -57,6 +83,8 @@ function takeJdLink() {
     return /^https?:\/\/\S{1,2000}$/i.test(url) ? url : '';
   } catch { return ''; }
 }
+const TagPanel = lazy(() => import('./components/PictureTags').then((m) => ({ default: m.TagPanel })));
+const TagPicked = lazy(() => import('./components/PictureTags').then((m) => ({ default: m.TagPicked })));
 const firstJdLink = takeJdLink();
 
 
@@ -76,6 +104,8 @@ function App() {
   const [libraryTab, setLibraryTab] = useState(null);
   // «Настройки»: null — закрыты, иначе вкладка, с которой открыть
   const [settingsTab, setSettingsTab] = useState(null);
+  // Место в шапке для глаза и «Добавить игру» (Header → Toolbar)
+  const [headerTools, setHeaderTools] = useState(null);
   // Быстро скрыть: клавиша H где угодно, кроме полей ввода, и поверх окон тоже — обложки размываются,
   // вкладка браузера подписана нейтрально. Ещё раз H — вернуть. Внутри игры в рамке клавиши у игры
   // Пока открыта игра, H — её «Скрыть» (GameFrame передаёт ей)
@@ -120,6 +150,7 @@ function App() {
   }, []);
   // «?» — окно со всеми клавишами. Когда поверх ничего не открыто и курсор не в поле ввода
   const [keysOpen, setKeysOpen] = useState(false);
+  const [phoneOpen, setPhoneOpen] = useState(false);
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== '?' || e.ctrlKey || e.metaKey || e.altKey || layersOpen()) return;
@@ -133,8 +164,17 @@ function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   // «Избранное» из галерей игр (FavoritesGallery)
   const [favoritesOpen, setFavoritesOpen] = useState(false);
+  const [feedOpen, setFeedOpen] = useState(false);
   // Поиск картинок по словам во всех галереях (PictureSearch)
-  const [picSearchOpen, setPicSearchOpen] = useState(false);
+  // { q, n } — открыто, q — с какими словами (тег из галереи: searchPictures); n — новое открытие сбрасывает окно
+  const [picSearch, setPicSearch] = useState(null);
+  useEffect(() => {
+    const open = (e) => setPicSearch((p) => ({ q: String(e.detail?.q || ''), like: e.detail?.like || null, n: (p?.n || 0) + 1 }));
+    window.addEventListener('rpg-pictures', open);
+    return () => window.removeEventListener('rpg-pictures', open);
+  }, []);
+  // Поиск по репликам сцен (LineSearch): null — закрыт, иначе запрос, с которым открыли (из меню — пустой)
+  const [lineSearch, setLineSearch] = useState(null);
   // Игра, которую выплюнул мимик (пять щелчков по знаку): окно открывается уже на ней
   const [pickerStart, setPickerStart] = useState(null);
   const closePicker = useMemo(() => () => { setPickerOpen(false); setPickerStart(null); }, []);
@@ -170,10 +210,11 @@ function App() {
     return () => window.removeEventListener('rpg-play', onPlay);
   }, []);
   const [catalogKey, setCatalogKey] = useState(0);
-  // С какой вкладки открыть «Новинки игр»: из меню «Хочу поиграть» — сразу со списка
-  const [catalogTab, setCatalogTab] = useState('itch');
-  // «Хочу поиграть»: отложенные из новинок игры
+  // С чего открыть «Найти»: выдача itch.io или «Отложенные» (findData.js). Страница перезагрузилась на этой вкладке — с того, что выбрали в прошлый раз
+  const [catalogTab, setCatalogTab] = useState(() => findStartTab());
+  // «Отложенные»: игры, отложенные закладкой
   const [wishlist, setWishlist] = useState({ items: [] });
+  const [wishReady, setWishReady] = useState(false);
   // Полная проверка библиотеки («Проверить всё» в ревизии). Её ход сервер шлёт по сокету всем
   // устройствам: полоса под шапкой видна и с закрытым окном. В ref — для обработчиков сокета
   const [check, setCheck] = useState(null);
@@ -186,6 +227,8 @@ function App() {
   
   useEffect(() => {
     localStorage.setItem('rpg_lang', lang);
+    // Язык страницы — для читалок, переносов и переводчика браузера
+    document.documentElement.lang = lang;
   }, [lang]);
   
   useEffect(() => {
@@ -216,6 +259,11 @@ function App() {
   });
   // Язык по тексту самой игры: «всё, во что можно играть на русском» — одним выбором
   const [langFilter, setLangFilter] = useState(() => kept('rpg_langf') || 'all');
+  // Своя подборка, '' — все (подборка может называться как угодно, и «all» тоже). Её могли удалить, пока страница была закрыта:
+  // тогда как все
+  const [listPick, setListFilter] = useState(() => kept('rpg_list') || '');
+  const allLists = useMemo(() => [...new Set(games.flatMap((g) => g.lists || []))].sort((a, b) => a.localeCompare(b)), [games]);
+  const listFilter = allLists.includes(listPick) ? listPick : '';
 
   useEffect(() => {
     // Приватное окно и запрет хранилища бросают исключение — фильтры тогда просто не запоминаются
@@ -225,22 +273,58 @@ function App() {
       localStorage.setItem('rpg_sort', currentSort);
       localStorage.setItem('rpg_status', statusFilter);
       localStorage.setItem('rpg_langf', langFilter);
+      localStorage.setItem('rpg_list', listPick);
     } catch { /* не запомнится — не страшно */ }
-  }, [searchQuery, selectedTag, currentSort, statusFilter, langFilter]);
+  }, [searchQuery, selectedTag, currentSort, statusFilter, langFilter, listPick]);
 
-  const filtersActive = !!searchQuery || selectedTag !== 'all' || statusFilter !== 'all' || langFilter !== 'all';
+  // Фильтр библиотеки по тому, что нарисовано (сервер: gallery.js, libraryTags). Не запоминаем, как и поиск: разбор кадров идёт,
+  // сводка меняется — поэтому и читаем её заново при каждом открытии панели. Только размеченные игры: про остальные нечего сказать
+  const [picYes, setPicYes] = useState([]);
+  const [picNo, setPicNo] = useState([]);
+  const [picPanel, setPicPanel] = useState(false);
+  const [picIndex, setPicIndex] = useState(null);   // { covered, games: Map(игра → Map(тег → кадров)) }
+  const picBtn = useRef(null);
+  // Есть ли у этого человека разобранные игры и избранное: без них панель открылась бы с одной фразой, а пункты меню — с «пока пусто».
+  // Лёгкий ответ, сам список — при открытии. Спрашиваем при смене страницы и при открытии меню: разбор идёт, сердечки ставят.
+  // null — ответа ещё нет или сервер не ответил: пункты меню тогда на месте, прятать что-то по незнанию нельзя
+  const [picInfo, setPicInfo] = useState(null);
+  const picAny = !!picInfo?.tagged;
+  const askPicInfo = useCallback(() => fetch('/api/pictures/status?peek=1&tagged=1').then((r) => (r.ok ? r.json() : null)).then((d) => d && setPicInfo(d), () => {}), []);
+  useEffect(() => {
+    if (!picPanel) return undefined;
+    let alive = true;
+    fetch('/api/pictures/games').then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status))))).then((d) => {
+      if (!alive) return;
+      const games = new Map(Object.entries(d.games).map(([id, row]) => {
+        const tags = new Map();
+        for (let k = 0; k < row.length; k += 2) tags.set(d.tags[row[k]], row[k + 1]);
+        return [id, tags];
+      }));
+      setPicIndex({ covered: d.covered, games });
+    }, () => { if (alive) setPicIndex((was) => was || { covered: 0, games: new Map() }); });
+    return () => { alive = false; };
+  }, [picPanel]);
+  const picOn = picYes.length + picNo.length > 0;
+  const picOf = useCallback((id) => picIndex?.games.get(id), [picIndex]);
+  const pickPic = (tag) => { setPicYes(picYes.includes(tag) ? picYes.filter((x) => x !== tag) : [...picYes, tag]); setPicNo(picNo.filter((x) => x !== tag)); };
+  const notPic = (tag) => { setPicNo(picNo.includes(tag) ? picNo.filter((x) => x !== tag) : [...picNo, tag]); setPicYes(picYes.filter((x) => x !== tag)); };
+  const resetPic = () => { setPicYes([]); setPicNo([]); };
+
+  const filtersActive = !!searchQuery || selectedTag !== 'all' || statusFilter !== 'all' || langFilter !== 'all' || !!listFilter || picOn;
   const resetFilters = () => {
+    resetPic();
     setSearchQuery('');
     setSelectedTag('all');
     setStatusFilter('all');
     setLangFilter('all');
+    setListFilter('');
   };
 
   // Две страницы, как у Steam и Jellyfin: «Главная» — то, к чему возвращаются (продолжить, недавние,
   // обновления, новые), «Библиотека» — все игры с поиском и фильтрами. Раньше всё шло одной лентой:
   // три полки по 12 обложек с повторами, а под ними ещё все игры — больше сотни обложек подряд.
   // Библиотека — слой в истории (layers.js): жест «назад» возвращает на главную
-  // «Новинки» — третья страница: раньше они открывались окном из меню «⋯», и о них мало кто знал
+  // «Найти» — третья страница: раньше она открывалась окном из меню «⋯», и о ней мало кто знал
   const [view, setView] = useState(() => (['library', 'new'].includes(sessionStorage.getItem('rpg_view')) ? sessionStorage.getItem('rpg_view') : 'home'));
   useEffect(() => {
     sessionStorage.setItem('rpg_view', view);
@@ -255,7 +339,35 @@ function App() {
     if (sort) setCurrentSort(sort);
     setView('library');
   };
-  const showShelf = (key) => showLibrary({ played: { sort: 'recent' }, unplayed: { status: 'new' }, added: { sort: 'newest' } }[key]);
+  const showShelf = (key) => (key.startsWith('list:') ? openList(key.slice(5)) : showLibraryOf(key));
+  const openList = (name) => {
+    setSelectedGame(null);
+    resetFilters();
+    setListFilter(name);
+    setView('library');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  // Переименовать (name) или удалить подборку. Сначала на экране, потом на сервере: не вышло — вернём только списки этих игр,
+  // остальное за это время могло измениться. Имя существующей с другим регистром — та же подборка, как и при добавлении игры
+  const changeList = async (from, name) => {
+    const to = name && (allLists.find((x) => x !== from && x.toLowerCase() === name.toLowerCase()) || name);
+    const before = new Map(games.filter((g) => g.lists?.includes(from)).map((g) => [g.id, g.lists]));
+    const swap = (list) => [...new Set(list.flatMap((x) => (x === from ? (to ? [to] : []) : [x])))];
+    setGames((prev) => prev.map((g) => (g.lists?.includes(from) ? { ...g, lists: swap(g.lists) } : g)));
+    setListFilter(to || '');
+    try {
+      const res = await fetch('/api/games/lists/change', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(to ? { from, to } : { from }) });
+      if (!res.ok) throw new Error(String(res.status));
+    } catch {
+      setGames((prev) => prev.map((g) => (before.has(g.id) ? { ...g, lists: before.get(g.id) } : g)));
+      setListFilter(from);
+      showToast(t.lists_err, 'error');
+    }
+  };
+  const deleteList = async (name) => {
+    if (await confirmDialog({ title: t.lists_delete_q(name), text: t.lists_delete_text, confirmLabel: t.lists_delete })) changeList(name);
+  };
+  const showLibraryOf = (key) => showLibrary({ played: { sort: 'recent' }, unplayed: { status: 'new' }, added: { sort: 'newest' } }[key]);
   // Искать начинают и с главной — найденное показывает библиотека
   const search = (query) => {
     setSearchQuery(query);
@@ -268,8 +380,23 @@ function App() {
 
   const [selectedGame, setSelectedGame] = useState(null);
   const [authMode, setAuthMode] = useState(null);
+  // Кто вошёл (me.js). Владелец видит всё; остальные люди — библиотеку, свои сейвы и заметки. Состоянием, чтобы страница
+  // перерисовалась после входа; остальные части читают isOwner() из me.js
+  const [me, setMe] = useState(currentMe);
+  const owner = !me || me.isOwner;
+  // Имя, картинка или роль человека изменились (он сам или главный администратор, на этом устройстве или другом): шапка и
+  // «Мой профиль» берут их из me. Нет ответа — остаётся прежнее
+  const refreshMe = async () => {
+    const before = currentMe();
+    const now = await loadMe();
+    setMe(now || before);
+  };
     // Вошёл ли пользователь: виджеты, которым нужен вход (StorageMonitor), показываем только после него
   const [isAuthed, setIsAuthed] = useState(false);
+  useEffect(() => { if (isAuthed) askPicInfo(); }, [view, isAuthed, askPicInfo]);
+  // Права человека: кнопка «Добавить игру» и ход загрузок. Изменил владелец — приходит rights-changed, страница не перезагружается
+  const canUpload = isAuthed && (owner || !!me?.rights?.upload);
+  const seesJobs = isAuthed && (owner || !!me?.rights?.view);
   // Страница файла от закладки «В Mimikin»: окно подтверждения открывается после входа
   const [jdLink, setJdLink] = useState(firstJdLink);
   useEffect(() => {
@@ -286,7 +413,13 @@ function App() {
 
   // Фильтры поменялись — снова с первой страницы. Сверяем при отрисовке, а не эффектом: эффект
   // сначала показал бы прежнюю страницу и только следом — первую
-  const filterKey = [searchQuery, selectedTag, currentSort, statusFilter, langFilter].join('\u0000');
+  const filterKey = [searchQuery, selectedTag, currentSort, statusFilter, langFilter, listFilter, ...picYes, '', ...picNo].join('\u0000');
+  // Ушли из библиотеки — панель «Теги картинок» закрываем: иначе при возврате она откроется сама
+  const [picView, setPicView] = useState(view);
+  if (picView !== view) {
+    setPicView(view);
+    setPicPanel(false);
+  }
   const [pageFilters, setPageFilters] = useState(filterKey);
   if (pageFilters !== filterKey) {
     setPageFilters(filterKey);
@@ -311,11 +444,14 @@ function App() {
     setToast(prev => ({ ...prev, visible: false }));
   };
 
-  // «Хочу поиграть»: отложенные из новинок игры
+  // «Отложенные»: игры, отложенные закладкой
   const fetchWishlist = async () => {
     try {
       const res = await fetch('/api/wishlist');
-      if (res.ok) setWishlist(await res.json());
+      if (res.ok) {
+        setWishlist(await res.json());
+        setWishReady(true);
+      }
     } catch { /* подтянется со следующим событием сервера */ }
   };
 
@@ -353,7 +489,9 @@ function App() {
   // в хранилище этого адреса, а игры теперь на другом — туда их не увидят. Досылаем отсюда: сервер
   // сам решит, чей сейв новее, и старый не затрёт. Имя игры в ключе бывает прежним, «исправленным»
   useEffect(() => {
-    if (!games.length) return;
+    // Очереди в этом браузере — владельца (у людей ключ с их id, игра досылает их сама). Человеку чужую очередь слать нельзя:
+    // она легла бы в его сейвы
+    if (!games.length || !isOwner()) return;
     const legacy = (id) => id.replace(/[^a-zA-Z0-9._\-а-яА-Я]/g, '_');
     const byName = new Map();
     for (const g of games) { byName.set(g.id, g.id); if (!byName.has(legacy(g.id))) byName.set(legacy(g.id), g.id); }
@@ -373,7 +511,9 @@ function App() {
   }, [games.length > 0]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Страницу открыли с «?play=<игра>» (обновили её во время игры) — открыть игру снова, когда список
-  // загрузится. Ключ игры выдаётся заново: старый адрес рамки после выхода из библиотеки не годится
+  // загрузится. Ключ игры выдаётся заново: старый адрес рамки после выхода из библиотеки не годится.
+  // С того же места, что «Играть» (самый свежий сейв, момент или «Где вышли»), а не с титула: так Safari на iPhone
+  // возвращает выгруженную вкладку — открывает её заново по этому адресу
   const playParamRef = useRef(new URLSearchParams(window.location.search).get('play'));
   useEffect(() => {
     const id = playParamRef.current;
@@ -384,8 +524,8 @@ function App() {
     params.delete('play');
     window.history.replaceState(null, '', `${window.location.pathname}${params.size ? `?${params}` : ''}`);
     const game = games.find((g) => g.id === id);
-    if (game) launchGame(game).catch(() => {});
-  }, [games]);
+    if (game) loadResume(game.id).then((data) => launchGame(game, undefined, launchPoint(latestOf(data, t)))).catch(() => {});
+  }, [games]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const retryTimer = useRef(null);
   const retryDelay = useRef(0);
@@ -407,6 +547,16 @@ function App() {
         return;
       }
 
+      // Страница спрашивала, кто вошёл, ещё до первой отрисовки; не ответили тогда — спросим теперь
+      if (!currentMe()) await loadMe();
+      setMe(currentMe());
+      // Временный пароль (новый человек, сброс владельцем): библиотеки не видно, пока не выбран свой — сервер её и не отдаст
+      if (currentMe()?.mustChange) {
+        setAuthMode('change');
+        setIsAuthed(false);
+        setLoading(false);
+        return;
+      }
       const response = await fetch('/api/games');
       if (response.status === 401) {
         setAuthMode('login');
@@ -429,13 +579,21 @@ function App() {
       });
       setAuthMode(null);
       setIsAuthed(true);
-      // «Хочу поиграть» и полная проверка — вместе с играми: и после входа, и когда вкладку снова открыли
+      // «Отложенные» и полная проверка — вместе с играми: и после входа, и когда вкладку снова открыли
       fetchWishlist();
-      fetchCheck();
-      loadFavoriteTags();
-      // Очередь поиска: сколько ждут и не на паузе ли — полоса видна и до первого события сервера
-      fetch('/api/games/lookup-queue').then((r) => (r.ok ? r.json() : null))
-        .then((q) => { if (q) { setScrapeLeft(q.left); setScrapePaused(q.paused); } }).catch(() => {});
+      // Полная проверка, любимые теги, знакомые языки и очередь поиска — настройки и работа владельца: человеку сервер
+      // ответил бы отказом на каждый запрос
+      if (isOwner()) {
+        fetchCheck();
+        loadFavoriteTags();
+        // Знакомые языки — тоже здесь, а не при открытии окна: ответ приходил посреди полёта окна и перерисовывал его
+        loadKnownLangs();
+        // Очередь поиска: сколько ждут и не на паузе ли — полоса видна и до первого события сервера
+        fetch('/api/games/lookup-queue').then((r) => (r.ok ? r.json() : null))
+          .then((q) => { if (q) { setScrapeLeft(q.left); setScrapePaused(q.paused); } }).catch(() => {});
+      }
+      // Свежий список — тому, кто ждал его, чтобы сразу открыть игру из него (handleShelfMatch)
+      return data;
     } catch (error) {
       console.error("Ошибка загрузки игр:", error);
       setGamesError(true);
@@ -458,6 +616,15 @@ function App() {
     refetchTimer.current = setTimeout(() => fetchGames({ silent: true }), 800);
   };
 
+  // Сокет — только со входом: без него сервер отвечает 403, и страница входа стучалась бы каждые 5 секунд.
+  // После входа подключаемся сами, перезагрузка не нужна
+  useEffect(() => {
+    if (isAuthed) socket.connect();
+    else socket.disconnect();
+    // Загрузки JDownloader — у владельца и у человека с правом их видеть
+    pollJobs(seesJobs);
+  }, [isAuthed, seesJobs]);
+
   useEffect(() => {
     fetchGames();
     socket.on('scrape-success', (data) => {
@@ -475,6 +642,14 @@ function App() {
 
     // Кто-то изменил библиотеку с другого устройства — тихо подтягиваем список
     socket.on('library-changed', () => scheduleRefetch());
+    // Своё имя или картинку изменили (на другом устройстве или главный администратор): шапка перечитывает, кто вошёл
+    const onAccount = () => { loadMe().then((now) => { if (now) setMe(now); }); };
+    socket.on('account-changed', onAccount);
+    socket.on('rights-changed', onAccount);
+    // Вход этой вкладки закрыли (выход на другом устройстве, смена или сброс пароля): сервер оборвал связь сам. Страница
+    // перезагружается и показывает вход. Выкладка новой версии рвёт связь по другой причине (transport close) — её не трогаем
+    const onDisconnect = (reason) => { if (reason === 'io server disconnect') window.location.reload(); };
+    socket.on('disconnect', onDisconnect);
     socket.on('scrape-progress', ({ left, paused }) => { setScrapeLeft(left); setScrapePaused(!!paused); mood.work('queue', left > 0 && !paused); });
     // Поиск данных одной игры: шапка жуёт, пока он идёт (в очереди они идут один за другим)
     const lookups = new Set();
@@ -486,16 +661,18 @@ function App() {
     const onLanded = () => mood.done();
     window.addEventListener('rpg-landed', onLanded);
 
-    // Список «Хочу поиграть» поменяли на другом устройстве
+    // Список «Отложенные» поменяли на другом устройстве
     socket.on('wishlist-changed', () => fetchWishlist());
     // Ход полной проверки
     socket.on('fullcheck', (state) => applyCheck(state));
 
+    // Вернулись на вкладку: если в соседней вошёл другой человек, перезагружаем — иначе правки уйдут не тому
+    const refresh = () => personChanged().then((other) => (other ? window.location.reload() : fetchGames({ silent: true })));
     const handleVisibilityChange = () => {
-      if (!document.hidden) fetchGames({ silent: true });
+      if (!document.hidden) refresh();
     };
     const handlePageShow = (event) => {
-      if (event.persisted) fetchGames({ silent: true });
+      if (event.persisted) refresh();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -507,6 +684,9 @@ function App() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('pageshow', handlePageShow);
       socket.off('library-changed');
+      socket.off('account-changed', onAccount);
+      socket.off('rights-changed', onAccount);
+      socket.off('disconnect', onDisconnect);
       socket.off('scrape-progress');
       socket.off('lookup-start', onLookupStart);
       socket.off('lookup-done', onLookupDone);
@@ -534,8 +714,8 @@ function App() {
   const startCheck = () => postCheck('/api/check');
   const cancelCheck = () => postCheck('/api/check/cancel');
 
-  // «Хочу поиграть» из окна новинок: отложить игру, убрать.
-  // Убираем сразу, не дожидаясь сервера: звёздочка гаснет под пальцем
+  // «Отложенные» из вкладки «Найти»: отложить игру, убрать.
+  // Убираем сразу, не дожидаясь сервера: закладка гаснет под пальцем
   const handleWishAdd = async (item) => {
     try {
       const res = await fetch('/api/wishlist', {
@@ -560,7 +740,8 @@ function App() {
       fetchWishlist();
     }
   };
-  // Открывает страницу «Новинки» на нужной вкладке. catalogKey — заново с этой вкладкой, даже если страница уже открыта
+  // «Все» в меню и переходы извне открывают «Найти» на нужном режиме. catalogKey — заново с этим началом, даже если
+  // страница уже открыта. Память последнего выбора это не меняет (findData.js)
   const openCatalog = (tab) => {
     setCatalogTab(tab);
     setCatalogKey((k) => k + 1);
@@ -568,13 +749,14 @@ function App() {
   };
 
   // Вернуть игру из корзины — из тоста «Отменить» и из «Настроек → Корзина»
-  const restoreFromTrash = async (key) => {
+  // done — текст тоста: у файлов игры с полки свой («можно играть»)
+  const restoreFromTrash = async (key, done = t.trash_restored) => {
     try {
       const res = await fetch(`/api/games/trash/${encodeURIComponent(key)}/restore`, { method: 'POST' });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw httpError(res, data);
       await fetchGames({ silent: true });
-      showToast(t.trash_restored, 'success');
+      showToast(done, 'success');
       return true;
     } catch (e) {
       showToast(errorText(t, e, { byStatus: { 409: t.trash_taken } }), 'error');
@@ -611,6 +793,66 @@ function App() {
     return false;
   };
 
+  // «На полку»: файлы — в корзину, карточка, сейвы и время — здесь (services/trash.js). Окно игры остаётся открытым и
+  // показывает, как вернуть; тост «Отменить» кладёт файлы назад сразу
+  const handleShelveGame = async (game) => {
+    const ok = await confirmDialog({
+      title: t.shelf_q,
+      name: game.displayTitle || game.title,
+      cover: getCoverUrl(game, 360),
+      text: t.shelf_text(game.size > 0 ? fmtSize(game.size, t) : ''),
+      confirmLabel: t.shelf_confirm,
+    });
+    if (!ok) return false;
+    try {
+      const res = await fetch(`/api/games/${encodeURIComponent(game.id)}/shelf`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw httpError(res, data);
+      await fetchGames({ silent: true });
+      showToast(t.shelf_done, 'success', data.trashKey ? { label: t.undo, onClick: () => { hideToast(); restoreFromTrash(data.trashKey, t.shelf_restored); } } : null);
+      return true;
+    } catch (e) {
+      showToast(errorText(t, e, { fallback: t.shelf_err }), 'error');
+      return false;
+    }
+  };
+
+  // «Похоже, это … с полки» (routes/games.js, shelf-match): «это она» — файлы новой встают на место игры с полки, окно
+  // переходит на неё; «нет» — вопрос уходит и больше про эту игру не задаётся
+  const handleShelfMatch = async (game, accept) => {
+    try {
+      const res = await fetch(`/api/games/${encodeURIComponent(game.id)}/shelf-match`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ into: game.shelfMatch.id, accept }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw httpError(res, data);
+      const list = await fetchGames({ silent: true });
+      if (!accept) return;
+      const index = list ? list.findIndex((g) => g.id === data.id) : -1;
+      if (index >= 0) setSelectedGame({ game: list[index], index });
+      showToast(t.shelf_match_done, 'success');
+    } catch (e) {
+      showToast(errorText(t, e), 'error');
+    }
+  };
+
+  // Загрузили как новую, а это, похоже, игра с полки — тост один раз за сессию; ответ — в окне игры
+  const matchToasted = useRef(new Set());
+  useEffect(() => {
+    const fresh = games.filter((g) => g.shelfMatch && !matchToasted.current.has(g.id));
+    if (!fresh.length) return;
+    fresh.forEach((g) => matchToasted.current.add(g.id));
+    const g = fresh[0];
+    const open = () => {
+      hideToast();
+      const index = games.findIndex((x) => x.id === g.id);
+      if (index >= 0) setSelectedGame({ game: games[index], index });
+    };
+    showToast(t.shelf_match_toast(g.shelfMatch.title), 'info', { label: t.jd_open_game, onClick: open });
+  }, [games]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const handleRateGame = async (id, ratingValue) => {
     setGames(prevGames => prevGames.map(g => g.id === id ? { ...g, rating: ratingValue } : g));
     try {
@@ -628,32 +870,64 @@ function App() {
     setGames(prev => prev.map(g => g.id === id ? { ...g, ...patch } : g));
     setSelectedGame(prev => prev && prev.game.id === id ? { ...prev, game: { ...prev.game, ...patch } } : prev);
     try {
-      await fetch(`/api/games/${encodeURIComponent(id)}/meta`, {
+      // keepalive: заметка уходит и при закрытии вкладки
+      const res = await fetch(`/api/games/${encodeURIComponent(id)}/meta`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch)
+        body: JSON.stringify(patch),
+        keepalive: true,
       });
+      if (!res.ok) showToast(t.err_status[res.status] || t.err_status.server, 'error');
     } catch {
       showToast(t.err_net, 'error');
     }
   };
 
-  const handleUpdateGame = (index, updatedGame) => {
-    // 1. Обновляем игру в общем списке (чтобы на главной странице обложка поменялась)
-    setGames(prev => prev.map(g => g.id === updatedGame.id ? updatedGame : g));
-    
-    // 2. КРИТИЧЕСКИ ВАЖНО: Обновляем снимок в выбранной игре, чтобы модалка сразу перерисовала обложку!
-    setSelectedGame(prev => prev ? { ...prev, game: updatedGame } : null);
+  // Поправка серии из окна игры. Для двух игр — по очереди; вторая не записалась — первую возвращаем, на экране ничего не меняется
+  const changeSeries = async (changes) => {
+    const before = new Map(games.map((g) => [g.id, g.series || '']));
+    const post = (id, series) => fetch(`/api/games/${encodeURIComponent(id)}/series`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ series }) });
+    const done = [];
+    try {
+      for (const [id, series] of changes) {
+        const res = await post(id, series);
+        if (!res.ok) throw new Error(String(res.status));
+        done.push(id);
+      }
+    } catch {
+      await Promise.all(done.map((id) => post(id, before.get(id)).catch(() => {})));
+      showToast(t.series_err, 'error');
+      return false;
+    }
+    const next = new Map(changes);
+    setGames((prev) => prev.map((g) => (next.has(g.id) ? { ...g, series: next.get(g.id) } : g)));
+    return true;
   };
 
-  // Ключ сессии на сервере один на всех, поэтому выход закрывает доступ сразу
-  // и на телефоне, и на компьютере. Предупреждаем, чтобы это не было сюрпризом.
+  const handleUpdateGame = (index, updatedGame) => {
+    // 1. Обновляем игру в общем списке (чтобы на главной странице обложка поменялась)
+    // Заметку и подборки человек мог поменять, пока шёл запрос: из его ответа они устарели
+    setGames(prev => prev.map(g => g.id === updatedGame.id ? { ...updatedGame, notes: g.notes, lists: g.lists } : g));
+    
+    // 2. КРИТИЧЕСКИ ВАЖНО: Обновляем снимок в выбранной игре, чтобы модалка сразу перерисовала обложку!
+    setSelectedGame(prev => prev ? { ...prev, game: { ...updatedGame, notes: prev.game.notes, lists: prev.game.lists } } : null);
+  };
+
+  // Выход закрывает вход только этого устройства (остальные остаются во входе); забытое устройство закрывается сменой пароля.
+  // Предупреждаем, чтобы выход не был сюрпризом.
   const handleLogout = async () => {
     if (!(await confirmDialog({ title: t.logout_title, text: t.logout_text, confirmLabel: t.logout }))) return;
     // Сеть упала — всё равно выходим локально: кука без ключа на сервере бесполезна
     try { await fetch('/api/logout', { method: 'POST' }); } catch { /* см. выше */ }
+    // В библиотеке есть другие люди: запомненное этим человеком (поиск, вид, подборка) не должно достаться следующему,
+    // а в памяти страницы оно осталось бы. Стираем и перезагружаем — страница начинается заново
+    if (currentMe()?.shared) {
+      forgetPreferences();
+      window.location.reload();
+      return;
+    }
     setSettingsTab(null);
-    // «Новинки» без входа пусты — следующий вход с главной; «Библиотека» остаётся, как была
+    // «Найти» без входа пусто — следующий вход с главной; «Библиотека» остаётся, как была
     setView((v) => (v === 'new' ? 'home' : v));
     setIsAuthed(false);
     setAuthMode('login');
@@ -731,10 +1005,19 @@ function App() {
     return Object.entries(counts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
   }, [games]);
 
-  // Последняя запущенная игра — первой на главной. Фильтры библиотеки главную не трогают
+  // Последняя запущенная игра — первой на главной. Фильтры библиотеки главную не трогают. Игра с полки — не
+  // «продолжить»: её файлов нет
   const continueGame = useMemo(
-    () => [...games].filter(g => g.lastPlayed).sort((a, b) => b.lastPlayed - a.lastPlayed)[0] || null,
+    () => [...games].filter(g => g.lastPlayed && !g.shelf).sort((a, b) => b.lastPlayed - a.lastPlayed)[0] || null,
     [games],
+  );
+
+  // Игры с файлами: подборки главной и «Что играть?» — только из них, игру с полки сразу не запустить
+  const onDisk = useMemo(() => games.filter((g) => !g.shelf), [games]);
+  // Список рядом со сценой: те, во что играли до последней, — четыре строки входят в высоту сцены
+  const recentGames = useMemo(
+    () => onDisk.filter((g) => g.lastPlayed && g.id !== continueGame?.id).sort((a, b) => b.lastPlayed - a.lastPlayed).slice(0, 4),
+    [onDisk, continueGame],
   );
 
   // Поиск, язык и жанр — отдельно от статуса: по ним же считаются числа на чипах статусов, и видно,
@@ -749,8 +1032,8 @@ function App() {
         const matchTitle = [game.displayTitle, game.originalTitle, game.title, game.id]
           .some(s => s?.toLowerCase().includes(query));
         const matchTags = game.tags?.some(tag => tag.toLowerCase().includes(query));
-        // Студия тоже ищется: помнят часто её, а не название
-        return matchTitle || matchTags || game.developer?.toLowerCase().includes(query);
+        // Студия тоже ищется: помнят часто её, а не название. И своя заметка: человек помнит, что написал
+        return matchTitle || matchTags || game.developer?.toLowerCase().includes(query) || game.notes?.toLowerCase().includes(query);
       });
     }
     if (langFilter !== 'all') {
@@ -759,59 +1042,146 @@ function App() {
     if (selectedTag !== 'all') {
       result = result.filter(g => g.tags && g.tags.includes(selectedTag));
     }
+    if (listFilter) result = result.filter((g) => g.lists?.includes(listFilter));
+    if (picOn) {
+      result = result.filter((g) => {
+        const have = picOf(g.id);
+        return !!have && picYes.every((x) => have.has(x)) && !picNo.some((x) => have.has(x));
+      });
+    }
     return result;
-  }, [games, searchQuery, selectedTag, langFilter]);
+  }, [games, searchQuery, selectedTag, langFilter, listFilter, picOn, picYes, picNo, picOf]);
+
+  // Числа панели: сколько подходящих игр с каждым тегом, сужаются с каждым выбором
+  const picCounts = useMemo(() => {
+    const seen = new Map();
+    let total = 0;
+    if (picPanel) {
+      for (const g of matchedGames) {
+        const have = picOf(g.id);
+        if (!have) continue;
+        total++;
+        for (const tag of have.keys()) seen.set(tag, (seen.get(tag) || 0) + 1);
+      }
+    }
+    return { total, counts: [...seen].map(([tag, n]) => ({ tag, n })) };
+  }, [picPanel, matchedGames, picOf]);
 
   const statusCounts = useMemo(() => {
-    const counts = { all: matchedGames.length };
+    const counts = { all: matchedGames.length, shelf: 0 };
     for (const g of matchedGames) {
       const status = effectiveStatus(g);
       if (status) counts[status] = (counts[status] || 0) + 1;
+      if (g.shelf) counts.shelf++;
     }
     return counts;
   }, [matchedGames]);
 
+  // Какие статусы есть в библиотеке вообще: от этого зависит, какие чипы стоят. От поиска не зависит, иначе ряд прыгал бы при наборе
+  const statusPresent = useMemo(() => {
+    const present = { shelf: 0 };
+    for (const g of games) {
+      const status = effectiveStatus(g);
+      if (status) present[status] = (present[status] || 0) + 1;
+      if (g.shelf) present.shelf++;
+    }
+    return present;
+  }, [games]);
+
   const processedGames = useMemo(() => {
     let result = matchedGames;
     // Фильтруем по статусу
-    if (statusFilter !== 'all') {
+    if (statusFilter === 'shelf') {
+      result = result.filter(g => g.shelf);
+    } else if (statusFilter !== 'all') {
       result = result.filter(g => effectiveStatus(g) === statusFilter);
     }
         // При равных значениях упорядочиваем по id: иначе порядок одинаковых игр «прыгает»
     const byId = (a, b) => a.id.localeCompare(b.id);
+    // Выбран тег картинок — сначала игры, где таких кадров больше (у нескольких тегов — по самому редкому). Сортировка из списка
+    // в это время скрыта (Toolbar)
+    const picFrames = (g) => Math.min(...picYes.map((x) => picOf(g.id)?.get(x) || 0));
+    // Столбцы списка: игры без значения — в конце при обоих направлениях, иначе «сначала меньшие» начинались бы с пустых строк
+    const filled = (a, b, pick, dir, compare = (x, y) => x - y) => {
+      const [x, y] = [pick(a), pick(b)];
+      if (!x || !y) return (!x - !y) || byId(a, b);
+      return dir * compare(x, y) || byId(a, b);
+    };
+    const nameOf = (g) => g.displayTitle || g.title || g.id;
+    const versionOf = (g) => g.version || '';
+    const statusRank = (g) => STATUS_ORDER.indexOf(shownStatus(g)) + 1;
     result = [...result].sort((a, b) => {
+      if (picYes.length) return picFrames(b) - picFrames(a) || byId(a, b);
       switch (currentSort) {
         case 'newest':      return (b.addedAt || 0) - (a.addedAt || 0) || byId(a, b);
-        case 'oldest':      return (a.addedAt || 0) - (b.addedAt || 0) || byId(a, b);
+        case 'oldest':      return filled(a, b, (g) => g.addedAt, 1);
         case 'recent':      return (b.lastPlayed || 0) - (a.lastPlayed || 0) || byId(a, b);
         case 'rating_desc': return (b.rating || 0) - (a.rating || 0) || byId(a, b);
-        case 'name':        return (a.displayTitle || a.title || a.id).localeCompare(b.displayTitle || b.title || b.id);
+        case 'name':        return nameOf(a).localeCompare(nameOf(b));
+        case 'name_desc':   return nameOf(b).localeCompare(nameOf(a));
+        case 'version_desc': return filled(a, b, versionOf, -1, VERSIONS.compare);
+        case 'version_asc': return filled(a, b, versionOf, 1, VERSIONS.compare);
+        case 'status':      return filled(a, b, statusRank, 1);
+        case 'status_rev':  return filled(a, b, statusRank, -1);
+        case 'playtime_asc': return filled(a, b, (g) => g.playtime, 1);
+        case 'rating_asc':  return filled(a, b, (g) => g.rating, 1);
         case 'size_desc':   return (b.size || 0) - (a.size || 0) || byId(a, b);
-        case 'size_asc':    return (a.size || 0) - (b.size || 0) || byId(a, b);
+        case 'size_asc':    return filled(a, b, (g) => g.size, 1);
         case 'playtime':    return (b.playtime || 0) - (a.playtime || 0) || byId(a, b);
         // Та же оценка, что на карточках; игры без неё — в конце, а не вперемешку с плохими
         default:            return 0;
       }
     });
     return result;
-  }, [matchedGames, currentSort, statusFilter]);
+  }, [matchedGames, currentSort, statusFilter, picYes, picOf]);
 
   // Высчитываем, какие игры показывать на текущей странице
   const visibleGames = processedGames.slice(0, page * itemsPerPage);
+  const look = useLibraryLook(games.length, picYes.length > 0);
+  const groups = useMemo(() => (look.group === 'none' ? null : groupGames(processedGames, look.group, t)), [processedGames, look.group, t]);
+  // Карточки подряд, как на экране: страницы считают их, а не игры. Свёрнутые не считаются, игра из двух подборок считается дважды
+  const openGames = useMemo(() => (groups ? groups.flatMap((g) => (look.shut.includes(g.key) ? [] : g.games)) : processedGames), [groups, processedGames, look.shut]);
+  const gridItems = groups ? pageOfGroups(groups, look.shut, page * itemsPerPage) : visibleGames.map((game, n) => ({ game, key: game.id, n }));
+  const shownCount = new Set(gridItems.flatMap((item) => (item.game ? [item.game.id] : []))).size;
+  // Серии — по всему списку, а не по найденному: от фильтра «Часть 2 из 3» не должна меняться
+  const seriesOf = useMemo(() => detectSeries(games), [games]);
+  const { setEl: libraryEl } = look;
+  // Стрелки и буквы ведут к карточке, которой может ещё не быть: страницу рисуем сразу, чтобы тут же поставить на неё фокус
+  useLibraryKeys(view === 'library' && isAuthed, () => {
+    if (openGames.length <= page * itemsPerPage) return false;
+    flushSync(() => setPage((p) => p + 1));
+    return true;
+  });
+  const select = useLibrarySelect({ shown: processedGames, order: openGames, active: view === 'library' && isAuthed, setGames, refresh: () => fetchGames({ silent: true }), showToast, t });
+  const jumpToGame = (index) => {
+    flushSync(() => setPage((p) => Math.max(p, Math.ceil((index + 1) / itemsPerPage))));
+    const card = document.querySelector(`.library .game-card[data-game="${CSS.escape(processedGames[index].id)}"]`);
+    if (card) showCard(card, 'start');
+  };
 
   // Настройка IntersectionObserver
   useEffect(() => {
     const observer = new IntersectionObserver((entries) => {
       const target = entries[0];
       // Подгружаем следующую страницу, если элемент пересек границу видимости
-      if (target.isIntersecting && processedGames.length > page * itemsPerPage) {
+      if (target.isIntersecting && openGames.length > page * itemsPerPage) {
         setPage(p => p + 1);
       }
     }, { rootMargin: '400px' });
 
     if (loaderRef.current) observer.observe(loaderRef.current);
     return () => observer.disconnect();
-  }, [processedGames.length, page, itemsPerPage, view]);
+  }, [openGames.length, page, itemsPerPage, view]);
+
+
+  // Пустая библиотека: владельцу — приглашение добавить игру; человеку, которому не открыто ни одной, — прямое «пока нет игр»:
+  // добавлять он ничего не может, а подсказка про папку на сервере ему ни к чему
+  const emptyLibrary = isAuthed && !owner
+    ? <StateView title={t.person_no_games_title} hint={t.person_no_games_hint} />
+    : <Welcome t={t} canUpload={isAuthed && owner} onUpload={() => openUploadRef.current?.()} />;
+
+  // Загрузка кончилась, сбоя нет, игр нет. games пуст и пока список идёт: без !loading панель мигала бы при каждом входе
+  const noGames = !loading && !gamesError && games.length === 0;
 
   return (
     <div className={`app-container${blurCovers ? ' covers-hidden' : ''}`}>
@@ -819,28 +1189,41 @@ function App() {
         currentLang={lang}
         onLangChange={changeLang}
         t={t}
-        // Пункты, под каждым — строка, что за ним. «Хочу поиграть» — вкладка «Новинок»: есть
+        // Пункты, под каждым — строка, что за ним. Три части: подбор; картинки и сцены; статистика, телефон, настройки. Пункт есть, когда за ним
+        // что-то есть, иначе он открывал бы пустой экран. «Отложенные» — вкладка «Найти»: есть
         // новости — окно откроется на ней. «Проверить всё» — в ревизии. Копия, Telegram, пароль,
         // ключи — в «Настройках»; язык, место на диске и «Выйти» — ещё и мелкой строкой внизу меню
+        onMenuOpen={isAuthed ? askPicInfo : undefined}
         menuItems={isAuthed ? [
-          // Только на телефоне: там кнопка на панели убрана, игры с телефона добавляют редко
-          { key: 'upload', icon: <IconUpload />, label: t.add_game, hint: t.menu_upload_hint, onClick: () => openUploadRef.current?.(), className: 'mobile-only' },
+          // Только на телефоне: там кнопка на панели убрана, игры с телефона добавляют редко. Добавляет игры владелец и человек с правом загрузки
+          ...(canUpload ? [{ key: 'upload', icon: <IconUpload />, group: 1, label: t.add_game, hint: t.menu_upload_hint, onClick: () => openUploadRef.current?.(), className: 'mobile-only' }] : []),
           // Случайная из не начатых — когда их много и выбрать трудно
-          { key: 'pick', icon: <IconDice />, label: t.pick_title, hint: t.menu_pick_hint, onClick: () => setPickerOpen(true) },
+          ...(games.some((g) => ['new', 'wish'].includes(effectiveStatus(g))) ? [{ key: 'pick', group: 1, icon: <IconDice />, label: t.pick_title, hint: t.menu_pick_hint, onClick: () => setPickerOpen(true) }] : []),
           // Отмеченное сердечком в галереях игр — одним альбомом, показом
-          { key: 'favorites', icon: <IconFavorites />, label: t.favs_title, hint: t.menu_favs_hint, onClick: () => setFavoritesOpen(true) },
+          ...(!picInfo || picInfo.faved !== false ? [{ key: 'favorites', group: 2, icon: <IconFavorites />, label: t.favs_title, hint: t.menu_favs_hint, onClick: () => setFavoritesOpen(true) }] : []),
+          // Листать картинки игр без цели: игра за игрой
+          // Лента и поиск без разбора показывают только «разбор выключен», а включить его обычный человек всё равно не может
+          ...(!picInfo || picInfo.analysis?.on || picInfo.tagged ? [{ key: 'feed', group: 2, icon: <IconImage />, label: t.feed_title, hint: t.menu_feed_hint, onClick: () => setFeedOpen(true) }] : []),
           // Найти картинку по словам во всех галереях сразу
-          { key: 'pictures', icon: <IconSearch />, label: t.pics_title, hint: t.menu_pics_hint, onClick: () => setPicSearchOpen(true) },
-          { key: 'library', icon: <IconStats />, label: t.stats_audit, hint: t.menu_library_hint, onClick: () => setLibraryTab('stats') },
-          { key: 'settings', icon: <IconSettings />, label: t.settings, hint: t.menu_settings_hint, onClick: () => setSettingsTab('general') },
+          ...(!picInfo || picInfo.analysis?.on || picInfo.tagged ? [{ key: 'pictures', group: 2, icon: <IconSearch />, label: t.pics_title, hint: t.menu_pics_hint, onClick: () => setPicSearch((p) => ({ q: '', n: (p?.n || 0) + 1 })) }] : []),
+          // Найти сцену по словам из реплик во всех играх
+          ...(games.length ? [{ key: 'lines', group: 2, icon: <IconLines />, label: t.lines_title, hint: t.menu_lines_hint, onClick: () => setLineSearch('') }] : []),
+          { key: 'library', group: 3, icon: <IconStats />, label: t.stats, hint: t.menu_library_hint, onClick: () => setLibraryTab('stats') },
+          // Только на компьютере: с телефона код сканировать нечем. Адрес сервера — дело владельца
+          ...(owner ? [{ key: 'phone', group: 3, icon: <IconPhone />, label: t.phone_title, hint: t.menu_phone_hint, onClick: () => setPhoneOpen(true), className: 'desktop-only' }] : []),
+          { key: 'settings', group: 3, icon: <IconSettings />, label: t.settings, hint: t.menu_settings_hint, onClick: () => setSettingsTab('general') },
         ] : []}
         onLogout={isAuthed ? handleLogout : null}
-        // Уже на «Новинках» — вкладка ничего не сбрасывает (поиск, открытая игра остаются)
-        view={view} onView={isAuthed ? (v) => (v !== 'new' ? setView(v) : view !== 'new' && openCatalog('itch')) : null} libraryCount={games.length}
+        // Знак и имя — когда в библиотеке есть другие люди или поставлена картинка: у одного владельца без картинки шапка прежняя
+        person={isAuthed ? me : null}
+        onPerson={() => setSettingsTab('account')}
+        // Уже на «Найти» — вкладка ничего не сбрасывает (поиск, открытая игра остаются)
+        view={view} onView={isAuthed ? (v) => (v !== 'new' ? setView(v) : view !== 'new' && openCatalog(findStartTab({ wishEmpty: !wishlist.items.length }))) : null}
+        toolsRef={setHeaderTools}
         onSecret={isAuthed ? spitGame : null}
-        side={isAuthed && <JdDownloads t={t} onOpenGame={handleOpenGameById} />}
+        side={seesJobs && <JdDownloads t={t} onOpenGame={handleOpenGameById} />}
       >
-        {isAuthed && <StorageMonitor t={t} />}
+        {isAuthed && owner && <StorageMonitor t={t} />}
       </Header>
       {/* Полная проверка ищет данные для всех игр — её полоса заменяет счётчик сбора метаданных */}
       {check?.running
@@ -851,10 +1234,14 @@ function App() {
           </button>
         )}
       
+      {view === 'library' && games.length > 0 && <LibraryMast games={games} start={continueGame} blurCovers={blurCovers} t={t} />}
       <Toolbar 
-        hideBar={view === 'new'}
+        hideBar={view === 'new' || noGames} inHeader={view === 'home'} toolsEl={headerTools}
+        noSearch={noGames}
+        // Человеку с правом загрузки плитки нет (emptyLibrary), кнопка у него единственная. Глаз без игр нужен, пока есть ряд популярного с Главной и «Найти»
+        showAdd={!(noGames && owner)} showEye={!noGames || view !== 'library' || blurCovers}
         blurCovers={blurCovers} setBlurCovers={setBlurCovers}
-        searchQuery={searchQuery} setSearchQuery={search} filters={view === 'library'}
+        searchQuery={searchQuery} setSearchQuery={search} filters={view === 'library' && !noGames}
         availableTags={availableTags} selectedTag={selectedTag} setSelectedTag={setSelectedTag}
         availableLangs={availableLangs} langFilter={langFilter} setLangFilter={setLangFilter} lang={lang}
         openUploadRef={openUploadRef}
@@ -863,9 +1250,17 @@ function App() {
         onUploadSuccess={() => fetchGames({ silent: true })}
         t={t}
         showToast={showToast}
-        canUpload={isAuthed}
+        canUpload={canUpload} authed={isAuthed}
         onOpenGame={handleOpenGameById}
+        onOpenSpace={() => setLibraryTab('space')}
+        lists={allLists} listFilter={listFilter} setListFilter={setListFilter}
+        picRef={picBtn} picTags={picAny || picOn ? { n: picYes.length + picNo.length, open: picPanel, ordered: picYes.length > 0, onClick: () => setPicPanel((on) => !on) } : null}
       />
+      {view === 'library' && picPanel && picIndex && (
+        <Suspense fallback={null}>
+          <TagPanel t={t} anchor={picBtn} counts={picCounts.counts} total={picCounts.total} picked={picYes} not={picNo} onPick={pickPic} onNot={notPic} onReset={resetPic} result={t.lib_pic_games} none={t.lib_pic_none} under onClose={() => setPicPanel(false)} />
+        </Suspense>
+      )}
       
       <main className={`content view-${view}`} ref={mainRef}>
         {view === 'new' && isAuthed ? (
@@ -877,6 +1272,8 @@ function App() {
             onWishAdd={handleWishAdd} onWishRemove={handleWishRemove}
             onClose={() => setView('home')}
             onOpenGame={handleOpenGameById}
+            libraryCount={games.length}
+            wishReady={wishReady} recheckStart={catalogKey === 0}
           />
           </Suspense>
         ) : loading || loadingShown ? (
@@ -892,45 +1289,93 @@ function App() {
           ) : games.length === 0 ? (
             <>
               <div className="library">
-                <Welcome t={t} canUpload={isAuthed} onUpload={() => openUploadRef.current?.()} />
+                {emptyLibrary}
               </div>
             </>
           ) : (
             <>
               {continueGame && (
-                <div className="home-continue">
-                  <ContinueCard
-                    game={continueGame}
-                    t={t} lang={lang}
-                    onUpdateGame={(updated) => setGames(prev => prev.map(g => g.id === updated.id ? updated : g))}
-                    showToast={showToast}
-                    onOpen={(g, initial, from) => handleOpenGameById(g.id, initial, from)}
-                  />
+                <div className={`home-top${recentGames.length ? '' : ' solo'}`}>
+                  <div className="home-continue">
+                    <ContinueCard
+                      game={continueGame}
+                      t={t} lang={lang}
+                      onUpdateGame={(updated) => setGames(prev => prev.map(g => g.id === updated.id ? updated : g))}
+                      showToast={showToast}
+                      onOpen={(g, initial, from) => handleOpenGameById(g.id, initial, from)}
+                    />
+                  </div>
+                  {recentGames.length > 0 && (
+                    <RecentPlayed games={recentGames} t={t} lang={lang}
+                      onOpen={(g, from) => handleOpenGameById(g.id, undefined, from)} onPlay={playGame} onShowAll={() => showShelf('played')} />
+                  )}
                 </div>
               )}
-              <Shelves games={games} t={t} lang={lang} skipId={continueGame?.id}
+              <Shelves games={onDisk} t={t} lang={lang}
                 onOpen={(g, from) => handleOpenGameById(g.id, undefined, from)} onPlay={playGame} onShowAll={showShelf} onRandom={() => setPickerOpen(true)} />
             </>
           )
         ) : (
           <>
-            {games.length > 0 && (
+            {listFilter && (
               <div className="library-bar">
-                <StatusChips value={statusFilter} onChange={setStatusFilter} t={t} counts={statusCounts} />
+                <ListBar key={listFilter} name={listFilter} count={games.filter((g) => g.lists?.includes(listFilter)).length} t={t} onRename={(to) => changeList(listFilter, to)} onDelete={() => deleteList(listFilter)} />
               </div>
             )}
-            <div className="library">
-              {visibleGames.map((game, index) => (
-                <GameCard 
-                  key={game.id} game={game} index={index}
-                  onClick={(from) => setSelectedGame({ game, index, from })} 
-                  onRate={handleRateGame}
-                  onPlay={playGame}
-                  t={t} lang={lang} usualLang={usualLang}
-                />
-              ))}
+            {games.length > 0 && (
+              <div className="library-bar">
+                <StatusChips value={statusFilter} onChange={setStatusFilter} t={t} shelf={statusPresent.shelf} counts={statusCounts} present={statusPresent} />
+                <LookSwitch look={look} t={t} group={{ value: look.groupPick, onChange: (v) => { look.setGroup(v); setPage(1); }, locked: picYes.length > 0, lists: allLists.length > 0 }} select={isAuthed ? select : null} />
+              </div>
+            )}
+            {picOn && (
+              <div className="library-bar">
+                <Suspense fallback={null}>
+                  <TagPicked t={t} picked={picYes} not={picNo} count={t.lib_pic_found(matchedGames.length, picIndex?.covered || 0)} hidden={[]} onPick={pickPic} onNot={notPic} onReset={resetPic} />
+                </Suspense>
+              </div>
+            )}
+            {(currentSort === 'name' || currentSort === 'name_desc') && !picYes.length && !groups && processedGames.length >= 30 && look.shown !== 'feat' && (
+              <LibraryLetters games={processedGames} onJump={jumpToGame} t={t} />
+            )}
+            <div ref={libraryEl} className={`${look.className}${select.on ? ' picking' : ''}`}>
+              {look.shown === 'list' && processedGames.length > 0 && (
+                <ListHead sort={currentSort} setSort={setCurrentSort} locked={picYes.length > 0} t={t} />
+              )}
+              {gridItems.map((item) => {
+                if (item.group) {
+                  const open = !look.shut.includes(item.group.key);
+                  return (
+                    // Прямо в сетке, а не обёрткой вокруг карточек: виды, стрелки и страницы работают с .library > .game-card как обычно
+                    <h2 key={item.key} className="lib-group">
+                      <button type="button" aria-expanded={open} onClick={() => look.toggleShut(item.group.key)}>
+                        <span className="lib-group-name">{item.group.title}</span>
+                        <span className="lib-group-n">{item.group.games.length}</span>
+                        <span className="lib-group-do">{open ? t.lib_group_fold : t.lib_group_unfold}</span>
+                      </button>
+                    </h2>
+                  );
+                }
+                const { game, n: index } = item;
+                return (
+                  <GameCard 
+                    key={item.key} game={game} index={index} look={look.shown}
+                    onClick={(from) => setSelectedGame({ game, index, from })} 
+                    onRate={handleRateGame}
+                    onPlay={playGame}
+                    t={t} lang={lang} usualLang={usualLang}
+                    frames={picYes.length === 1 ? picOf(game.id)?.get(picYes[0]) : undefined}
+                    picking={select.on} picked={select.isPicked(game.id)} onPick={select.toggle}
+                    part={seriesOf.get(game.id)}
+                  />
+                );
+              })}
+              {/* Игр пока мало: пустое место в ряду — приглашение добавить */}
+              {look.shown === 'grid' && !groups && canUpload && games.length <= 12 && !filtersActive && (
+                <button type="button" className="lib-add-tile" onClick={() => openUploadRef.current?.()}>{t.add_game}</button>
+              )}
               {processedGames.length === 0 && games.length === 0 && !filtersActive && (
-                <Welcome t={t} canUpload={isAuthed} onUpload={() => openUploadRef.current?.()} />
+                emptyLibrary
               )}
               {processedGames.length === 0 && (games.length > 0 || filtersActive) && (
                 /* Одна строка и «Сбросить фильтры» — без тупика: какой из фильтров всё отсеял, вспоминать не надо */
@@ -945,10 +1390,13 @@ function App() {
 
             {processedGames.length > 0 && (
               <div className="library-info">
-                {t.shown(Math.min(page * itemsPerPage, processedGames.length), processedGames.length)}
+                {t.shown(shownCount, processedGames.length)}
               </div>
             )}
+            {select.on && <LibrarySelect select={select} owner={owner} lists={allLists} t={t} />}
 
+            {/* Набранное в поиске — ещё и в репликах сцен всех игр. «Скрыть обложки» — полки нет: текст сцен на главной не нужен */}
+            {isAuthed && !blurCovers && <LineShelf query={searchQuery} games={games} t={t} onShowAll={(q) => setLineSearch(q)} />}
           </>
         )}
       </main>
@@ -957,7 +1405,17 @@ function App() {
       {authMode && (
         <LoginModal 
           mode={authMode} 
-          onSuccess={() => { setAuthMode(null); fetchGames(); }} 
+          onSuccess={async () => {
+            // Другой человек за тем же браузером: прежнее запомненное (поиск, подборка, вид) ему не показываем
+            const was = currentMe();
+            await loadMe();
+            // Сессия кончилась, вошёл другой человек: кэши страницы (подбор, вишлист, любимые теги) прежнего ему не нужны
+            if (was?.id && currentMe()?.id && was.id !== currentMe().id) { forgetPreferences(); window.location.reload(); return; }
+            if (currentMe()?.shared || was?.shared) { forgetPreferences(); resetFilters(); setView('home'); }
+            setMe(currentMe());
+            setAuthMode(null);
+            fetchGames();
+          }}
           t={t}
           lang={lang}
           onLangChange={changeLang}
@@ -969,6 +1427,7 @@ function App() {
           tab={libraryTab} games={games} t={t} lang={lang}
           onClose={() => setLibraryTab(null)} onOpenGame={handleOpenGameById}
           check={check} onStartCheck={startCheck} onCancelCheck={cancelCheck}
+          onChanged={() => fetchGames({ silent: true })}
         />
       )}
 
@@ -982,14 +1441,20 @@ function App() {
       )}
       {intro && <LaunchIntro key={intro.game.id} from={intro.from} ready={!!playing} onDone={() => setIntro(null)} onCancel={cancelLaunch} />}
 
+      {feedOpen && (
+        <Suspense fallback={null}><PictureFeed games={games} t={t} onClose={() => setFeedOpen(false)} /></Suspense>
+      )}
       {favoritesOpen && (
         <Suspense fallback={null}><FavoritesGallery games={games} t={t} onClose={() => setFavoritesOpen(false)} /></Suspense>
       )}
-      {picSearchOpen && (
-        <Suspense fallback={null}><PictureSearch games={games} t={t} onClose={() => setPicSearchOpen(false)} /></Suspense>
+      {lineSearch !== null && (
+        <Suspense fallback={null}><LineSearch games={games} t={t} query0={lineSearch} onClose={() => setLineSearch(null)} /></Suspense>
+      )}
+      {picSearch && (
+        <Suspense fallback={null}><PictureSearch key={picSearch.n} q0={picSearch.q} like0={picSearch.like} games={games} t={t} onClose={() => setPicSearch(null)} /></Suspense>
       )}
       {pickerOpen && (
-        <PlayPicker games={games} t={t} startId={pickerStart} onClose={closePicker} onOpenGame={handleOpenGameById} showToast={showToast} />
+        <PlayPicker games={onDisk} t={t} lang={lang} startId={pickerStart} onClose={closePicker} onOpenGame={handleOpenGameById} showToast={showToast} hideToast={hideToast} />
       )}
 
       {settingsTab && isAuthed && (
@@ -1000,6 +1465,7 @@ function App() {
           onShowKeys={() => setKeysOpen(true)}
           tags={libraryTags}
           onLibraryChanged={() => fetchGames({ silent: true })}
+          me={me} onMe={refreshMe}
           onClose={() => setSettingsTab(null)}
         />
       )}
@@ -1007,7 +1473,8 @@ function App() {
       {/* «Клавиши» — после «Настроек»: из них окно открывается кнопкой и должно встать поверх, а не под
           ними. Своя граница Suspense: пока догружается окно, настройки не исчезают */}
       {keysOpen && <Suspense fallback={null}><ShortcutsHelp t={t} onClose={() => setKeysOpen(false)} /></Suspense>}
-      {queueOpen && <Suspense fallback={null}><LookupQueue t={t} notify={showToast} onClose={() => setQueueOpen(false)} /></Suspense>}
+      {phoneOpen && <Suspense fallback={null}><PhoneLink t={t} onClose={() => setPhoneOpen(false)} /></Suspense>}
+      {queueOpen && owner && <Suspense fallback={null}><LookupQueue t={t} notify={showToast} onClose={() => setQueueOpen(false)} /></Suspense>}
 
 
       {selectedGame && (
@@ -1018,7 +1485,12 @@ function App() {
           showToast={showToast}
           onPatch={patchGame}
           onDelete={handleDeleteGame}
+          onShelve={handleShelveGame}
+          onRestoreShelf={(key) => restoreFromTrash(key, t.shelf_restored)}
+          onShelfMatch={handleShelfMatch}
           onTagClick={handleTagClick}
+          lists={allLists} onListOpen={openList}
+          series={seriesOf.get(selectedGame.game.id)} onOpenGame={handleOpenGameById} onSeries={changeSeries}
           onUploadNewVersion={(g) => openUploadRef.current?.({ id: g.id, title: g.displayTitle || g.title })}
           onUploadPatch={(g) => openUploadRef.current?.({ id: g.id, title: g.displayTitle || g.title, mode: 'patch' })}
         />

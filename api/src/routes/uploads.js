@@ -1,30 +1,51 @@
 const express = require('express');
 const { uploadLimiter } = require('../utils/upload.js');
 
-// Загрузка архивов игр: начать или продолжить, кусок, состояние, пароль архива, отмена, что осталось
+// Загрузка архивов игр: начать или продолжить, кусок, состояние, пароль архива, повтор распаковки, отмена, что осталось
 // недогруженным. Вся работа — в services/uploads.js, здесь только HTTP
 module.exports = function createUploadsRouter(uploads) {
     const router = express.Router();
     router.use(uploadLimiter);
 
-    // Ошибка — кодом и текстом; received, busy и state подсказывают клиенту, что делать дальше
+    // Не владелец (право upload, utils/access.js): только свои архивы и только новой игрой. Обновить или залатать чужое ему нечем: цель,
+    // режим и «всё равно» до службы не доходят, а чужая загрузка отвечает как несуществующая
+    const byOf = (req) => (req.person && !req.person.isOwner ? req.person.id : '');
+    // «Имя занято, это вторая карточка» выдало бы игру, которая ему закрыта
+    const shown = (req, answer) => (byOf(req) && answer && 'copy' in answer ? { ...answer, copy: false } : answer);
+
+    // Ошибка — кодом и текстом; received, busy и state подсказывают клиенту, что делать дальше. reason 'space' — не
+    // хватает места: need и free — сколько нужно и свободно, hard — не влезет и сам архив («всё равно» не предлагать).
+    // Прочие reason с params — причина кодом: текст на языке человека делает страница (frontend/src/apiError.js)
     const handle = (work) => async (req, res) => {
         try {
             res.json(await work(req));
         } catch (e) {
             if (!e.status) console.error('[Upload]', e.message);
             if (res.headersSent) return;
-            const { received, busy, state } = e;
-            res.status(e.status || 500).json({ error: e.message, received, busy, state });
+            const { received, busy, state, reason, params, need, free, hard } = e;
+            res.status(e.status || 500).json({ error: e.message, received, busy, state, reason, params, need, free, hard: byOf(req) && reason === 'space' ? true : hard });
         }
     };
 
-    router.post('/start', handle((req) => uploads.start(req.body)));
-    router.post('/chunk', handle((req) => uploads.writeChunk(String(req.query.id || ''), Number(req.query.offset || NaN), req)));
-    router.get('/status', handle((req) => uploads.status(String(req.query.id || ''))));
-    router.post('/cancel', handle((req) => uploads.cancel(String(req.query.id || ''))));
-    router.post('/password', handle((req) => uploads.setPassword(String(req.query.id || ''), req.body?.password)));
-    router.get('/list', handle(() => uploads.list()));
+    // Маршрут с номером загрузки: сначала — его ли она
+    const owned = (work) => handle(async (req) => {
+        const id = String(req.query.id || '');
+        await uploads.checkBy(id, byOf(req));
+        return shown(req, await work(id, req));
+    });
+
+    router.post('/start', handle(async (req) => {
+        const by = byOf(req);
+        if (!by) return uploads.start(req.body);
+        const { name, size, fingerprint } = req.body || {};
+        return shown(req, await uploads.start({ name, size, fingerprint }, by));
+    }));
+    router.post('/chunk', owned((id, req) => uploads.writeChunk(id, Number(req.query.offset || NaN), req)));
+    router.get('/status', owned((id) => uploads.status(id)));
+    router.post('/cancel', owned((id) => uploads.cancel(id)));
+    router.post('/password', owned((id, req) => uploads.setPassword(id, req.body?.password)));
+    router.post('/retry', owned((id) => uploads.retry(id)));
+    router.get('/list', handle((req) => uploads.list(byOf(req))));
 
     // Журнал страницы (resumableUpload.js): что она делала, когда кусок завис, пошёл на повтор или
     // загрузка кончилась. Приходит через sendBeacon простым текстом — одной строкой в журнал сервера

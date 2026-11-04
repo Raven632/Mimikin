@@ -27,17 +27,20 @@ router.post('/', (req, res) => reply(res, async () => {
 
 const JOB_KEY = /^link:[0-9a-f]{12}$/;
 
-// «Повторить» у вставшей загрузки в списке в шапке
+// «Повторить» у вставшей загрузки в списке в шапке; { force: true } — «Скачать всё равно» у вставшей из-за места
 router.post('/:key/retry', (req, res) => {
     const key = String(req.params.key);
     if (!JOB_KEY.test(key)) return res.status(400).json({ error: 'Непонятная загрузка' });
-    return reply(res, () => myjd.retry(key));
+    return reply(res, () => myjd.retry(key, { force: req.body?.force === true }));
 });
 
 // Ход загрузок: окно игры и список в шапке опрашивают это раз в несколько секунд
 router.get('/', async (req, res) => {
     try {
-        res.json(await myjd.downloads());
+        const jobs = await myjd.downloads();
+        // Человек с правом «видеть всё»: повторять и убирать не его дело. Загрузки закрытой игры в его списке нет: её название и имя архива выдали бы игру
+        const hidden = (id) => id && req.allowed && !req.allowed.has(id);
+        res.json(!req.person || req.person.isOwner ? jobs : jobs.filter((j) => !hidden(j.game) && !hidden(j.target)).map((j) => ({ ...j, retry: false })));
     } catch (e) {
         console.error('[MyJDownloader] Ход загрузок:', e.message);
         res.status(502).json({ error: e.message });

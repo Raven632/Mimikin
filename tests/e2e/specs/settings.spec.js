@@ -13,7 +13,7 @@ test.describe('настройки', () => {
   test('девять вкладок; язык меняется сразу; «Скрывать обложки» размывает обложки', async ({ page }) => {
     await openLibrary(page);
     await openSettings(page);
-    await expect(page.locator('.settings-tab .settings-tab-name')).toHaveText(['Общие', 'Аккаунт', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'Копии', 'Корзина', 'О программе']);
+    await expect(page.locator('.settings-tab .settings-tab-name')).toHaveText(['Общие', 'Мой профиль', 'Пользователи', 'Копии', 'Корзина', 'Источники', 'Перевод', 'Загрузки', 'Уведомления', 'О программе']);
 
     await page.locator('.set-choice-btn', { hasText: 'English' }).click();
     await expect(page.locator('#settings-title')).toHaveText('Settings');
@@ -24,6 +24,38 @@ test.describe('настройки', () => {
     await expect(page.locator('.app-container')).toHaveClass(/covers-hidden/);
     await page.locator('.set-toggle').first().click();
     await expect(page.locator('.app-container')).not.toHaveClass(/covers-hidden/);
+  });
+
+  test('журнал сервера: отчёт виден до копирования, копируется он же, а отказ буфера оставляет текст для ручного копирования', async ({ page }) => {
+    await openLibrary(page);
+    await openSettings(page, 'О программе');
+    await page.locator('.meta-status-btn', { hasText: 'Скопировать отчёт о проблеме' }).click();
+    const box = page.locator('.report-text');
+    await expect(box).toHaveValue(/^Mimikin problem report\nVersion: /);
+    await expect(box).toHaveValue(/Recent warnings and errors/);
+    await expect(page.locator('.report-box')).toContainText('Названий игр');
+    const shown = await box.inputValue();
+
+    // Буфер принял: в него ушёл тот же текст
+    await page.evaluate(() => { document.execCommand = () => { window.copied = document.activeElement.value; return true; }; });
+    await page.locator('.report-box .confirm-ok').click();
+    await expect(page.locator('.toast')).toContainText('Отчёт скопирован');
+    expect(await page.evaluate(() => window.copied)).toBe(shown);
+
+    // Обычный HTTP, буфера нет: подсказка и выделенный текст в поле
+    await page.evaluate(() => {
+      document.execCommand = () => false;
+      Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    });
+    await page.locator('.report-box .confirm-ok').click();
+    await expect(page.locator('.report-box .set-error')).toBeVisible();
+    await expect(box).toBeFocused();
+    expect(await box.evaluate((el) => el.value.slice(el.selectionStart, el.selectionEnd))).toBe(shown);
+
+    // Escape закрывает только отчёт
+    await page.keyboard.press('Escape');
+    await expect(page.locator('.report-box')).toHaveCount(0);
+    await expect(page.locator('.settings-content')).toBeVisible();
   });
 
   test('«Прятать, когда сворачиваю»: выключено само; включённое — прячет при уходе с вкладки, не возвращает само, добавляет hide=1 к игре', async ({ page }) => {
@@ -57,6 +89,38 @@ test.describe('настройки', () => {
     await expect(page.locator('.game-frame iframe')).toHaveAttribute('src', /[?&]hide=1/);
   });
 
+  test('скрытые теги: список с названиями, крестик возвращает тег', async ({ page }) => {
+    const posted = [];
+    let tags = ['sword', 'cow_print'];
+    await page.route(/\/api\/pictures\/hidden$/, (route) => {
+      if (route.request().method() === 'POST') { posted.push(route.request().postDataJSON()); tags = tags.filter((x) => x !== 'sword'); }
+      return route.fulfill({ json: { tags } });
+    });
+    await openLibrary(page);
+    await openSettings(page);
+    const section = page.locator('[data-section="hidden-tags"]');
+    await expect(section.locator('.chip')).toHaveText([/меч/, /cow print/]);
+    await section.locator('.chip', { hasText: 'меч' }).click();
+    await expect(section.locator('.chip')).toHaveCount(1);
+    expect(posted).toEqual([{ remove: ['sword'] }]);
+  });
+
+  test('скрытое из подбора: нечего возвращать — раздела нет; «Вернуть всё» очищает и прячет раздел', async ({ page }) => {
+    let count = 2;
+    await page.route(/\/api\/recommend\/dismissed/, (route) => {
+      if (route.request().method() === 'DELETE') { count = 0; return route.fulfill({ json: { ok: true, dismissed: 0 } }); }
+      return route.fulfill({ json: { count } });
+    });
+    await page.goto('/');
+    await openSettings(page);
+    const part = page.locator('[data-section="dismissed-picks"]');
+    await expect(part).toContainText('Скрыто: 2');
+    await part.getByRole('button', { name: 'Вернуть всё' }).click();
+    await expect(part).toHaveCount(0);
+    await expect(page.locator('.toast', { hasText: 'Скрытое снова в подборе' })).toBeVisible();
+    expect(count).toBe(0);
+  });
+
   test('«Показать клавиши» открывает окно поверх настроек; Escape возвращает в настройки', async ({ page }) => {
     await openLibrary(page);
     await openSettings(page);
@@ -76,26 +140,89 @@ test.describe('настройки', () => {
     await expect(show).toBeFocused();
   });
 
+  test('скорость разбора картинок: выбор только при включённом разборе, уходит на сервер; не сохранилось — остаётся прежнее', async ({ page }) => {
+    // В тестовом окружении моделей нет: состояние строки — как их отдаёт сервер, переключение — через те же запросы
+    const analysis = { on: false, state: 'off' };
+    const posted = [];
+    let fail = false;
+    let statusDown = false;
+    await page.route(/\/api\/pictures\/status/, (route) => (statusDown ? route.fulfill({ status: 500, json: {} }) : route.fulfill({ json: { state: 'ready', analysis } })));
+    await page.route(/\/api\/settings\/options$/, (route) => {
+      const body = route.request().postDataJSON();
+      posted.push(body);
+      if (fail) return route.fulfill({ status: 500, json: { error: 'Не удалось сохранить' } });
+      if (body.name === 'picture_analysis') Object.assign(analysis, body.value ? { on: true, state: 'done', speed: 'quiet' } : { on: false, state: 'off', speed: undefined });
+      if (body.name === 'picture_speed') analysis.speed = body.value;
+      return route.fulfill({ json: { options: {} } });
+    });
+    await openLibrary(page);
+    await openSettings(page);
+    const section = page.locator('[data-section="picture-analysis"]');
+    const quiet = section.getByRole('radio', { name: 'Тихо' });
+    const fast = section.getByRole('radio', { name: 'Быстро' });
+    await expect(section).toContainText('Разбор картинок');
+    await expect(section.getByRole('radio')).toHaveCount(0);
+
+    await section.locator('.set-toggle').click();
+    await expect(quiet).toHaveAttribute('aria-checked', 'true');
+    await expect(fast).toHaveAttribute('aria-checked', 'false');
+
+    await fast.click();
+    await expect(fast).toHaveAttribute('aria-checked', 'true');
+    await expect(quiet).toHaveAttribute('aria-checked', 'false');
+    expect(posted.at(-1)).toEqual({ name: 'picture_speed', value: 'fast' });
+
+    fail = true;
+    await quiet.click();
+    await expect(page.locator('.toast.show')).toBeVisible();
+    await expect(fast).toHaveAttribute('aria-checked', 'true');
+    await expect(quiet).toHaveAttribute('aria-checked', 'false');
+    expect(posted.at(-1)).toEqual({ name: 'picture_speed', value: 'quiet' });
+
+    // Сохранилось, но статус не прочитался: на экране новое значение, а не прежнее
+    fail = false;
+    statusDown = true;
+    await quiet.click();
+    await expect(quiet).toHaveAttribute('aria-checked', 'true');
+    await expect(fast).toHaveAttribute('aria-checked', 'false');
+    statusDown = false;
+
+    await section.locator('.set-toggle').click();
+    await expect(section.getByRole('radio')).toHaveCount(0);
+  });
+
   test('смена пароля: неверный прежний — ошибка; верный — сменён, это устройство остаётся со входом', async ({ page }) => {
     await openLibrary(page);
-    await openSettings(page, 'Аккаунт');
-    const fields = page.locator('.set-form input[type=password]');
+    await openSettings(page, 'Мой профиль');
+    const form = page.locator('[data-section=password]');
+    const fields = form.locator('input[type=password]');
     const fill = async (current, next) => {
       await fields.nth(0).fill(current); await fields.nth(1).fill(next); await fields.nth(2).fill(next);
-      await page.locator('.set-form .set-submit').click();
+      await form.locator('.set-submit').click();
     };
     await fill('wrong-password', 'next-pass-456');
-    await expect(page.locator('.set-form .auth-error')).toHaveText('Прежний пароль неверный');
+    await expect(form.locator('.auth-error')).toHaveText('Прежний пароль неверный');
 
-    await fill(USER.password, 'next-pass-456');
-    await expect(page.locator('.toast.show')).toContainText('Пароль сменён');
-    await expect(fields.nth(0)).toHaveValue('');
-    // Это устройство со входом: список игр открывается
-    expect((await page.request.get('/api/games')).ok()).toBeTruthy();
+    // Пароль возвращаем в finally: упавшая проверка посреди теста иначе оставила бы владельцу чужой пароль,
+    // и все следующие входы (и повтор этого теста) падали бы с 401
+    // (верный пароль не помнит и лишней неудачной попытки не тратит: если тест дошёл до конца, finally молчит)
+    let restored = false;
+    try {
+      await fill(USER.password, 'next-pass-456');
+      await expect(page.locator('.toast.show')).toContainText('Пароль сменён');
+      await expect(fields.nth(0)).toHaveValue('');
+      // Это устройство со входом: список игр открывается
+      expect((await page.request.get('/api/games')).ok()).toBeTruthy();
 
-    // Вернуть прежний — остальным тестам
-    await fill('next-pass-456', USER.password);
-    await expect(page.locator('.toast.show')).toContainText('Пароль сменён');
+      // Вернуть прежний — остальным тестам
+      await fill('next-pass-456', USER.password);
+      // Тост от первой смены ещё на экране и сам по себе ничего не доказывает: следующий тест входил раньше, чем пароль вернулся. Поля очищает только ответ сервера
+      await expect(fields.nth(0)).toHaveValue('');
+      await expect(page.locator('.toast.show')).toContainText('Пароль сменён');
+      restored = true;
+    } finally {
+      if (!restored) await page.request.post('/api/account/password', { data: { current: 'next-pass-456', next: USER.password } }).catch(() => {});
+    }
   });
 
   test('ключ ScraperAPI: сохраняется, показывается только хвост, убирается', async ({ page }) => {
@@ -138,6 +265,14 @@ test.describe('настройки', () => {
 
   test('параметры из .env — и на сайте: порог места сохраняется и возвращается; помощник обновлений; что только на сервере', async ({ page }) => {
     await openLibrary(page);
+    await openSettings(page, 'Уведомления');
+    // Без бота порог ничего не делает — поля нет
+    await expect(page.locator('[data-option="disk_warn_gb"]')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await page.route(/\/api\/settings(\/options)?$/, async (route) => {
+      const res = await route.fetch();
+      await route.fulfill({ response: res, json: { ...(await res.json()), telegram: { set: true } } });
+    });
     await openSettings(page, 'Уведомления');
     const disk = page.locator('[data-option="disk_warn_gb"]');
     await expect(disk.locator('input')).toHaveAttribute('placeholder', '10');
@@ -276,6 +411,20 @@ test.describe('настройки', () => {
     await terms.locator('.chip', { hasText: 'Deutsch' }).click();
     await expect(terms).toContainText('Переведённых игр на этом языке в библиотеке нет');
     await expect(terms.locator('.set-terms-list li').first()).toContainText('Fliehen');
+  });
+  test('оглавление: ничего не подключено — подписи нет вместо «0 из 5», группа говорит «по желанию»; подключили — счётчик', async ({ page }) => {
+    const off = Object.fromEntries(['scraper', 'deepl', 'microsoft', 'google', 'libre', 'myjd', 'seedbox', 'telegram'].map((k) => [k, { set: false }]));
+    await page.route(/\/api\/settings$/, async (route) => {
+      const res = await route.fetch();
+      await route.fulfill({ json: { ...(await res.json()), ...off, deepl: { set: true, tail: 'ab:fx' } } });
+    });
+    await page.route(/\/api\/settings\/seedbox$/, (route) => route.fulfill({ json: { set: false } }));
+    await openLibrary(page);
+    await openSettings(page);
+    const state = (name) => page.locator('.settings-tab', { hasText: name }).locator('.settings-tab-state');
+    for (const name of ['Источники', 'Загрузки', 'Уведомления']) await expect(state(name)).toHaveCount(0);
+    await expect(page.locator('.settings-group-title', { hasText: 'Подключения, по желанию' })).toBeVisible();
+    await expect(state('Перевод')).toHaveText('1 из 4 служб');
   });
   test('оглавление: под названием раздела — состояние; ошибка Seedbox и счётчик служб видны без открытия раздела', async ({ page }) => {
     // Задан Seedbox, и сервер говорит «не пустил»: красная строка в оглавлении
