@@ -9,9 +9,10 @@ import { STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage, similar
 import MetaLine from './MetaLine';
 import { VideoSeek } from './VideoSeek';
 import { useVideoControl } from '../videoControl';
+import { galleryUrl } from '../apiUrl';
 
 const isVideo = (f) => /\.(webm|mp4|m4v|ogv)$/i.test(f || '');
-const api = (game, what, file) => `/api/gallery/${encodeURIComponent(game)}/${what}?f=${encodeURIComponent(file)}`;
+const api = galleryUrl;
 // Сколько кадров анимации грузим вперёд (как в GameGallery)
 const PRELOAD = 24;
 

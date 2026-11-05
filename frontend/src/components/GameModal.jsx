@@ -47,6 +47,8 @@ import { favoritesOf, useFavoriteTags } from '../favoriteTags';
 import { IconHeart } from './icons';
 import { useKnownLangs } from '../knownLangs';
 import MetaLine from './MetaLine';
+import { asset } from '../apiUrl';
+import { DEMO } from '../demoHooks';
 
 const ROMAN_NUMERALS = ['Ⅰ','Ⅱ','Ⅲ','Ⅳ','Ⅴ','Ⅵ','Ⅶ','Ⅷ','Ⅸ','Ⅹ','Ⅺ','Ⅻ'];
 // Сколько тегов видно сразу. Раньше показывались все — по 27 крупных плашек, и
@@ -386,6 +388,8 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
   };
 
   const handleBackup = () => {
+    // Выгрузка сейвов — переход по адресу /api/…, который перехватить нечем: в демо вместо него заметка
+    if (DEMO && window.mimikinDemo.stop('download')) return;
     // Бэкенд ждет путь /export/:id (с учетом префикса роутера это /api/saves/export/)
     window.location.assign(`/api/saves/export/${game.id}`);
   };
@@ -489,9 +493,9 @@ const GameModal = ({ game, index, initial, onClose, onUpdateGame, onPatch, onDel
     const links = splitLinks(game.link);
     const find = (re) => links.find((u) => re.test(u)) || '';
     const list = [
-      { key: 'steam', name: 'Steam', url: find(/steampowered\.com\//), icon: '/steam-logo.png', info: '' },
-      { key: 'vndb', name: 'VNDB', url: find(/vndb\.org\//), icon: '/vndb-logo.png', info: '' },
-      { key: 'itch', name: 'itch.io', url: find(/\.itch\.io\//), icon: '/itch-logo.svg', info: '' },
+      { key: 'steam', name: 'Steam', url: find(/steampowered\.com\//), icon: asset('/steam-logo.png'), info: '' },
+      { key: 'vndb', name: 'VNDB', url: find(/vndb\.org\//), icon: asset('/vndb-logo.png'), info: '' },
+      { key: 'itch', name: 'itch.io', url: find(/\.itch\.io\//), icon: asset('/itch-logo.svg'), info: '' },
     ];
     // Прочие ссылки игры — тоже карточками, после известных
     const known = new Set(list.map((x) => x.url).filter(Boolean));

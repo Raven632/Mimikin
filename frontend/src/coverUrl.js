@@ -1,3 +1,5 @@
+import { mediaUrl } from './apiUrl';
+
 // Файлы игр в dev отдаёт бэкенд на своём порту, и Vite проксирует их через /media,
 // а в проде они лежат на том же адресе, что и сайт. Разница спрятана здесь.
 // width — уменьшенная копия (360 для карточек, 720 для окна игры): сервер делает её один раз и
@@ -5,7 +7,7 @@
 export function getMediaUrl(relPath, width) {
     if (!relPath) return null;
     const url = import.meta.env.DEV ? `/media/${relPath}` : `/${relPath}`;
-    return width ? `${url}?w=${width}` : url;
+    return mediaUrl(width ? `${url}?w=${width}` : url);
 }
 
 // Адрес обложки меняется вместе с картинкой: найденные поиском называются по содержимому

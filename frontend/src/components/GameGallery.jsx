@@ -15,12 +15,13 @@ import { useVideoControl } from '../videoControl';
 import SceneList from './SceneList';
 import SceneCast from './SceneCast';
 import { TagStrip, TagPanel, TagPicked } from './PictureTags';
-import { rigCoverUrl, useRigCovers } from './rigCapture';
+import { useRigCovers } from './rigCapture';
 import { HelpMark } from './Help';
 import { useHelp } from '../useHelp';
 import { IconClose, IconChevronLeft, IconChevronRight, IconHeart, IconHeartLine, IconExpand, IconSound, IconMute, IconPlay, IconPause, IconShuffle, IconTalk, IconFilm, IconLoop, IconFork, IconTag, IconSimilar } from './icons';
 import { readSound, writeSound, hasSound, SPEEDS, readSpeed, writeSpeed, STEPS, readStep, writeStep, shuffled, useZoom, useGalleryImage, readSpineCover, sceneRows, readTagsOn, writeTagsOn, useTagIndex, rowFiles, hasTags, tagCounts, similarPictures } from '../galleryView';
 import { flash } from '../pulse';
+import { galleryUrl, rigCoverUrl } from '../apiUrl';
 // Набор Spine играет pixi: тяжёлый, грузится только когда открыли такую анимацию
 // Файл не открылся (заблокирован, сайт обновили, а вкладка старая) — пустое поле вместо белого экрана
 const SpineView = lazy(() => import('./SpineView').catch(() => ({ default: () => null })));
@@ -55,7 +56,7 @@ const sceneName = (key) => key.split('/').pop().replace(/(#\w+)+$/, '');
 // Набор Spine или модель Live2D: кадр альбома — движение, играет canvas; обложку плитки снимает первый просмотр
 const isRig = (a) => !!(a.spine || a.live2d);
 
-const api = (id, what, file) => `/api/gallery/${encodeURIComponent(id)}/${what}?f=${encodeURIComponent(file)}`;
+const api = galleryUrl;
 
 // Галерея из файлов игры (сервер: services/gallery.js). Альбомы — в порядке игры.
 // Вкладки: CG (и кадры, склеенные из слоёв: основа, лицо, одежда), анимации (GIF, APNG, WebP — движутся

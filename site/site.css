@@ -1,0 +1,141 @@
+/* Страница проекта Mimikin: витрина в духе магазина, нарисованная интерфейсом самого Mimikin.
+   Настоящие скриншоты занимают главное место, остальное тихое. Токены те же, что в приложении (frontend/src/styles/base.css). */
+@font-face { font-family: 'Tiny5'; src: url(fonts/tiny5-latin-400-normal.woff2) format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Tiny5'; src: url(fonts/tiny5-cyrillic-400-normal.woff2) format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-latin-400-normal.woff2) format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-cyrillic-400-normal.woff2) format('woff2'); font-weight: 400; font-display: swap; unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-latin-500-normal.woff2) format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-cyrillic-500-normal.woff2) format('woff2'); font-weight: 500; font-display: swap; unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-latin-600-normal.woff2) format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-cyrillic-600-normal.woff2) format('woff2'); font-weight: 600; font-display: swap; unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-latin-700-normal.woff2) format('woff2'); font-weight: 700; font-display: swap; unicode-range: U+0000-00FF,U+0131,U+0152-0153,U+02BB-02BC,U+02C6,U+02DA,U+02DC,U+0304,U+0308,U+0329,U+2000-206F,U+20AC,U+2122,U+2191,U+2193,U+2212,U+2215,U+FEFF,U+FFFD; }
+@font-face { font-family: 'Fira Sans'; src: url(fonts/fira-sans-cyrillic-700-normal.woff2) format('woff2'); font-weight: 700; font-display: swap; unicode-range: U+0301,U+0400-045F,U+0490-0491,U+04B0-04B1,U+2116; }
+
+:root {
+  --bg: #080608;        /* page, same black as the app */
+  --panel: #13111a;     /* raised areas: install band, keycaps */
+  --text: #e8dfc8;
+  --dim: #8f8470;       /* 5:1 on --bg */
+  --gold: #c9a84c;      /* action and brand */
+  --gold-hi: #f0d080;   /* titles, hover */
+  --gold-lo: #7a6030;
+  --line: rgba(201,168,76,.3);    /* frames around the app's own windows */
+  --hair: rgba(232,223,200,.12);  /* separators */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px; --s8: 64px; --s9: 96px;
+  --r-sm: 6px; --r-lg: 12px;
+  --ui: 'Fira Sans', system-ui, sans-serif;
+  --head: 'Tiny5', var(--ui);
+  --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+}
+* { box-sizing: border-box; }
+html { background: var(--bg); color: var(--text); font: 400 16px/1.55 var(--ui); -webkit-text-size-adjust: 100%; }
+body { margin: 0; }
+img { display: block; max-width: 100%; height: auto; }
+a { color: var(--gold-hi); text-decoration-color: var(--gold-lo); text-underline-offset: 3px; }
+a:hover { text-decoration-color: var(--gold-hi); }
+:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 3px; border-radius: 2px; }
+.wrap { width: min(1320px, 100% - 2 * var(--s5)); margin-inline: auto; }
+
+/* Header: the app's own bar, mark and wordmark */
+.bar { border-bottom: 1px solid var(--hair); }
+.bar .wrap { display: flex; align-items: center; gap: var(--s5); height: 64px; }
+.brand { display: flex; align-items: center; gap: var(--s3); color: var(--gold); text-decoration: none; margin-right: auto; }
+.brand svg { width: 32px; height: 32px; }
+.brand span { font: 400 22px/1 var(--head); letter-spacing: .06em; }
+.bar nav { display: flex; gap: var(--s5); }
+/* Переключатель языка: настоящие ссылки на три страницы, текущая подчёркнута золотом */
+.lang { display: flex; gap: var(--s4); margin: 0; padding: 0; list-style: none; }
+.lang a { display: block; min-width: 28px; padding: var(--s3) 0 var(--s2); text-align: center; color: var(--dim); text-decoration: none; font: 600 14px/1 var(--ui); border-bottom: 2px solid transparent; }
+.lang a:hover { color: var(--text); }
+.lang a[aria-current] { color: var(--gold-hi); border-bottom-color: var(--gold); }
+.bar nav a { color: var(--dim); text-decoration: none; font-weight: 500; padding: var(--s3) 0; }
+.bar nav a:hover { color: var(--text); }
+
+/* Store page grid: title on top, media viewer left, the "buy box" right */
+.store { display: grid; grid-template-columns: minmax(0, 1fr) 340px; grid-template-areas: "title title" "media buy" "media facts"; column-gap: var(--s6); padding-block: var(--s6) var(--s8); align-items: start; }
+.store h1 { grid-area: title; margin: 0 0 var(--s5); font: 700 34px/1.15 var(--ui); color: var(--gold-hi); letter-spacing: -.005em; }
+.media { grid-area: media; margin: 0; }
+.buy { grid-area: buy; }
+.facts { grid-area: facts; }
+
+.screen { margin: 0; border: 1px solid var(--line); border-radius: var(--r-lg); overflow: hidden; background: var(--bg); aspect-ratio: 1440 / 690; }
+.screen img { width: 100%; height: 100%; object-fit: contain; }
+.media figcaption { color: var(--dim); font-size: 14px; margin-top: var(--s3); min-height: 22px; }
+.thumbs { display: flex; gap: var(--s3); margin-top: var(--s3); padding: 0; list-style: none; }
+.thumbs a { cursor: pointer; display: block; width: 148px; aspect-ratio: 16 / 10; border: 1px solid var(--hair); border-radius: var(--r-sm); overflow: hidden; background: var(--bg); opacity: .62; transition: opacity .15s, border-color .15s; }
+.thumbs a img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+.thumbs a:hover { opacity: 1; }
+.thumbs a[aria-current="true"] { opacity: 1; border-color: var(--gold); border-bottom-width: 3px; }
+.thumbs a:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
+
+.buy p { margin: 0 0 var(--s5); font-size: 17px; }
+.btn { display: flex; align-items: center; justify-content: center; height: 48px; padding: 0 var(--s5); border-radius: var(--r-sm); font: 600 17px/1 var(--ui); text-decoration: none; transition: background-color .15s, color .15s, border-color .15s; }
+.btn-gold { background: var(--gold); color: #14100a; }
+.btn-gold:hover { background: var(--gold-hi); }
+.btn-gold:active { transform: translateY(1px); }
+.btn-line { border: 1px solid var(--line); color: var(--gold-hi); }
+.btn-line:hover { border-color: var(--gold); background: rgba(201,168,76,.08); }
+.buy .note { color: var(--dim); font-size: 14px; margin: var(--s4) 0 0; }
+
+.facts dl { margin: var(--s6) 0 var(--s5); display: grid; grid-template-columns: 96px 1fr; gap: var(--s2) var(--s4); font-size: 15px; border-top: 1px solid var(--hair); padding-top: var(--s5); }
+.facts dt { color: var(--dim); }
+.facts dd { margin: 0; }
+
+/* About: plain text in two columns, separated by hairlines, no boxes */
+.about { padding-block: var(--s8); border-top: 1px solid var(--hair); }
+h2 { font: 400 26px/1.2 var(--head); color: var(--gold-hi); margin: 0 0 var(--s6); letter-spacing: .02em; }
+.points { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--s7); margin: 0; padding: 0; list-style: none; }
+.points li { padding: var(--s5) 0; border-top: 1px solid var(--hair); }
+.points h3 { margin: 0 0 var(--s2); font: 600 18px/1.3 var(--ui); color: var(--text); }
+.points p { margin: 0; color: #c9bfa8; max-width: 52ch; }
+kbd { font: 600 13px/1 var(--ui); color: var(--gold-hi); background: var(--panel); border: 1px solid var(--line); border-bottom-width: 3px; border-radius: 4px; padding: 3px 7px 2px; white-space: nowrap; }
+
+/* Install: the store's purchase band, but the price is a command */
+.install { padding-block: 0 var(--s8); }
+.band { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); gap: var(--s6); align-items: center; background: var(--panel); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s6); }
+.band h2 { margin-bottom: var(--s3); }
+.band p { margin: 0; color: #c9bfa8; }
+.band .small { color: var(--dim); font-size: 14px; margin-top: var(--s3); }
+.cmd { position: relative; background: var(--bg); border: 1px solid var(--hair); border-radius: var(--r-sm); }
+.cmd pre { margin: 0; padding: var(--s4) var(--s5); padding-right: 92px; font: 400 14px/1.75 var(--mono); color: var(--text); overflow-x: auto; }
+.cmd pre b { color: var(--gold-hi); font-weight: 400; }
+.copy { all: unset; cursor: pointer; position: absolute; top: var(--s3); right: var(--s3); font: 600 13px/1 var(--ui); color: var(--gold-hi); border: 1px solid var(--line); border-radius: 4px; padding: 7px 10px; }
+.copy:hover { border-color: var(--gold); }
+.copy:focus-visible { outline: 2px solid var(--gold-hi); outline-offset: 2px; }
+
+footer { border-top: 1px solid var(--hair); padding-block: var(--s6) var(--s7); color: var(--dim); font-size: 14px; }
+footer .wrap { display: flex; flex-wrap: wrap; gap: var(--s4) var(--s6); align-items: center; }
+footer p { margin: 0 auto 0 0; }
+footer a { color: var(--text); }
+
+@media (max-width: 980px) {
+  .store { grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "buy" "media" "facts"; padding-top: var(--s5); }
+  .store h1 { font-size: 28px; margin-bottom: var(--s4); }
+  .buy p { font-size: 16px; margin-bottom: var(--s4); }
+  .media { margin-top: var(--s6); }
+  .thumbs { overflow-x: auto; }
+  .thumbs a { width: 104px; flex: none; }
+  .points { grid-template-columns: minmax(0, 1fr); }
+  .band { grid-template-columns: minmax(0, 1fr); padding: var(--s5); }
+}
+@media (max-width: 560px) {
+  .bar .wrap { gap: var(--s4); }
+  .bar nav { gap: var(--s4); }
+  .lang { gap: var(--s2); }
+  .bar .wrap { height: 56px; }
+  .bar nav a.wide { display: none; }
+  .brand span { font-size: 19px; }
+  .store h1 { font-size: 26px; }
+  .about, .install { padding-block: var(--s7); }
+  .install { padding-top: 0; }
+  .cmd pre { font-size: 13px; padding-right: var(--s5); padding-top: var(--s7); }
+}
+/* 404: короткая страница в том же стиле */
+.nf { padding-block: var(--s9); }
+.nf h1 { margin: 0 0 var(--s4); font: 700 34px/1.15 var(--ui); color: var(--gold-hi); }
+.nf p { margin: 0 0 var(--s5); max-width: 52ch; color: #c9bfa8; }
+.nf-actions { display: flex; flex-wrap: wrap; gap: var(--s3); }
+.nf-actions .btn { display: inline-flex; }
+@media (max-width: 560px) { .nf { padding-block: var(--s7); } .nf h1 { font-size: 26px; } }
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

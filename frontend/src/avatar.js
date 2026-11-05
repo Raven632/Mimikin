@@ -1,4 +1,5 @@
 import { httpError } from './apiError';
+import { avatarUrl } from './apiUrl';
 
 // Аватар: страница сама вырезает квадрат из середины и уменьшает до 256 px, а на сервер уходит готовый JPEG
 // (api/src/routes/account.js принимает до 256 КБ и проверяет сигнатуру). Холст заодно выкидывает из файла метаданные,
@@ -39,4 +40,4 @@ export const putAvatar = (url, blob) => send('PUT', url, blob);
 export const dropAvatar = (url) => send('DELETE', url);
 
 // Адрес картинки; версия в адресе — время файла: новая картинка — новый адрес, кеш на неделю не мешает
-export const avatarSrc = (person) => (person?.avatar ? `/api/avatars/${encodeURIComponent(person.id)}?v=${person.avatar}` : '');
+export const avatarSrc = (person) => (person?.avatar ? avatarUrl(person.id, person.avatar) : '');

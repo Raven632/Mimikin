@@ -6,10 +6,11 @@ import { readSpeed } from '../galleryView';
 import StateView from './StateView';
 import SearchBox from './SearchBox';
 import { IconClose, IconImage, IconPlay } from './icons';
+import { galleryUrl } from '../apiUrl';
 
 const GameGallery = lazy(() => import('./GameGallery'));
 const SceneView = lazy(() => import('./SceneView'));
-const thumb = (game, file) => `/api/gallery/${encodeURIComponent(game)}/thumb?f=${encodeURIComponent(file)}`;
+const thumb = (game, file) => galleryUrl(game, 'thumb', file);
 const PAGE = 60;
 
 // «Поиск по картинкам»: слова → кадры из галерей всех игр (сервер: /api/pictures/search). Плитка открывает галерею той

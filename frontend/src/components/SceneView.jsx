@@ -5,6 +5,7 @@ import { SeekLine } from './VideoSeek';
 import { languageTitle } from '../formatLanguage';
 import BarChoose from './BarChoose';
 import { IconClose, IconChevronLeft, IconChevronRight, IconPlay, IconPause, IconSound, IconMute, IconSkip } from './icons';
+import { asset, galleryUrl } from '../apiUrl';
 
 // Сцена из события игры: картинки, реплики, музыка и звуки по порядку — без запуска игры. Шаги присылает сервер
 // (services/gallery.js, scene): pic (номер файла), anim (кадры по кругу или один раз, звуки кадров), say, choice, snd, stop,
@@ -56,9 +57,9 @@ const slotOf = (s) => (s.kind === 'vloop' ? `vloop${s.ch || 0}` : s.kind);
 const LOOPED = (s) => s.kind === 'bgm' || s.kind === 'bgs' || s.kind === 'vloop';
 const rate = (pitch) => Math.max(0.5, Math.min(2, (pitch || 100) / 100));
 const volume = (v) => Math.max(0, Math.min(1, (v ?? 90) / 100));
-const imageUrl = (id, f) => `/api/gallery/${encodeURIComponent(id)}/image?f=${encodeURIComponent(f)}`;
-const audioUrl = (id, f) => `/api/gallery/${encodeURIComponent(id)}/audio?f=${encodeURIComponent(f)}`;
-const videoUrl = (id, f) => `/api/gallery/${encodeURIComponent(id)}/video?f=${encodeURIComponent(f)}`;
+const imageUrl = (id, f) => galleryUrl(id, 'image', f);
+const audioUrl = (id, f) => galleryUrl(id, 'audio', f);
+const videoUrl = (id, f) => galleryUrl(id, 'video', f);
 // Режим смешивания ролика на картинке: 1 — сложение, 2 — умножение, 3 — экран
 const blendOf = (b) => (b === 1 ? (window.CSS?.supports?.('mix-blend-mode', 'plus-lighter') ? 'plus-lighter' : 'screen') : b === 2 ? 'multiply' : b === 3 ? 'screen' : '');
 // Умеет ли браузер прозрачный WebM: крошечный ролик с нулевой прозрачностью рисуем на холсте. Один раз за сессию; ответа нет
@@ -81,7 +82,7 @@ const alphaOk = () => alphaProbe || (alphaProbe = new Promise((done) => {
     } catch { end(false); }
   };
   v.onerror = () => end(false);
-  v.src = '/alpha-test.webm';
+  v.src = asset('/alpha-test.webm');
   v.play?.().catch(() => {});
 }));
 

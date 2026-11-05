@@ -49,4 +49,10 @@ Thumbs.db
 tests/compat/report/
 
 tests/e2e/report/
+tests/demo/report/
 tests/e2e/node_modules/
+
+# Демо (GitHub Pages): сборка, сайт, записанные ответы (их делает CI)
+_site/
+frontend/dist-demo/
+frontend/demo-data/

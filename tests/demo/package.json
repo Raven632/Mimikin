@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "Обход собранного демо-сайта (Playwright): tests/demo/playwright.config.mjs",
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}

@@ -1,0 +1,63 @@
+<!doctype html>
+<!-- Титульный экран выдуманной игры для демо-сайта. Запись (tests/demo/record.js) подставляет {{…}} и кладёт готовую
+     страницу в demo-data/play/<id>.html. Настоящей игры в демо нет: страница лишь открывается в рамке игры и умеет уйти
+     обратно, как rpg-fixes в настоящей (GameFrame.jsx: rpg:leave на «В библиотеку» и Escape, rpg:leave-request — ответом).
+     Язык — ?lang=, иначе тот, что выбран в библиотеке (тот же origin, rpg_lang), иначе браузера -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{{TITLE}}</title>
+<style>
+@font-face { font-family: 'Tiny5'; font-weight: 400; font-display: swap; src: url('../ui-fonts/tiny5-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+2000-206F; }
+@font-face { font-family: 'Tiny5'; font-weight: 400; font-display: swap; src: url('../ui-fonts/tiny5-cyrillic-400-normal.woff2') format('woff2'); unicode-range: U+0400-04FF; }
+@font-face { font-family: 'Fira Sans'; font-weight: 400; font-display: swap; src: url('../ui-fonts/fira-sans-latin-400-normal.woff2') format('woff2'); unicode-range: U+0000-00FF,U+2000-206F; }
+@font-face { font-family: 'Fira Sans'; font-weight: 400; font-display: swap; src: url('../ui-fonts/fira-sans-cyrillic-400-normal.woff2') format('woff2'); unicode-range: U+0400-04FF; }
+html, body { margin: 0; height: 100%; background: #080608; color: #f4efe0; font: 400 16px/1.5 'Fira Sans', system-ui, sans-serif; }
+main { min-height: 100%; box-sizing: border-box; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 20px; padding: 24px; text-align: center; }
+.art { width: min(86vw, 480px); max-height: 38vh; object-fit: contain; image-rendering: pixelated; border: 1px solid #7a6030; background: #100e12; }
+h1 { margin: 0; font: 400 clamp(26px, 6vw, 38px)/1.15 'Tiny5', 'Fira Sans', system-ui, sans-serif; color: #f0d080; letter-spacing: .04em; }
+.dev { margin: 4px 0 0; color: #aa8844; font-size: 14px; }
+.note { max-width: 30em; margin: 0; color: #a39883; border-top: 1px solid #7a6030; padding-top: 16px; }
+.note b { display: block; margin-bottom: 4px; color: #f4efe0; font-weight: 400; }
+button { font: inherit; color: #f0d080; background: transparent; border: 1px solid #c9a84c; border-radius: 2px; padding: 9px 22px; cursor: pointer; }
+button:hover, button:focus-visible { background: #c9a84c; color: #080608; outline: none; }
+</style>
+</head>
+<body>
+<main>
+  <img class="art" src="{{COVER}}" alt="">
+  <div>
+    <h1>{{TITLE}}</h1>
+    <p class="dev">{{DEV}}</p>
+  </div>
+  <p class="note"><b id="n1"></b><span id="n2"></span></p>
+  <button type="button" id="back"></button>
+</main>
+<script>
+(function () {
+  var T = {
+    en: ['There is no real game in the demo.', 'In your own Mimikin the game runs in this frame, and its saves go to your server.', 'Back to the library'],
+    ru: ['В демо нет настоящей игры.', 'В вашем Mimikin игра запускается в этом окне, а сохранения уходят на ваш сервер.', 'В библиотеку'],
+    de: ['Im Demo gibt es kein echtes Spiel.', 'In deinem eigenen Mimikin läuft das Spiel in diesem Fenster, die Spielstände liegen auf deinem Server.', 'Zurück zur Bibliothek']
+  };
+  var lang = new URLSearchParams(location.search).get('lang');
+  try { lang = lang || localStorage.getItem('rpg_lang'); } catch (e) { /* приватный режим */ }
+  lang = String(lang || navigator.language || 'en').slice(0, 2);
+  var t = T[lang] || T.en;
+  document.documentElement.lang = T[lang] ? lang : 'en';
+  document.getElementById('n1').textContent = t[0];
+  document.getElementById('n2').textContent = t[1];
+  var back = document.getElementById('back');
+  back.textContent = t[2];
+  var leave = function () { parent.postMessage({ type: 'rpg:leave' }, location.origin); };
+  back.addEventListener('click', leave);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') leave(); });
+  // «Назад» в браузере: рамка просит уйти — уходим сразу, сохранять нечего
+  window.addEventListener('message', function (e) { if (e.origin === location.origin && e.data && e.data.type === 'rpg:leave-request') leave(); });
+  back.focus();
+})();
+</script>
+</body>
+</html>

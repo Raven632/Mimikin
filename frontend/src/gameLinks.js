@@ -1,3 +1,5 @@
+import { asset } from './apiUrl';
+
 // Ссылки игры на сайты (Steam, VNDB, itch.io…): в базе — одна строка через запятую. Окно игры
 // показывает их значками, правка — списком с подписями
 
@@ -16,9 +18,9 @@ export function parseLinkInput(text) {
 
 // Логотип сайта для ссылки
 export function linkIcon(url) {
-  if (url.includes('vndb.org')) return '/vndb-logo.png';
-  if (url.includes('steampowered.com')) return '/steam-logo.png';
-  if (/\.itch\.io\//.test(url)) return '/itch-logo.svg';
+  if (url.includes('vndb.org')) return asset('/vndb-logo.png');
+  if (url.includes('steampowered.com')) return asset('/steam-logo.png');
+  if (/\.itch\.io\//.test(url)) return asset('/itch-logo.svg');
   return '';
 }
 

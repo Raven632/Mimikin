@@ -3,6 +3,7 @@ import { errorText } from '../apiError';
 import BrandMark from './BrandMark';
 import { IconEye, IconEyeOff } from './icons';
 import { saveKnownLangs } from '../knownLangs';
+import { DEMO } from '../demoHooks';
 
 const LANGS = [['ru', 'RU'], ['en', 'EN'], ['de', 'DE']];
 // Те же пределы, что проверяет сервер (api/src/routes/auth.js): подсказываем заранее, а не после отказа
@@ -193,6 +194,7 @@ const LoginModal = ({ mode, onSuccess, t, lang, onLangChange }) => {
           {busy ? t.auth_busy : (changing ? t.auth_change_submit : isSetup ? t.auth_submit_setup : t.auth_submit_login)}
         </button>
 
+        {DEMO && <p className="auth-note auth-demo">{t.demo_login_hint}</p>}
         <p className="auth-note">{t.auth_note}</p>
 
         {!isSetup && !changing && (
