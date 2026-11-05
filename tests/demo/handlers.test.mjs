@@ -6,9 +6,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { routes, dispatch } from '../../frontend/demo/table.js';
 import { createStore } from '../../frontend/demo/store.js';
-import { extendLocale, noteText } from '../../frontend/demo/texts.js';
+import { extendLocale, noteText, LINE_WORDS, PICTURE_WORDS, pictureWord, wordsHint } from '../../frontend/demo/texts.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const NOW = 2_000_000_000_000;
@@ -233,11 +234,10 @@ test('«Не предлагать» убирает игру из подбора,
   assert.equal((await call('POST', '/api/wishlist', { source: 'x', url: 'u' })).status, 400);
 });
 
-test('«Найти»: сайтов нет — отвечает как сервер без интернета; поиск по репликам пуст', async () => {
+test('«Найти»: сайтов нет — отвечает как сервер без интернета', async () => {
   const { call } = fresh();
   const res = await call('GET', '/api/itch/latest?page=1');
   assert.deepEqual([res.status, res.body.reason], [503, 'offline']);
-  assert.equal((await call('GET', '/api/lines/search?q=abc')).body.total, 0);
 });
 
 test('скрытые теги картинок и ошибки игр', async () => {
@@ -276,7 +276,16 @@ test('тексты заметок: каждое «что» из маршруто
     assert.equal(out.err_reason.x, 'y');
     assert.equal(out.err_reason['demo-off']({ what: 'upload' }), noteText(lang, 'upload'));
     assert.ok(out.demo_login_hint && out.find_offline && out.find_offline_empty);
+    // Слова подсказки названы на языке посетителя и перечислены все
+    assert.equal(out.lines_failed, wordsHint(lang, 'lines'));
+    for (const w of LINE_WORDS) assert.ok(wordsHint(lang, 'lines').includes(w));
+    const pics = wordsHint(lang, 'pictures');
+    for (const w of PICTURE_WORDS) assert.equal(pictureWord(lang, w), w);
+    assert.equal(pics.split(': ')[1].split('. ')[0].split(', ').length, PICTURE_WORDS.length);
   }
+  assert.equal(pictureWord('ru', ' Маяк '), 'lighthouse');
+  assert.equal(pictureWord('de', 'leuchtturm'), 'lighthouse');
+  assert.equal(pictureWord('en', 'dragon'), null);
   assert.notEqual(noteText('ru', 'upload'), noteText('en', 'upload'));
   assert.equal(noteText('en', 'zzz'), server, 'неизвестное «что» — общая заметка, а не пустое окно');
 });
@@ -294,9 +303,116 @@ test('запись: у каждого записанного маршрута е
   const missing = [];
   for (const route of routes.filter((r) => r.kind === 'rec' && r.method === 'GET')) {
     const urls = route.template.includes(':id') ? gameIds.map((id) => route.template.replace(':id', id)) : [route.template];
+    // Плеер сцены просит альбом и язык: его проверяет тест «сцены» ниже
+    if (route.template.endsWith('/scene')) continue;
     const query = route.q.length ? `?${route.q.map((k) => `${k}=${k === 'kind' ? 'scenes' : '1'}`).join('&')}` : '';
     for (const url of urls) if ((await dispatch({ method: 'GET', url: url + query }, env)).status !== 200) missing.push(url + query);
   }
   assert.deepEqual(missing, []);
   assert.deepEqual(warns, []);
+});
+
+// Сцены, реплики и слова картинок на настоящей записи. Слова записи берёт из manifest.js: список там и в texts.js один и тот же
+test('сцены и поиск: фильтры, очередь, реплики по слову и игре, слова картинок, плеер сцены, игра на полке исчезает',
+  { skip: !fs.existsSync(bootFile) && 'нет frontend/demo-data: сначала tests/demo/record.sh' }, async () => {
+    const data = path.dirname(bootFile);
+    const boot = JSON.parse(fs.readFileSync(bootFile, 'utf8'));
+    const store = createStore({ boot, fetchJson: async (f) => JSON.parse(fs.readFileSync(path.join(data, f), 'utf8')), now: () => boot.recordedAt });
+    const warns = [];
+    const lang = { v: 'en' };
+    const env = { store, warn: (m) => warns.push(m), emit: () => {}, now: () => boot.recordedAt, get lang() { return lang.v; } };
+    const call = (url) => dispatch({ method: 'GET', url }, env);
+    const manifest = createRequire(import.meta.url)('./manifest.js');
+    assert.deepEqual(LINE_WORDS, manifest.LINE_WORDS);
+    assert.deepEqual(PICTURE_WORDS, manifest.PICTURE_WORDS);
+
+    // окно «Сцены»: 8 сцен в 4 играх, «Диалоги» пусты, «С голосом» отбирает по записи, «Ещё N» отдаёт всё, а не per
+    const all = (await call('/api/scenes?kind=scenes&per=1')).body;
+    assert.deepEqual([all.total, all.counts.scenes, all.counts.dialogue, all.games.length], [8, 8, 0, 4]);
+    assert.ok(all.games.every((g) => g.rows.length === 1 && g.count === 2));
+    assert.equal((await call('/api/scenes?kind=dialogue')).body.total, 0);
+    const voiced = (await call('/api/scenes?kind=scenes&voice=1')).body;
+    const withVoice = all.games.length && (await call('/api/scenes?kind=scenes')).body.games.flatMap((g) => g.rows).filter((x) => x.sum?.v).length;
+    assert.equal(voiced.total, withVoice);
+    assert.equal((await call('/api/scenes?kind=scenes&tag=nothing')).body.total, 0);
+    const one = (await call(`/api/scenes?kind=scenes&game=${all.games[0].id}`)).body;
+    assert.deepEqual([one.games.length, one.games[0].rows.length], [1, 2]);
+
+    // очередь: по порядку и вперемешку — те же 8 сцен; порция со «from»
+    const order = (await call('/api/scenes?kind=scenes&queue=order')).body;
+    assert.equal(order.queue.length, 8);
+    assert.deepEqual(Object.keys(order.queue[0]).sort(), ['game', 'key', 'n', 'title']);
+    assert.equal((await call('/api/scenes?kind=scenes&queue=order&from=6')).body.queue.length, 2);
+    const mixed = (await call('/api/scenes?kind=scenes&queue=random')).body;
+    assert.deepEqual(mixed.queue.map((x) => `${x.game}${x.key}`).sort(), order.queue.map((x) => `${x.game}${x.key}`).sort());
+
+    // плеер: ответ записан по альбому и языку интерфейса
+    const first = order.queue[0];
+    for (const ui of ['en', 'ru', 'de']) {
+      const res = await call(`/api/gallery/${first.game}/scene?key=${encodeURIComponent(first.key)}&n=${first.n}&ui=${ui}`);
+      assert.equal(res.status, 200, ui);
+      assert.ok(res.body.steps.some((x) => x.k === 'say') && res.body.steps.some((x) => x.k === 'snd'), ui);
+    }
+
+    // реплики: слово из записи, одна игра, limit, чужое слово — подсказка со списком, короткое — 400
+    const lamp = (await call('/api/lines/search?q=lamp&limit=60')).body;
+    assert.ok(lamp.total >= 3 && lamp.scenes.length >= 2);
+    const lampOne = (await call(`/api/lines/search?q=Lamp&game=${lamp.games[0].id}&limit=1`)).body;
+    assert.deepEqual([lampOne.games.length, lampOne.scenes.length, lampOne.total], [1, 1, lamp.games[0].lines]);
+    for (const l of ['ru', 'en', 'de']) {
+      lang.v = l;
+      const no = await call('/api/lines/search?q=dragon');
+      assert.deepEqual([no.status, no.body.error], [409, wordsHint(l, 'lines')]);
+    }
+    lang.v = 'en';
+    assert.equal((await call('/api/lines/search?q=ab')).status, 400);
+    for (const w of LINE_WORDS) assert.ok((await call(`/api/lines/search?q=${w}&limit=60`)).body.total > 0, w);
+
+    // картинки: у каждого слова есть кадры; русское слово — тот же ответ с understood; чужое — подсказка; «похожие» — заметка
+    for (const w of PICTURE_WORDS) assert.ok((await call(`/api/pictures/search?q=${w}&limit=60&from=0`)).body.results.length > 0, w);
+    lang.v = 'ru';
+    const ru = await call('/api/pictures/search?q=%D0%BC%D0%B0%D1%8F%D0%BA&limit=60&from=0');
+    assert.equal(ru.body.understood, 'lighthouse');
+    assert.deepEqual(ru.body.results, (await call('/api/pictures/search?q=lighthouse&limit=60&from=0')).body.results);
+    // «замок» (ru) и «Burg» (de) — это castle; слово чужого языка не принимается
+    const castle = (await call('/api/pictures/search?q=castle&limit=60&from=0')).body;
+    const zamok = (await call('/api/pictures/search?q=%D0%B7%D0%B0%D0%BC%D0%BE%D0%BA&limit=60&from=0')).body;
+    assert.deepEqual([zamok.understood, zamok.results], ['castle', castle.results]);
+    lang.v = 'de';
+    const burg = (await call('/api/pictures/search?q=Burg&limit=60&from=0')).body;
+    assert.deepEqual([burg.understood, burg.results], ['castle', castle.results]);
+    assert.equal((await call('/api/pictures/search?q=%D0%B7%D0%B0%D0%BC%D0%BE%D0%BA')).status, 409);
+    lang.v = 'ru';
+    const unknown = await call('/api/pictures/search?q=dragon');
+    assert.deepEqual([unknown.status, unknown.body.error], [409, wordsHint('ru', 'pictures')]);
+    assert.equal((await call('/api/pictures/similar?game=a&f=b')).body.params.what, 'similar');
+    lang.v = 'en';
+    const page = (await call('/api/pictures/search?q=sea&limit=5&from=0')).body;
+    assert.deepEqual([page.results.length, page.more], [5, true]);
+
+    // игра на полке не попадает ни в сцены, ни в реплики, ни в картинки
+    const game = (await store.read('/api/games')).find((g) => g.id === first.game);
+    game.shelf = { at: 1, key: 'k', until: 2 };
+    assert.ok((await call('/api/scenes?kind=scenes')).body.games.every((g) => g.id !== first.game));
+    assert.ok((await call('/api/lines/search?q=lamp&limit=60')).body.scenes.every((x) => x.game !== first.game));
+    assert.ok((await call('/api/pictures/search?q=sea&limit=60')).body.results.every((x) => x.game !== first.game));
+    assert.deepEqual(warns, []);
+  });
+
+// Запись без слов (DEMO_NO_WORDS=1): поиск картинок отвечает подсказкой, не 404
+test('поиск картинок без записанных слов отвечает подсказкой', async () => {
+  const boot = { recordedAt: NOW, rec: {}, lazy: {} };
+  const store = createStore({ boot, fetchJson: async () => undefined, now: () => NOW });
+  const env = { store, warn: () => {}, emit: () => {}, now: () => NOW, lang: 'en' };
+  const res = await dispatch({ method: 'GET', url: '/api/pictures/search?q=castle' }, env);
+  assert.deepEqual([res.status, res.body.error], [409, wordsHint('en', 'pictures')]);
+});
+
+// Запись слов: порядок плиток не зависит от третьего знака оценки (он гуляет между процессорами)
+test('steadyResults: оценка до сотых, при равенстве по игре и файлу', () => {
+  const { steadyResults } = createRequire(import.meta.url)('./manifest.js');
+  const a = [{ game: 'B', file: 'x', score: 0.2241 }, { game: 'A', file: 'z', score: 0.2249 }, { game: 'A', file: 'y', score: 0.231 }];
+  const b = [{ game: 'A', file: 'z', score: 0.2244 }, { game: 'A', file: 'y', score: 0.2306 }, { game: 'B', file: 'x', score: 0.2249 }];
+  assert.deepEqual(steadyResults(a).map((r) => r.file), ['y', 'z', 'x']);
+  assert.deepEqual(steadyResults(a), steadyResults(b));
 });

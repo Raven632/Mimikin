@@ -221,6 +221,163 @@ test('настройки: каждый раздел читается, набра
   expect(kept).toBe(false);
 });
 
+// Окно «Сцены» (меню): плитки по играм, плеер поверх окна. В демо сцены, звуки и слова записаны заранее
+async function openScenes(page) {
+  await menu(page, 'Scenes');
+  const dlg = page.getByRole('dialog', { name: 'Scenes' });
+  await expect(dlg.locator('.scene-tile').first()).toBeVisible();
+  return dlg;
+}
+
+test('сцены: плитка открывает плеер, полоса реплик перематывает, «подряд» и «вперемешку» идут', async ({ page }) => {
+  await openDemo(page);
+  const dlg = await openScenes(page);
+  await noBrokenImages(page);
+  await dlg.locator('.scene-tile').first().click();
+  const scene = page.locator('.scene');
+  await expect(scene).toBeVisible();
+  await expect(scene.locator('.scene-pic').first()).toBeAttached();
+  await expect(scene.locator('.scene-text').first()).not.toBeEmpty();
+  await noBrokenImages(page);
+  // Знак «Demo» не лежит на панели плеера (на телефоне он стоял в том же углу и перекрывал её, а в другом языке или с «Авто»
+  // и кнопки): либо спрятан, либо не пересекается с панелью
+  const mark = page.locator('.demo-mark');
+  if (await mark.isVisible()) {
+    const m = await mark.boundingBox();
+    const r = await scene.locator('.scene-bar').boundingBox();
+    expect(m.x + m.width <= r.x || r.x + r.width <= m.x || m.y + m.height <= r.y || r.y + r.height <= m.y, 'знак Demo на панели плеера').toBe(true);
+  }
+  // Полоса реплик: клавиши Home и End ставят первую и последнюю; подпись «Line N of M» растёт вместе со значением
+  const seek = scene.getByRole('slider', { name: 'Line' });
+  await expect(seek).toBeVisible();
+  const max = Number(await seek.getAttribute('aria-valuemax'));
+  expect(max).toBeGreaterThanOrEqual(2);
+  await seek.focus();
+  await page.keyboard.press('End');
+  await expect(seek).toHaveAttribute('aria-valuenow', String(max));
+  await expect(seek).toHaveAttribute('aria-valuetext', `Line ${max + 1} of ${max + 1}`);
+  await page.keyboard.press('Home');
+  await expect(seek).toHaveAttribute('aria-valuenow', '0');
+  await expect(seek).toHaveAttribute('aria-valuetext', `Line 1 of ${max + 1}`);
+  await scene.getByRole('button', { name: 'Close' }).click();
+  await expect(scene).toHaveCount(0);
+  await expect(dlg).toBeVisible();
+  // «Подряд» и «Вперемешку» берут очередь из записи и сразу запускают плеер
+  for (const name of ['Watch in a row', 'Shuffle']) {
+    await dlg.getByRole('button', { name }).first().click();
+    await expect(scene).toBeVisible();
+    await scene.getByRole('button', { name: 'Next' }).click();
+    await expect(scene.locator('.scene-text').first()).not.toBeEmpty();
+    await scene.getByRole('button', { name: 'Close' }).click();
+    await expect(scene).toHaveCount(0);
+  }
+});
+
+test('сцены: отбор «С голосом» и «С анимацией» меняет список, не ломая окно', async ({ page }) => {
+  await openDemo(page);
+  const dlg = await openScenes(page);
+  const all = await dlg.locator('.scene-tile').count();
+  await dlg.getByRole('button', { name: 'With animation' }).click();
+  // Анимации у сцен демо нет: список пустеет с объяснением, а не остаётся прежним
+  await expect(dlg.locator('.scene-tile')).toHaveCount(0);
+  await expect(dlg).toContainText('No such scenes');
+  await dlg.getByRole('button', { name: 'With animation' }).click();
+  await expect(dlg.locator('.scene-tile')).toHaveCount(all);
+});
+
+test('звуки: комната звуков игры, дорожка выбирается, перемотка (звук проверяем только в Chromium)', async ({ page, browserName }) => {
+  await openDemo(page);
+  await openGame(page, 'Starfall Inn');
+  await page.locator('.modal-content button', { hasText: /^Gallery$/ }).click();
+  const gallery = page.locator('.gallery').first();
+  await expect(gallery).toBeVisible();
+  await page.locator('.gallery-source', { hasText: 'Sounds' }).click();
+  const rows = gallery.locator('.sound-row');
+  await expect(rows.first()).toBeVisible();
+  expect(await rows.count()).toBeGreaterThanOrEqual(2);
+  await rows.first().click();
+  await expect(rows.first()).toHaveAttribute('aria-current', 'true');
+  // В WebKit Ogg молчит (и в самом продукте), поэтому длительность и перемотку смотрим только в Chromium
+  if (browserName === 'chromium') {
+    const seek = page.locator('.sound-seek');
+    await expect(seek).toBeVisible();
+    await expect.poll(async () => Number(await seek.getAttribute('aria-valuemax'))).toBeGreaterThan(0);
+    await seek.focus();
+    await page.keyboard.press('End');
+      }
+  await rows.nth(1).click();
+  await expect(rows.nth(1)).toHaveAttribute('aria-current', 'true');
+  await page.keyboard.press('Escape');
+});
+
+test('люди: в настройках владелец и одна гостья Mira, права «только играть», без переключателя', async ({ page }) => {
+  await openDemo(page);
+  await menu(page, 'Settings');
+  await page.locator('.settings-tab', { hasText: 'Users' }).click();
+  const tiles = page.locator('.people-tile[data-person]');
+  await expect(tiles).toHaveCount(2);
+  const mira = page.locator('.people-tile', { hasText: 'Mira' });
+  await expect(mira).toBeVisible();
+  await expect(page.locator('.people-tile .people-role.adm')).toHaveCount(1);
+  await mira.click();
+  await expect(page.locator('.person-page')).toContainText('Mira');
+  await page.locator('.person-page [role=tab], .person-page .set-subtab, .person-page button', { hasText: 'Games' }).first().click();
+  await expect(page.locator('.person-page')).toContainText(/\d/);
+  await page.locator('.person-page button', { hasText: 'Rights' }).first().click();
+  // Ни одно из прав — ни выдать, ни скачать, ни загрузить — гостье не выдано
+  const boxes = page.locator('.person-page .set-toggle input');
+  expect(await boxes.count()).toBeGreaterThanOrEqual(3);
+  for (let i = 0; i < await boxes.count(); i++) await expect(boxes.nth(i)).not.toBeChecked();
+});
+
+test('поиск по репликам: известное слово находит сцены, чужое — подсказка со списком слов', async ({ page }) => {
+  await openDemo(page);
+  const dlg = await openScenes(page);
+  const field = dlg.getByRole('searchbox').or(dlg.locator('input[type=search], input[type=text]')).first();
+  await field.fill('lamp');
+  await expect(dlg.locator('.line-group').first()).toBeVisible();
+  await expect(dlg).toContainText(/\d+ lines? in \d+ games?/);
+  await noBrokenImages(page);
+  await dlg.locator('.line-group .gallery-tile').first().click();
+  const scene = page.locator('.scene');
+  await expect(scene).toBeVisible();
+  await expect(scene.locator('.scene-text').first()).not.toBeEmpty();
+  await scene.getByRole('button', { name: 'Close' }).click();
+  await field.fill('dragon');
+  await expect(dlg).toContainText("line search knows only these words: inn, lantern, stars, soup, lamp");
+  await expect(dlg.locator('.line-group')).toHaveCount(0);
+  await field.fill('ab');
+  await expect(dlg).toContainText('at least three letters');
+});
+
+test('поиск картинок по словам: слово записи находит кадры, чужое — подсказка со списком слов', async ({ page }) => {
+  await openDemo(page);
+  await menu(page, 'Search pictures');
+  const dlg = page.getByRole('dialog', { name: 'Search pictures' });
+  const field = dlg.locator('.pics-search input').first();
+  await expect(field).toHaveAttribute('placeholder', /castle, sea, snow/);
+  await field.fill('castle');
+  await expect(dlg.locator('.pics-tile').first()).toBeVisible();
+  expect(await dlg.locator('.pics-tile').count()).toBeGreaterThanOrEqual(4);
+  await noBrokenImages(page);
+  await dlg.locator('.pics-tile .gallery-tile').first().click();
+  await expect(page.locator('.gallery-viewer, .viewer, .gallery-view').first()).toBeVisible();
+  await noBrokenImages(page);
+  await page.keyboard.press('Escape');
+  await field.fill('zebra');
+  await expect(dlg).toContainText("picture search knows only these words: castle, sea, snow, night, chest, forest, lighthouse");
+  await expect(dlg.locator('.pics-tile')).toHaveCount(0);
+});
+
+test('поиск картинок: русское слово понимается и ложится на слово записи', async ({ page }) => {
+  await openDemo(page, '?lang=ru');
+  await menu(page, 'Поиск по картинкам');
+  const dlg = page.getByRole('dialog', { name: 'Поиск по картинкам' });
+  await dlg.locator('.pics-search input').first().fill('замок');
+  await expect(dlg.locator('.pics-tile').first()).toBeVisible();
+  await noBrokenImages(page);
+});
+
 test('«Найти»: честно про сеть и список «Хочу сыграть»', async ({ page }) => {
   await openDemo(page);
   await page.locator('.nav-tab', { hasText: 'Find' }).click();

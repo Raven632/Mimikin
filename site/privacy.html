@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="{{lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{t.pv.title}}</title>
+<meta name="description" content="{{t.pv.description}}">
+<meta name="theme-color" content="#080608">
+<link rel="canonical" href="{{canonical}}">
+{{#each langs}}<link rel="alternate" hreflang="{{.code}}" href="{{.url}}">
+{{/each}}<link rel="alternate" hreflang="x-default" href="{{siteUrl}}/privacy/">
+<link rel="icon" href="{{root}}favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="{{root}}apple-touch-icon.png">
+<link rel="stylesheet" href="{{root}}site.css">
+</head>
+<body>
+<header class="bar">
+  <div class="wrap">
+    <a class="brand" href="{{home}}" aria-label="Mimikin">
+      <svg viewBox="0 0 16 16" shape-rendering="crispEdges" aria-hidden="true"><path fill="currentColor" d="M3 1h10v1h-10zM2 2h12v1h-12zM1 3h14v1h-14zM1 4h14v1h-14zM2 5h1v1h-1zM4 5h1v1h-1zM6 5h1v1h-1zM9 5h1v1h-1zM11 5h1v1h-1zM13 5h1v1h-1zM4 7h2v1h-2zM10 7h2v1h-2zM3 9h1v1h-1zM5 9h1v1h-1zM7 9h2v1h-2zM10 9h1v1h-1zM12 9h1v1h-1zM1 10h14v1h-14zM1 11h6v1h-6zM9 11h6v1h-6zM1 12h6v1h-6zM9 12h6v1h-6zM1 13h14v1h-14zM1 14h14v1h-14z"/></svg>
+      <span>MIMIKIN</span>
+    </a>
+    <ul class="lang" aria-label="{{t.langLabel}}">
+      {{#each langs}}<li><a href="{{.href}}" hreflang="{{.code}}" lang="{{.code}}" aria-label="{{.name}}"{{{.current}}}>{{.short}}</a></li>
+      {{/each}}
+    </ul>
+  </div>
+</header>
+
+<main class="legal wrap">
+  <h1>{{t.pv.h1}}</h1>
+  <p class="legal-date">{{t.pv.updated}}</p>
+  <p>{{t.pv.intro}}</p>
+  {{#each sections}}<h2>{{.h}}</h2>
+  <p>{{{.p}}}</p>
+  {{/each}}
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>{{t.footer}}</p>
+    <a href="{{repo}}">GitHub</a>
+    <a href="{{repo}}/blob/main/CHANGELOG.md">{{t.changelog}}</a>
+    <a href="{{repo}}/blob/main/LICENSE">{{t.license}}</a>
+    <a href="./" aria-current="page">{{t.privacy}}</a>
+  </div>
+</footer>
+</body>
+</html>

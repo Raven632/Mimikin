@@ -27,7 +27,7 @@ function painters() {
     const from = text.indexOf('// ---------------------------------------------------------------- PNG без графических библиотек');
     const to = text.indexOf('// ---------------------------------------------------------------- игры');
     if (from < 0 || to < from) throw new Error('demo-library.js изменился: не нашёл границы рисовальщика (tests/demo/rich.js, painters)');
-    const body = `${text.slice(from, to)}\nreturn { cover, townShot, dungeonShot, battleShot, artwork, SCENES };`;
+    const body = `${text.slice(from, to)}\nreturn { cover, townShot, dungeonShot, battleShot, artwork, SCENES, Canvas, PAL, C, rng };`;
     return new Function('zlib', 'crypto', body)(require('zlib'), crypto);
 }
 
@@ -214,6 +214,9 @@ async function seed(dir) {
         await fsp.writeFile(path.join(dir, id, 'www', 'data', 'MapInfos.json'), JSON.stringify(infos));
     }
 
+    // ---- сцены и звуки четырёх игр (scenes.js): альбомы со сценарием, комната звуков
+    await require('./scenes.js').seed(dir, paint);
+
     // ---- моменты: хранилище сервера, часы — наши
     let clockNow = now;
     const marks = createMarkStore(savesDir, { now: () => clockNow });
@@ -286,9 +289,34 @@ async function seed(dir) {
         await db.run('INSERT OR REPLACE INTO wishlist (key, source, ref, url, info, addedAt) VALUES (?, ?, ?, ?, ?, ?)', [`itch:${url}`, 'itch', url, url, JSON.stringify(info), now - s.ago * DAY]);
     }
 
-    // ---- второй человек: Мира, только играет. Пароль «!» — не хэш, войти под ней нельзя
+    // ---- второй человек: Мира, только играет. Пароль «!» — не хэш, войти под ней нельзя. Свой список из пяти игр и картинка
+    // (JPEG 256 px, как отдаёт страница): «Настройки → Люди» без них показывали бы пустую карточку. Версия картинки — время
+    // файла (меняется адрес, когда файл заменили). Ставим её сами и крошечной: настоящее время записи было бы «временем» в
+    // ответе, которое демо обязано сдвигать (timeShift.js), а версия нужна только как метка кэша
+    const mira = 'u4d69726100000001';
     await db.run(`INSERT OR REPLACE INTO users (id, name, pass_hash, must_change, created_at, state, games_limited, may_request, may_download, may_upload, may_view)
-        VALUES ('u4d69726100000001', 'Mira', '!', 0, ?, '', 0, 0, 0, 0, 0)`, [now - 20 * DAY]);
+        VALUES (?, 'Mira', '!', 0, ?, '', 1, 0, 0, 0, 0)`, [mira, now - 20 * DAY]);
+    for (const id of ['Starfall_Inn', 'Marlows_Bakery_Quest', 'Dragon_Post_Office', 'Moonlit_Library', 'Tidecaller']) {
+        await db.run('INSERT OR REPLACE INTO user_game_access (user_id, game_id) VALUES (?, ?)', [mira, id]);
+    }
+    {
+        const { Canvas, C } = paint;
+        const cv = new Canvas(64, 64);
+        cv.rect(0, 0, 64, 64, C('#2b1830'));
+        cv.rect(0, 40, 64, 24, C('#1b1020'));
+        for (let i = 0; i < 18; i++) cv.set((i * 37) % 64, (i * 11) % 28, C('#f4efe0'));
+        cv.rect(14, 46, 36, 18, C('#3a5ea8'));                      // плечи
+        cv.rect(24, 40, 16, 8, C('#f2c9a0'));                       // шея
+        cv.disc(32, 28, 15, C('#f2c9a0'));                          // лицо
+        cv.rect(16, 10, 32, 12, C('#a8502a'));                      // волосы сверху
+        cv.rect(14, 16, 6, 28, C('#a8502a')); cv.rect(44, 16, 6, 28, C('#a8502a'));
+        cv.rect(25, 28, 3, 3, C('#2a1810')); cv.rect(37, 28, 3, 3, C('#2a1810'));
+        cv.rect(29, 36, 7, 1, C('#a83a3a'));
+        cv.rect(24, 48, 16, 4, C('#c9a84c'));                       // шарф
+        const avatars = require(path.join(API, 'src/utils/avatars.js'));
+        await avatars.put(mira, jpeg(cv.png(4), 256));
+        await fsp.utimes(avatars.fileOf(mira), 1, 1);
+    }
 
     // ---- игра «на полке»: файлы в корзине, карточка, сейвы, моменты и время остаются
     const trash = createTrash({ db: () => db, trashDir: path.join(dir, '_trash'), gamesDir: dir });

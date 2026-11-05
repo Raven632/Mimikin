@@ -22,6 +22,8 @@ export const needLogin = () => fail(401, 'Требуется авторизац�
 export const guardLogin = (ctx, body) => { if (signedOut()) throw needLogin(); return body; };
 
 export const gamesOf = (ctx) => ctx.store.read('/api/games');
+// Игры, которые видны в поиске и в «Сценах»: не на полке и не в корзине (у сервера так же, libraryScenes.js)
+export const visibleIds = async (ctx) => new Set((await gamesOf(ctx)).filter((g) => !g.shelf).map((g) => g.id));
 export async function gameOf(ctx, id) {
   const game = (await gamesOf(ctx)).find((g) => g.id === id);
   if (!game) throw fail(404, 'Игра не найдена');

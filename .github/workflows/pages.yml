@@ -51,7 +51,7 @@ jobs:
        (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     # Запись данных демо (сервер, ffmpeg, обход адресов) добавляет к сборке несколько минут
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
     - name: Скачивание кода
@@ -90,6 +90,22 @@ jobs:
     - name: Установка ffmpeg
       run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
 
+    # Модели поиска картинок по словам (≈360 МБ) качает tests/demo/models.sh с проверкой sha256; адреса прибиты к ревизиям
+    # в самом скрипте, поэтому ключ — его хэш: поменялась ревизия — кэш новый. Запись данных идёт без сети
+    - name: Кэш моделей поиска картинок
+      id: models-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/demo-cache/models
+        key: demo-models-${{ hashFiles('tests/demo/models.sh') }}
+
+    # Запускается всегда: при совпадении сумм sha256 скрипт ничего не качает, а испорченный или обрезанный файл кэша
+    # скачивает заново — запись не получит молча другие модели
+    - name: Модели поиска картинок
+      env:
+        DEMO_CACHE: ${{ runner.temp }}/demo-cache
+      run: timeout 1800 tests/demo/models.sh
+
     # Данные демо не лежат в git: сервер этого же коммита записывает их заново (tests/demo/record.js), и они не расходятся
     # с интерфейсом. Запись ждёт путей, как в контейнере образа (/app/api, /frontend-demo, /games): те же пути
     # попадают в ответы («Настройки» показывают /games), и данные выходят теми же байтами, что у tests/demo/record.sh
@@ -100,7 +116,7 @@ jobs:
         sudo ln -s "$GITHUB_WORKSPACE" /app
         sudo ln -s "$GITHUB_WORKSPACE/frontend/demo" /frontend-demo
         sudo mkdir /games && sudo chown "$(id -u):$(id -g)" /games
-        DEMO_OUT="$GITHUB_WORKSPACE/frontend/demo-data" timeout 900 node tests/demo/record.js
+        DEMO_MODELS="$RUNNER_TEMP/demo-cache/models" DEMO_OUT="$GITHUB_WORKSPACE/frontend/demo-data" timeout 1500 node tests/demo/record.js
 
     - name: Сборка демо
       working-directory: ./frontend

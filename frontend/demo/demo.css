@@ -29,6 +29,12 @@
 
 .demo-mark[aria-expanded="true"] { border-color: var(--gold); }
 
+/* Плеер сцены — на весь экран, а его панель с кнопками на телефоне встаёт в тот же нижний левый угол: знак закрывал
+   бы кнопки, и нажать их под ним нельзя. Пока плеер открыт, знак прячется (закрыли — вернулся) */
+@media (max-width: 560px) {
+  body:has(.scene .scene-bar) .demo-bar { display: none; }
+}
+
 @media (hover: hover) {
   .demo-mark:hover { border-color: var(--gold); }
 }

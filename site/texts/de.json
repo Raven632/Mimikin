@@ -89,5 +89,43 @@
  "copyFailed": "Markieren und kopieren",
  "footer": "Mimikin ist ein Ein-Personen-Projekt, freie Software unter AGPL-3.0. © 2026 Raven.",
  "changelog": "Änderungsverlauf",
- "license": "Lizenz"
+ "license": "Lizenz",
+ "privacy": "Datenschutz",
+ "pv": {
+  "title": "Datenschutzerklärung: Mimikin",
+  "description": "Welche Daten beim Besuch dieser Seite und des Demos anfallen.",
+  "h1": "Datenschutzerklärung",
+  "updated": "Stand: November 2026",
+  "intro": "Diese Erklärung gilt für diese Seite und das Demo unter raven632.github.io/Mimikin. Wer Mimikin auf einem eigenen Server betreibt, ist für diese Installation selbst verantwortlich.",
+  "sections": [
+   {
+    "h": "Verantwortlich",
+    "p": "Raven, Entwickler von Mimikin. Kontakt über das GitHub-Profil <a href=\"https://github.com/Raven632\">github.com/Raven632</a>."
+   },
+   {
+    "h": "Hosting bei GitHub Pages",
+    "p": "Seite und Demo liegen auf GitHub Pages, einem Dienst von GitHub, Inc. (88 Colin P. Kelly Jr. Street, San Francisco, CA 94107, USA). Beim Aufruf überträgt Ihr Browser die Daten, die zum Ausliefern nötig sind, darunter Ihre IP-Adresse. Ohne sie lässt sich die Seite nicht ausliefern. GitHub speichert die IP-Adresse nach eigenen Angaben aus Sicherheitsgründen, wie lange, legt GitHub fest. Ich habe auf diese Protokolle keinen Zugriff und bekomme keine Daten über Besucher."
+   },
+   {
+    "h": "Rechtsgrundlage und Übermittlung in die USA",
+    "p": "Rechtsgrundlage ist Art. 6 Abs. 1 lit. f DSGVO. Das berechtigte Interesse: die Seite sicher und zuverlässig ausliefern. Dabei können Daten in die USA übermittelt werden. GitHub stützt sich dafür auf das EU-US Data Privacy Framework und auf Standardvertragsklauseln der EU-Kommission. Mehr dazu in der <a href=\"https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement\">Datenschutzerklärung von GitHub</a>."
+   },
+   {
+    "h": "Keine Cookies, keine Analyse",
+    "p": "Die Seite setzt keine Cookies und nutzt keine Analyse-, Werbe- oder Tracking-Dienste. Schriften und Bilder liegen auf derselben Seite, von fremden Servern wird nichts geladen."
+   },
+   {
+    "h": "Das Demo",
+    "p": "Das Demo läuft ganz in Ihrem Browser und sendet nichts an mich oder an Dritte: Alle Antworten sind vorab aufgenommen und Teil der Seite. Was Sie im Demo ändern, gilt bis zum Neuladen der Seite. Ansicht, Filter und Sprache merkt sich Ihr Browser im lokalen Speicher (localStorage, sessionStorage) auf Ihrem Gerät, und von dort gehen sie nirgendwohin. »Von vorn beginnen« in der Leiste des Demos löscht sie, ebenso die Einstellungen Ihres Browsers. Diese Speicherung ist für das Demo, das Sie aufrufen, unbedingt erforderlich (§ 25 Abs. 2 Nr. 2 TDDDG)."
+   },
+   {
+    "h": "Links zu GitHub",
+    "p": "Links zum Quellcode, zum Änderungsverlauf und zur Lizenz führen zu GitHub. Dort gilt die Datenschutzerklärung von GitHub."
+   },
+   {
+    "h": "Ihre Rechte",
+    "p": "Sie haben das Recht auf Auskunft, Berichtigung, Löschung, Einschränkung der Verarbeitung, Datenübertragbarkeit (Art. 15–20 DSGVO), das Recht, der Verarbeitung nach Art. 6 Abs. 1 lit. f zu widersprechen (Art. 21 DSGVO), und können sich bei einer Datenschutz-Aufsichtsbehörde beschweren (Art. 77 DSGVO). Automatisierte Entscheidungen oder Profiling gibt es nicht. Da ich keine Besucherdaten erhalte, habe ich über Sie in der Regel nichts gespeichert. Fragen zu den Protokollen von GitHub richten Sie am besten direkt an GitHub."
+   }
+  ]
+ }
 }

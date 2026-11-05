@@ -4,7 +4,7 @@
 
 const FIELDS = new Set([
   'addedAt', 'lastPlayed', 'at', 'createdAt', 'updatedAt', 'checkedAt', 'builtAt', 'deletedAt', 'nextPurgeAt',
-  'retryAt', 'startedAt', 'seenAt', 'purgeAt', 'until',
+  'retryAt', 'startedAt', 'seenAt', 'purgeAt', 'until', 'savedAt',
 ]);
 
 // Время сервера — миллисекунды с 1970 года (около 1.8e12). Секунды (около 1.8e9) тоже встречаются: сдвигаем в их мере.

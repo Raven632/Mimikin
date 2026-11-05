@@ -93,5 +93,43 @@
  "nfTitle": "Page not found: Mimikin",
  "nfH": "This page does not exist",
  "nfP": "The address may be misspelled, or the page moved. The project page and the live demo are still here.",
- "nfHome": "Project page"
+ "nfHome": "Project page",
+ "privacy": "Privacy",
+ "pv": {
+  "title": "Privacy policy: Mimikin",
+  "description": "What data comes up when you visit this page and the demo.",
+  "h1": "Privacy policy",
+  "updated": "Last updated: November 2026",
+  "intro": "This covers this page and the demo at raven632.github.io/Mimikin. If you run Mimikin on your own server, you are responsible for that installation.",
+  "sections": [
+   {
+    "h": "Who is responsible",
+    "p": "Raven, the developer of Mimikin. You can reach me through my GitHub profile: <a href=\"https://github.com/Raven632\">github.com/Raven632</a>."
+   },
+   {
+    "h": "Hosting on GitHub Pages",
+    "p": "The page and the demo are hosted on GitHub Pages, a service of GitHub, Inc. (88 Colin P. Kelly Jr. Street, San Francisco, CA 94107, USA). When you open the page, your browser sends what is needed to deliver it, including your IP address; without it the page cannot be delivered. GitHub says it stores IP addresses for security purposes and decides how long. I have no access to these logs and receive no data about visitors."
+   },
+   {
+    "h": "Legal basis and transfer to the USA",
+    "p": "The legal basis is Art. 6(1)(f) GDPR: the legitimate interest in delivering the page reliably and securely. Data may be transferred to the USA. For this GitHub relies on the EU-US Data Privacy Framework and the European Commission’s standard contractual clauses. Details are in <a href=\"https://docs.github.com/en/site-policy/privacy-policies/github-general-privacy-statement\">GitHub’s privacy statement</a>."
+   },
+   {
+    "h": "No cookies, no analytics",
+    "p": "This page sets no cookies and uses no analytics, advertising or tracking services. Fonts and images are served from this site, nothing is loaded from other servers."
+   },
+   {
+    "h": "The demo",
+    "p": "The demo runs entirely in your browser and sends nothing to me or anyone else: all answers were recorded in advance and are part of the page. Whatever you change in the demo lasts until you reload the page. Your browser keeps the view, filters and language in its storage (localStorage, sessionStorage) on your device, and they never leave it. Start over in the demo bar deletes them, and so do your browser settings. This storage is strictly necessary for the demo you opened (§ 25(2) no. 2 of the German TDDDG)."
+   },
+   {
+    "h": "Links to GitHub",
+    "p": "Links to the source code, changelog and license lead to GitHub, where GitHub’s privacy statement applies."
+   },
+   {
+    "h": "Your rights",
+    "p": "You have the right of access, rectification, erasure, restriction of processing, data portability (Art. 15–20 GDPR), the right to object to processing under Art. 6(1)(f) (Art. 21 GDPR), and you can complain to a data protection supervisory authority (Art. 77 GDPR). There is no automated decision-making or profiling. Since I receive no visitor data, I usually hold nothing about you. Questions about GitHub’s logs are best sent to GitHub directly."
+   }
+  ]
+ }
 }
