@@ -67,7 +67,7 @@ jobs:
 
     # Node 22 — как в образе (Dockerfile): запись данных гоняет настоящий сервер, и версия должна совпадать
     - name: Настройка Node.js 22
-      uses: actions/setup-node@v4
+      uses: actions/setup-node@v7
       with:
         node-version: '22'
         cache: npm
