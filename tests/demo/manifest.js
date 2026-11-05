@@ -39,13 +39,15 @@ const GLOBAL = [
     { path: '/api/itch/meta' },
     { path: '/api/recommend/library' },
     { path: '/api/recommend/dismissed' },
-    { path: '/api/pictures/status' },
+    // same: сервер в проверке (contract.test.mjs) идёт без разбора картинок, у записанного он включён — скорость есть только там
+    { path: '/api/pictures/status', same: /analysis\.speed/ },
     { path: '/api/pictures/games' },
     { path: '/api/pictures/feed' },
     { path: '/api/pictures/hidden' },
     { path: '/api/favorites' },
     // Окно «Сцены»: страница шлёт ещё per (по ширине экрана) и фильтры. Здесь — основа, остальное считает демо в браузере
-    { path: '/api/scenes', q: ['kind'], asks: [{ kind: 'scenes' }, { kind: 'dialogue' }] },
+    // late — после сборки галерей: список сцен библиотеки строится из них, а в первый миг он пуст
+    { path: '/api/scenes', q: ['kind'], asks: [{ kind: 'scenes' }, { kind: 'dialogue' }], late: true },
 ];
 
 // По каждой игре (id подставляется). Что вернуло не 2xx (игра на полке, нет файлов) — не записывается, без ошибки
@@ -69,6 +71,21 @@ const PER_GAME = [
     { path: '/api/games/{id}/lookup' },
 ];
 
+// Сцена игры (плеер галереи): по альбому со сценарием, номеру сцены в нём и языку интерфейса. lang (выбранный человеком язык
+// реплик) страница шлёт, только когда он выбран, — в записи его нет. Ключ — q; язык интерфейса задаёт UI
+const SCENE = { path: '/api/gallery/{id}/scene', q: ['key', 'n', 'ui'] };
+const UI = ['en', 'ru', 'de'];
+
+// Поиск по репликам: слова, на которые записан ответ (окно «Поиск по репликам» шлёт limit=60). Слова — из реплик сцен
+// tests/demo/scenes.js; другое слово демо ответит заметкой, что знает только эти. Короче трёх букв сервер не принимает
+const LINE_SEARCH = { path: '/api/lines/search', q: ['q'] };
+const LINE_WORDS = ['inn', 'lantern', 'stars', 'soup', 'lamp', 'winter', 'gate', 'airship', 'whale', 'festival'];
+
+// Поиск картинок по словам (D16): ответ записан на фиксированный список. Слова ложатся рядом с кадрами через CLIP, поэтому
+// список выбран так, чтобы у каждого слова нашлись кадры демо-игр (замок, море, снег, ночь, сундук, лес, маяк)
+const WORD_SEARCH = { path: '/api/pictures/search', q: ['q'] };
+const PICTURE_WORDS = ['castle', 'sea', 'snow', 'night', 'chest', 'forest', 'lighthouse'];
+
 // Для каждого человека, кроме владельца
 const PER_USER = [{ path: '/api/users/{id}/games' }];
 
@@ -79,6 +96,7 @@ const MUST = {
     users: 1,            // не считая владельца
     wishlist: 5,
     favorites: 6,
+    scenes: 24,          // 4 игры × 2 сцены × 3 языка интерфейса
 };
 
 // Числа, которые зависят от машины записи, подменяются выдуманными: размер диска хоста не должен попасть в публичный сайт
@@ -87,6 +105,13 @@ const FAKE_DISK = { total: 2000 * GB, free: 1380 * GB };
 function scrub(path, body) {
     if (path === '/api/storage') return { ...body, free: FAKE_DISK.free, ...(body.total !== undefined ? { total: FAKE_DISK.total } : {}) };
     if (path === '/api/games/space') return { ...body, disk: { ...body.disk, free: FAKE_DISK.free, total: FAKE_DISK.total } };
+    // В записи нет модели тегов (демо ищет по словам только моделью CLIP): без неё разбор помечен «не вышло», а в демо он
+    // работает — как на сервере, где обе модели на месте
+    // tagged и faved страница без них читает как «есть избранное, тегов нет» — это и верно; отдельно записывать их незачем
+    if (path === '/api/pictures/status') {
+        const { tagged, faved, ...rest } = body;
+        return rest.analysis?.state === 'failed' ? { ...rest, analysis: { ...rest.analysis, state: 'done' } } : rest;
+    }
     if (path === '/api/settings/problem-report') return { ...body, report: fakeReport(body.report) };
     return body;
 }
@@ -107,4 +132,11 @@ function fakeReport(text) {
     }).join('\n');
 }
 
-module.exports = { GLOBAL, PER_GAME, PER_USER, MUST, scrub, FAKE_DISK };
+// Порядок плиток в ответе поиска картинок зависит от рантайма и процессора: у близких оценок третий знак может разойтись.
+// Оценку округляем до сотых и при равенстве идём по игре и файлу — на другой машине выйдет та же выдача, кроме случая,
+// когда оценка лежит точно на границе округления. Состав (limit=60 при 23 кадрах — все) от порядка не зависит
+const steadyResults = (rows) => rows
+  .map((r) => ({ ...r, score: Math.round(r.score * 100) / 100 }))
+  .sort((a, b) => b.score - a.score || (a.game < b.game ? -1 : a.game > b.game ? 1 : 0) || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0));
+
+module.exports = { steadyResults, GLOBAL, PER_GAME, PER_USER, SCENE, UI, LINE_SEARCH, LINE_WORDS, WORD_SEARCH, PICTURE_WORDS, MUST, scrub, FAKE_DISK };

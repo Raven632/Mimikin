@@ -2,6 +2,8 @@
 # Запись данных демо-сайта (описание — в шапке record.js). Из корня репозитория:
 #   tests/demo/record.sh [папка]          — по умолчанию frontend/demo-data
 #   DEMO_NO_BUILD=1 tests/demo/record.sh  — взять готовый образ demo-record-app, не собирать заново
+#   DEMO_CACHE=<папка>                    — где лежат модели поиска картинок (models.sh качает их туда один раз)
+#   DEMO_NO_WORDS=1                       — записать без поиска картинок по словам (модели не нужны)
 # Контейнер без сети (--network none): сервер внутри ходит только сам к себе. Результат забираем через docker cp, а не
 # через общую папку: в CI файлы из контейнера иначе достались бы root'у, и их нечем было бы стереть
 set -euo pipefail
@@ -13,12 +15,16 @@ NOW="${DEMO_NOW:-2026-10-03T12:00:00Z}"
 
 trap 'docker rm -f "$NAME" >/dev/null 2>&1 || true' EXIT
 [ -n "${DEMO_NO_BUILD:-}" ] || docker build -q -t "$IMAGE" . >/dev/null
+# Модели — единственное, что берётся из сети, и только в этом шаге; контейнер записи идёт без сети и видит их только на чтение
+MODELS_ARGS=()
+if [ "${DEMO_NO_WORDS:-}" != 1 ]; then MODELS_ARGS=(-v "$(tests/demo/models.sh)":/models:ro); fi
 
 docker create --name "$NAME" --network none \
-  -e TZ=UTC -e "DEMO_NOW=$NOW" -e DEMO_STRICT="${DEMO_STRICT:-}" -e DEMO_VERBOSE="${DEMO_VERBOSE:-}" \
+  -e TZ=UTC -e "DEMO_NOW=$NOW" -e DEMO_STRICT="${DEMO_STRICT:-}" -e DEMO_VERBOSE="${DEMO_VERBOSE:-}" -e DEMO_NO_WORDS="${DEMO_NO_WORDS:-}" \
+  ${MODELS_ARGS[@]+"${MODELS_ARGS[@]}"} \
   -v "$PWD/tests/demo:/demo:ro" -v "$PWD/frontend/demo:/frontend-demo:ro" \
   "$IMAGE" node /demo/record.js >/dev/null
-timeout 900 docker start -a "$NAME"
+timeout 1500 docker start -a "$NAME"
 
 rm -rf "$OUT.new"
 mkdir -p "$OUT.new"

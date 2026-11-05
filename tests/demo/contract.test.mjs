@@ -163,6 +163,26 @@ test('чтение: записанные ответы по форме те же,
   }
 });
 
+test('сцены: плеер и поиск по репликам', async () => {
+  // Сцена и слова — из записи (там ровно то, что у сервера на этой же библиотеке); сервер должен ответить тем же видом
+  const rows = (await fake('GET', '/api/scenes?kind=scenes')).body.games.flatMap((g) => g.rows.map((r) => ({ id: g.id, key: r.key, n: r.n })));
+  assert.ok(rows.length, 'в записи нет ни одной сцены');
+  const one = rows[0];
+  for (const ui of ['en', 'ru', 'de']) {
+    for (let i = 0; i < 60 && (await real('GET', `/api/gallery/${one.id}`)).body?.state !== 'ready'; i++) await sleep(500);
+    await both('GET', `/api/gallery/${encodeURIComponent(one.id)}/scene?key=${encodeURIComponent(one.key)}&n=${one.n}&ui=${ui}`);
+  }
+  // Поиск ждёт, пока сервер соберёт реплики всех игр: до того он отвечает «ещё собирается» без результатов
+  for (let i = 0; i < 60; i++) {
+    const r = await real('GET', `/api/lines/search?q=${manifest.LINE_WORDS[0]}&limit=60`);
+    if (r.body?.games?.length) break;
+    await sleep(500);
+  }
+  for (const word of manifest.LINE_WORDS.slice(0, 3)) await both('GET', `/api/lines/search?q=${word}&limit=60`, undefined, { ignore: /indexed|library|building/ });
+  // Слишком короткое слово: тот же отказ (слово без записи — только у демо, сервер просто ничего не найдёт)
+  await both('GET', '/api/lines/search?q=ab&limit=60');
+});
+
 test('время: ни одно записанное время не осталось без сдвига', () => {
   // Сдвигаем копию на заведомо большую дельту: число из окна «год до записи» (и два дня после), которое не сдвинулось,
   // лежит в поле, которого нет в списке timeShift.js

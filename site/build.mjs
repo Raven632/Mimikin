@@ -1,5 +1,5 @@
 // Сборка страницы проекта: node site/build.mjs [папка], по умолчанию _site в корне репозитория.
-// Один шаблон и тексты en/ru/de → index.html, ru/, de/ и 404.html. Без зависимостей, чтобы CI не ставил лишнего.
+// Один шаблон и тексты en/ru/de → index.html, ru/, de/, privacy/ у каждого языка и 404.html. Без зависимостей, чтобы CI не ставил лишнего.
 // Не чистит папку: туда же CI кладёт демо (_site/demo), порядок шагов не должен иметь значения.
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -56,8 +56,21 @@ const copy = (from, rel) => {
   const f = join(out, rel); mkdirSync(dirname(f), { recursive: true }); copyFileSync(from, f);
 };
 
+// Переключатель языка ведёт на ту же страницу (page — '' или 'privacy/') на другом языке.
+// Ссылки относительные, чтобы работали и при локальном просмотре
+function langsFor(L, page) {
+  const up = (L.dir ? '../' : '') + (page ? '../' : '');
+  return LANGS.map((M) => ({
+    ...M,
+    url: `${siteUrl}/${M.dir}${page}`,
+    href: M.code === L.code ? './' : up + M.dir + page,
+    current: M.code === L.code ? ' aria-current="page"' : '',
+  }));
+}
+
 const sizes = SHOTS.map((f) => webpSize(join(SITE, 'img', f)));
 const template = read('template.html');
+const privacy = read('privacy.html');
 const en = JSON.parse(read('texts/en.json'));
 
 for (const L of LANGS) {
@@ -70,13 +83,7 @@ for (const L of LANGS) {
     current: i === 0 ? ' aria-current="true"' : '',
     lazy: i === 0 ? '' : ' loading="lazy"',
   }));
-  const langs = LANGS.map((M) => ({
-    ...M,
-    url: `${siteUrl}/${M.dir}`,
-    // Ссылки на соседние страницы — относительные, чтобы работали и при локальном просмотре
-    href: M.code === L.code ? './' : (L.dir ? '../' : '') + M.dir,
-    current: M.code === L.code ? ' aria-current="page"' : '',
-  }));
+  const langs = langsFor(L, '');
   const html = render(template, {
     t, lang: L.code, root, siteUrl, repo, version, langs, shots, facts: t.facts, points: t.points,
     canonical: `${siteUrl}/${L.dir}`,
@@ -85,6 +92,13 @@ for (const L of LANGS) {
     demoHref: `${root}demo/?lang=${L.code}`,
   });
   write(`${L.dir}index.html`, html);
+
+  if (t.pv.sections.length !== en.pv.sections.length) throw new Error(`${L.code}: разделов о защите данных не столько, сколько в en`);
+  write(`${L.dir}privacy/index.html`, render(privacy, {
+    t, lang: L.code, root: `${root}../`, siteUrl, repo, sections: t.pv.sections, langs: langsFor(L, 'privacy/'),
+    canonical: `${siteUrl}/${L.dir}privacy/`,
+    home: '../',
+  }));
 }
 
 write('404.html', render(read('404.html'), { t: en, siteUrl }));

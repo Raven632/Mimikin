@@ -2,7 +2,11 @@
 // Запись данных для демо-сайта. Работает ВНУТРИ контейнера с настоящим образом библиотеки, без сети (tests/demo/record.sh):
 //   1. демо-библиотека (api/scripts/demo-library.js, как есть) и её дополнение tests/demo/rich.js;
 //   2. настоящий сервер этого же коммита, OFFLINE=1, память вместо Redis, часы заморожены на DEMO_NOW (clock.js);
-//   3. обход адресов из manifest.js: каждый GET, который спрашивает страница, и все картинки — в файлы.
+//   3. обход адресов из manifest.js: каждый GET, который спрашивает страница, и все картинки и звуки — в файлы;
+//      сцены (scenes.js: у каждой игры из SCENE_GAMES должен быть альбом со сценарием, иначе запись падает), ответы поиска
+//      по репликам на список слов;
+//   4. слова для поиска картинок (D16): второй запуск сервера на копии библиотеки с разбором картинок и моделями CLIP из
+//      MODELS (tests/demo/models.sh качает их один раз в кэш; сеть нужна только там, сам запуск без сети).
 // Ответы сервера не пишутся руками: форма ответов верна по построению и сама следует за интерфейсом при каждой сборке.
 //
 // Что получается в DEMO_OUT (в репозитории это frontend/demo-data/, в git не кладётся, правила — в frontend/demo/router.js):
@@ -20,6 +24,7 @@ const zlib = require('zlib');
 const { spawn, spawnSync } = require('child_process');
 const { pathToFileURL } = require('url');
 const manifest = require('./manifest.js');
+const { SCENE_GAMES } = require('./scenes.js');
 
 const HERE = __dirname;
 const API = process.env.DEMO_API || '/app/api';
@@ -35,6 +40,9 @@ const USER = 'demo';
 const PASS = 'demo-pass-123';
 const STRICT = process.env.DEMO_STRICT === '1';
 const SERVER_LOG = process.env.DEMO_SERVER_LOG || '/tmp/demo-server.log';
+// Модели поиска картинок (tests/demo/models.sh кладёт их в кэш, record.sh монтирует папку сюда только для чтения)
+const MODELS = process.env.DEMO_MODELS || '/models';
+const WORDS_LIB = '/tmp/demo-words-lib';
 
 const sha = (buf) => crypto.createHash('sha1').update(buf).digest('hex');
 // Имя файла: номер по порядку ключей и пять цифр от содержимого. В шестнадцатеричном имени среди 250 файлов почти наверняка
@@ -73,18 +81,27 @@ function seedLibrary() {
     }
 }
 
-async function startServer() {
-    const log = fs.openSync(SERVER_LOG, 'w');
-    const child = spawn('node', ['--require', path.join(HERE, 'clock.js'), 'server.js'], { cwd: API, env: childEnv, stdio: ['ignore', log, log] });
+// Второй запуск (слова для картинок) — на копии библиотеки и с моделями; после первого сервера, тот же порт
+async function startServer({ lib = LIB, env = {}, drop = [], logFile = SERVER_LOG } = {}) {
+    const log = fs.openSync(logFile, 'w');
+    const full = { ...childEnv, GAMES_DIR: lib, ...env };
+    for (const name of drop) delete full[name];
+    const child = spawn('node', ['--require', path.join(HERE, 'clock.js'), 'server.js'], { cwd: API, env: full, stdio: ['ignore', log, log] });
     let exited = false;
     child.on('exit', () => { exited = true; });
+    child.done = new Promise((resolve) => child.on('exit', resolve));
     for (let i = 0; i < 90; i++) {
         if (exited) break;
         try { if ((await fetch(`${BASE}/api/setup/status`)).ok) return child; } catch { /* ещё не слушает */ }
         await sleep(1000);
     }
     child.kill();
-    throw new Error(`сервер не поднялся за 90 с:\n${fs.readFileSync(SERVER_LOG, 'utf8').slice(-1500)}`);
+    throw new Error(`сервер не поднялся за 90 с:\n${fs.readFileSync(logFile, 'utf8').slice(-1500)}`);
+}
+// Остановить и дождаться: порт и база нужны следующему
+async function stopServer(child) {
+    child.kill();
+    await Promise.race([child.done, sleep(15000)]);
 }
 
 let cookie = '';
@@ -118,28 +135,90 @@ async function loadRouter() {
     }
 }
 
+// Слова для поиска картинок. Первый запуск шёл без разбора картинок (PICTURE_PASS=0): с ним сервер перекроил бы альбомы по
+// ответам модели, а записанные галереи должны остаться теми, что собраны выше. Поэтому здесь — копия библиотеки, свой сервер
+// с включённым разбором и модели из MODELS. Сеть по-прежнему не нужна: модели лежат на диске, сервер их не качает (OFFLINE=1)
+async function recordWords({ keys, lazy, media, put, missed }) {
+    const names = ['clip-vit-b32-vision-q8.onnx', 'clip-multilingual-text-fp16.onnx', 'clip-multilingual-dense.safetensors', 'clip-multilingual-vocab.txt'];
+    for (const n of names) if (!fs.existsSync(path.join(MODELS, n))) throw new Error(`нет модели ${n} в ${MODELS}: tests/demo/models.sh скачивает их один раз (DEMO_NO_WORDS=1 — записать без слов)`);
+    fs.rmSync(WORDS_LIB, { recursive: true, force: true });
+    fs.cpSync(LIB, WORDS_LIB, { recursive: true });
+    fs.mkdirSync(path.join(WORDS_LIB, '_media', '_models'), { recursive: true });
+    for (const n of names) fs.symlinkSync(path.join(MODELS, n), path.join(WORDS_LIB, '_media', '_models', n));
+    // PICTURE_PASS убираем из среды: заданное в среде «Настройки» не меняют (409), а разбор включаем как человек, переключателем
+    const server = await startServer({ lib: WORDS_LIB, drop: ['PICTURE_PASS'], logFile: `${SERVER_LOG}.words` });
+    try {
+        await login();
+        const on = await fetch(`${BASE}/api/settings/options`, { method: 'POST', headers: { 'content-type': 'application/json', cookie }, body: JSON.stringify({ name: 'picture_analysis', value: true }) });
+        if (!on.ok) throw new Error(`разбор картинок не включился: ${on.status} ${(await on.text()).slice(0, 200)}`);
+        // Разбор кадров (векторы) идёт сам: ждём, пока очередь опустеет
+        let status = null;
+        let seen = false;
+        for (let i = 0; i < 600; i++) {
+            status = await getJson('/api/pictures/status?peek=1&tagged=1');
+            if (status?.pass) seen = true;
+            if (status?.analysis?.on && !status.pass && (seen || i > 20)) break;
+            await sleep(1000);
+        }
+        if (!status?.analysis?.on || status.pass) throw new Error(`разбор картинок не закончился: ${JSON.stringify(status)}`);
+        // Слова. Первый ответ может быть «preparing»: модель текста открывается секунды
+        for (const word of manifest.PICTURE_WORDS) {
+            const url = `/api/pictures/search?q=${encodeURIComponent(word)}&limit=60&from=0`;
+            let body;
+            for (let i = 0; i < 120; i++) {
+                const r = await get(url);
+                if (r.status === 200) { body = JSON.parse(r.buf.toString('utf8')); break; }
+                if (r.status !== 503 || !/preparing/.test(r.buf.toString('utf8'))) throw new Error(`слово «${word}»: ответ ${r.status} ${r.buf.toString('utf8').slice(0, 200)}`);
+                await sleep(500);
+            }
+            if (!body?.results?.length) throw new Error(`слово «${word}»: ни одного кадра — слово или картинки надо поправить (manifest.js, scenes.js); ответ ${JSON.stringify(body)}, разбор ${JSON.stringify(status)}\n${fs.readFileSync(`${SERVER_LOG}.words`, 'utf8').slice(-1500)}`);
+            body.results = manifest.steadyResults(body.results);
+            put(manifest.WORD_SEARCH, url, body);
+            // Кадры из ответа: миниатюры берёт страница (PictureSearch, thumb); в первом проходе их брали у всех альбомов,
+            // но кадр мог быть не из альбома (@cg) — добираем со второго сервера
+            for (const row of body.results) {
+                const thumb = `/api/gallery/${encodeURIComponent(row.game)}/thumb?f=${encodeURIComponent(row.file ?? row.f)}`;
+                if (!(keys.mediaKey(thumb) in media)) {
+                    const r = await get(thumb);
+                    if (r.status === 200) media[keys.mediaKey(thumb)] = { buf: r.buf, ext: extOf(r.type, thumb) };
+                    else missed.push(thumb);
+                }
+            }
+        }
+        // Состояние разбора — как его видит человек с включённым разбором. Читаем после слов: модель текста уже открыта, и
+        // «готово» в нём правда. Ленту и теги не берём: без модели тегов они пусты, а лента ещё и тасует кадры случайно —
+        // они остаются из первого запуска
+        const url = '/api/pictures/status?peek=1&tagged=1';
+        const body = await getJson(url);
+        if (body === undefined) throw new Error('состояние разбора картинок не прочиталось');
+        put({ path: '/api/pictures/status' }, url, body, true);
+    } finally {
+        await stopServer(server);
+    }
+}
+
 async function main() {
     const keys = await import(pathToFileURL(path.join(FE, 'keys.js')).href);
     const router = await loadRouter();
     say(`библиотека: ${LIB}, часы: ${NOW}`);
     seedLibrary();
     const server = await startServer();
-    const watchdog = setTimeout(() => { say('запись не уложилась в 10 минут'); server.kill(); process.exit(3); }, 600000);
+    const watchdog = setTimeout(() => { say('запись не уложилась в 20 минут'); server.kill(); process.exit(3); }, 1200000);
     try {
         await login();
-        await record(keys, router);
+        await record(keys, router, server);
     } finally {
         clearTimeout(watchdog);
         server.kill();
     }
 }
 
-async function record(keys, router) {
+async function record(keys, router, server) {
     const rec = {};      // ключ → ответ (для boot.json)
     const lazy = {};     // ключ → ответ (потом файлами)
     const media = {};    // ключ → { url, buf, ext }
     const missed = [];
-    const put = (entry, url, body) => {
+    const put = (entry, url, body, replace = false) => {
         const [pathname, search = ''] = url.split('?');
         const hit = router?.match('GET', pathname);
         const q = hit?.route.kind === 'rec' ? hit.route.q : (entry.q || []);
@@ -152,7 +231,7 @@ async function record(keys, router) {
         // Маршрут может не различать вопросы, которые различает manifest.js (trash и trash?count=1 при q: []): тогда
         // остаётся первый, самый общий — он идёт в списке первым
         const into = entry.boot ? rec : lazy;
-        if (!(key in into)) into[key] = manifest.scrub(pathname, body);
+        if (replace || !(key in into)) into[key] = manifest.scrub(pathname, body);
     };
     const one = async (entry, url) => {
         const body = await getJson(url);
@@ -171,7 +250,7 @@ async function record(keys, router) {
 
     // ---- общие ответы
     const bodies = {};
-    for (const entry of manifest.GLOBAL) {
+    for (const entry of manifest.GLOBAL.filter((e) => !e.late)) {
         for (const url of withAsks(entry)) {
             const body = await one(entry, url);
             if (body !== undefined && url === entry.path) bodies[entry.path] = body;
@@ -189,6 +268,7 @@ async function record(keys, router) {
     // ---- по играм
     const mediaUrls = new Set();
     const addMedia = (url) => { if (url) mediaUrls.add(url); };
+    const galleries = {};   // id → оглавление галереи (по нему идут сцены)
     for (const g of games) {
         addMedia(`/${g.cover}`);
         for (const s of g.screens || []) addMedia(`/${s}`);
@@ -206,6 +286,7 @@ async function record(keys, router) {
                 if (body === undefined) { missed.push(url); continue; }
                 if (body.state !== 'ready') throw new Error(`галерея ${g.id} не собралась: ${body.state}`);
                 put(entry, url, body);
+                galleries[g.id] = body;
                 for (const album of body.albums || []) {
                     for (const f of album.files || []) {
                         addMedia(`/api/gallery/${encodeURIComponent(g.id)}/thumb?f=${encodeURIComponent(f)}`);
@@ -216,6 +297,10 @@ async function record(keys, router) {
             }
             const body = await one(entry, url);
             if (body === undefined) continue;
+            // Звуки: каждый файл можно проиграть и в комнате звуков, и в сцене
+            if (entry.path === '/api/gallery/{id}/sounds') {
+                for (const album of body.albums || []) for (const f of album.files || []) addMedia(`/api/gallery/${encodeURIComponent(g.id)}/audio?f=${encodeURIComponent(f)}`);
+            }
             if (entry.path === '/api/marks/{id}') {
                 for (const m of body) {
                     if (m.thumb) addMedia(`/api/marks/${encodeURIComponent(g.id)}/${m.id}/thumb`);
@@ -227,13 +312,73 @@ async function record(keys, router) {
             }
         }
     }
-    for (const u of people) for (const entry of manifest.PER_USER) await one(entry, entry.path.replace('{id}', encodeURIComponent(u.id)));
+    // ---- ответы, что строятся из галерей (список сцен библиотеки): теперь, когда они собраны
+    for (const entry of manifest.GLOBAL.filter((e) => e.late)) {
+        for (const url of withAsks(entry)) {
+            const body = await one(entry, url);
+            // Плитки сцен показывают обложки и кадры альбомов — их картинки уже в mediaUrls (все файлы альбомов)
+            if (body === undefined) continue;
+        }
+    }
+
+    // ---- сцены: по альбому со сценарием, номеру сцены и языку интерфейса. У игр из SCENE_GAMES сцены обязательны
+    for (const g of games) {
+        const scripted = (galleries[g.id]?.albums || []).filter((a) => a.script);
+        if (SCENE_GAMES.includes(g.id)) {
+            if (!scripted.length) throw new Error(`у ${g.id} нет альбома со сценарием (script): сцены не собрались, смотрите tests/demo/scenes.js`);
+            const sounds = lazy[keys.reqKey(`/api/gallery/${g.id}/sounds`, {}, [])];
+            if (!sounds?.count) throw new Error(`у ${g.id} нет звуков: комната звуков была бы пустой`);
+        }
+        for (const album of scripted) {
+            for (let n = 0; n < (Array.isArray(album.scenes) ? album.scenes.length : 1); n++) {
+                for (const ui of manifest.UI) {
+                    const body = await one(manifest.SCENE, `/api/gallery/${encodeURIComponent(g.id)}/scene?${new URLSearchParams({ key: album.key, n: String(n), ui })}`);
+                    if (!body?.steps?.some((x) => x.k === 'say')) throw new Error(`сцена ${g.id}/${album.key} n=${n} без реплик`);
+                }
+            }
+        }
+    }
+    const sceneCount = Object.keys(lazy).filter((k) => k.startsWith('/api/gallery/') && k.includes('/scene?')).length;
+    if (sceneCount < manifest.MUST.scenes) throw new Error(`записей сцен ${sceneCount}, ждали не меньше ${manifest.MUST.scenes}`);
+
+    // ---- поиск по репликам: индекс строится сам после сборки галерей (в него попадают игры со сценариями) — ждём, пока он их охватит
+    {
+        const first = `/api/lines/search?q=${manifest.LINE_WORDS[0]}&limit=60`;
+        let state = null;
+        for (let i = 0; i < 120; i++) {
+            state = await getJson(first);
+            if (state && !state.building && state.indexed >= SCENE_GAMES.length && state.total > 0) break;
+            await sleep(500);
+        }
+        if (!state || state.indexed < SCENE_GAMES.length || !state.total) throw new Error(`индекс реплик не собрался: ${JSON.stringify(state && { total: state.total, indexed: state.indexed, library: state.library, building: state.building })}`);
+        for (const word of manifest.LINE_WORDS) {
+            const url = `/api/lines/search?q=${encodeURIComponent(word)}&limit=60`;
+            const body = await one(manifest.LINE_SEARCH, url);
+            if (!body?.total) throw new Error(`на слово «${word}» не нашлось ни одной реплики: слово или сцены надо поправить (manifest.js, scenes.js)`);
+            for (const sc of body.scenes) {
+                for (const f of [sc.cover, ...sc.lines.map((l) => l.pic)]) if (f) addMedia(`/api/gallery/${encodeURIComponent(sc.game)}/thumb?f=${encodeURIComponent(f)}`);
+            }
+        }
+    }
+
+    for (const u of people) {
+        for (const entry of manifest.PER_USER) await one(entry, entry.path.replace('{id}', encodeURIComponent(u.id)));
+        if (u.avatar) addMedia(`/api/avatars/${encodeURIComponent(u.id)}?v=${u.avatar}`);
+    }
 
     // ---- картинки: ключ — mediaKey, файл назван по содержимому (одинаковые кадры в разных играх лежат один раз)
     for (const url of [...mediaUrls].sort()) {
         const r = await get(url);
         if (r.status !== 200) { missed.push(url); continue; }
         media[keys.mediaKey(url)] = { buf: r.buf, ext: extOf(r.type, url) };
+    }
+
+    // ---- слова для картинок (D16): второй запуск сервера на копии библиотеки, с разбором картинок и моделями CLIP
+    if (process.env.DEMO_NO_WORDS === '1') {
+        warn('поиск картинок по словам не записан (DEMO_NO_WORDS=1)');
+    } else {
+        await stopServer(server);
+        await recordWords({ keys, lazy, media, put, missed });
     }
 
     // ---- запись на диск

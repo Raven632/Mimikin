@@ -138,4 +138,13 @@ footer a { color: var(--text); }
 .nf-actions .btn { display: inline-flex; }
 @media (max-width: 560px) { .nf { padding-block: var(--s7); } .nf h1 { font-size: 26px; } }
 
+/* Защита данных: обычный текст для чтения, строка не длиннее ~70 знаков */
+.legal { padding-block: var(--s8) var(--s9); }
+.legal > * { max-width: 68ch; }
+.legal h1 { margin: 0 0 var(--s2); font: 700 34px/1.15 var(--ui); color: var(--gold-hi); }
+.legal h2 { margin: var(--s6) 0 var(--s2); font: 600 19px/1.3 var(--ui); color: var(--text); letter-spacing: 0; }
+.legal p { margin: 0 0 var(--s3); color: #c9bfa8; }
+.legal .legal-date { margin-bottom: var(--s6); color: var(--dim); font-size: 14px; }
+@media (max-width: 560px) { .legal { padding-block: var(--s6) var(--s7); } .legal h1 { font-size: 26px; } }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
