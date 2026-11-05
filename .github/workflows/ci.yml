@@ -25,7 +25,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Настройка Node.js 24
       uses: actions/setup-node@v4
@@ -75,7 +75,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Запуск проверки
       run: tests/deploy/test.sh
@@ -88,7 +88,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Настройка Python 3.12
       uses: actions/setup-python@v5
@@ -109,7 +109,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Настройка Node.js 22
       uses: actions/setup-node@v4
@@ -141,7 +141,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Автотесты интерфейса
       run: tests/e2e/run.sh
@@ -166,7 +166,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
 
     - name: Настройка Node.js 22
       uses: actions/setup-node@v4
@@ -265,7 +265,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         fetch-depth: 0
 
