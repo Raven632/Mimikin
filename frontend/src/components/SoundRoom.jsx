@@ -2,12 +2,13 @@ import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { SeekLine } from './VideoSeek';
 import { clock } from '../videoControl';
 import { IconChevronLeft, IconChevronRight, IconPlay, IconPause, IconLoop } from './icons';
+import { galleryUrl } from '../apiUrl';
 
 // Сколько дорожек альбома рисуем сразу: у Ironhold Keep в audio/voice 5800 озвучек одной папкой
 const SHOWN = 200;
 const SECTIONS = ['music', 'voice', 'ambience', 'effects'];
 
-const api = (id, file) => `/api/gallery/${encodeURIComponent(id)}/audio?f=${encodeURIComponent(file)}`;
+const api = (id, file) => galleryUrl(id, 'audio', file);
 // Имя дорожки — по файлу: без папки и расширения (.ogg_, .rpgmvo), подчёркивания — пробелы
 const trackName = (rel) => rel.split('/').pop().replace(/\.[^.]+$/, '').replace(/_/g, ' ');
 // Папка альбома без «audio/» и пометки сервера «#voice» (озвучка из папки эффектов)

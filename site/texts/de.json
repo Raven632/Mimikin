@@ -1,0 +1,93 @@
+{
+ "ogLocale": "de_DE",
+ "title": "Mimikin: deine RPG-Maker-Spiele in jedem Browser",
+ "description": "Mimikin ist eine selbst gehostete Bibliothek für RPG-Maker-MV- und -MZ-Spiele. Archiv hochladen, und das Spiel läuft im Browser-Tab, auch auf dem Handy. Probier die Live-Demo aus.",
+ "ogDescription": "Eine selbst gehostete Bibliothek für RPG-Maker-MV- und -MZ-Spiele. Probier die Live-Demo direkt im Browser aus.",
+ "ogAlt": "Mimikin: eine Mimic-Truhe aus Pixeln neben der Startseite der Bibliothek",
+ "navLabel": "Seite",
+ "langLabel": "Sprache",
+ "shotsLabel": "Screenshots",
+ "navAbout": "Was es kann",
+ "navInstall": "Installation",
+ "h1": "Deine RPG-Maker-Spiele, in jedem Browser spielbar",
+ "lead": "Mimikin ist eine Bibliothek für RPG-Maker-MV- und -MZ-Spiele, die auf deinem eigenen Server läuft. Archiv hochladen, und das Spiel öffnet sich im Browser-Tab, auch auf dem Handy. Die Spielstände bleiben auf dem Server: am Schreibtisch anfangen, auf dem Sofa weiterspielen.",
+ "demoBtn": "Demo ausprobieren",
+ "demoNote": "Die Demo ist die echte Oberfläche mit erfundenen Spielen. Sie läuft in deinem Browser; nach dem Neuladen ist alles wie vorher.",
+ "sourceBtn": "Quellcode auf GitHub",
+ "versionLabel": "Version",
+ "facts": [
+  {
+   "k": "Spiele",
+   "v": "RPG Maker MV und MZ"
+  },
+  {
+   "k": "Läuft in",
+   "v": "Jedem modernen Browser, auch auf dem Handy"
+  },
+  {
+   "k": "Läuft auf",
+   "v": "Deinem Server, mit Docker Compose"
+  },
+  {
+   "k": "Oberfläche",
+   "v": "Deutsch, Englisch, Russisch"
+  },
+  {
+   "k": "Lizenz",
+   "v": "Freie Software, AGPL-3.0"
+  }
+ ],
+ "shots": [
+  {
+   "caption": "Startseite: das zuletzt gespielte Spiel, „Spielen“ ist einen Klick entfernt.",
+   "alt": "Startseite von Mimikin: das zuletzt gespielte Spiel mit Spielen-Knopf, zuletzt gespielte und noch nicht begonnene Spiele",
+   "thumb": "Startseite"
+  },
+  {
+   "caption": "Jedes Spiel hat sein Fenster: Cover, Status, Spielzeit, Beschreibung und Screenshots.",
+   "alt": "Spielfenster in Mimikin: Cover, Status, Spielzeit, Beschreibung und Screenshots",
+   "thumb": "Spielfenster"
+  },
+  {
+   "caption": "Dieselbe Bibliothek auf dem Handy.",
+   "alt": "Mimikin auf dem Handy: ein Spiel mit Spielen-Knopf und darunter die nächsten Spiele",
+   "thumb": "Handy"
+  }
+ ],
+ "aboutH": "Was es kann",
+ "points": [
+  {
+   "h": "PC-Spiele auf dem Handy",
+   "p": "Windows-Versionen von MV- und MZ-Spielen laufen in Safari auf dem iPhone. Mimikin ergänzt, was NW.js liefern würde: Dateizugriff, Ton auf dem iPhone, Videos, Schriften und Ordnernamen in falscher Groß- und Kleinschreibung."
+  },
+  {
+   "h": "Spielstände liegen auf deinem Server",
+   "p": "Alle Geräte spielen von denselben Slots. Überschriebene Slots landen im Speicherverlauf, und ein offline gemachter Spielstand überschreibt nie einen neueren von einem anderen Gerät."
+  },
+  {
+   "h": "Zurückspulen",
+   "p": "<kbd>P</kbd> hält einen Moment fest: ein Screenshot plus ein Spielstand, von dem aus du weiterspielen kannst. <kbd>Backspace</kbd> springt zurück zu Punkten vor Szenen, Entscheidungen und Kämpfen, bis hinunter zu einer einzelnen Dialogzeile."
+  },
+  {
+   "h": "Eine Galerie aus den Dateien des Spiels",
+   "p": "CGs, Figuren und Hintergründe sind in Alben sortiert, Bildfolgen laufen als Animation, dazu gibt es einen Soundraum. Du musst das Spiel vorher nicht spielen."
+  },
+  {
+   "h": "Maschinelle Übersetzung, die das Spiel in Ruhe lässt",
+   "p": "Dialoge, Plugin-Texte und auf Bilder gezeichnete Beschriftungen. Der Text wird beim Ausliefern der Dateien eingesetzt, das Spiel auf der Platte bleibt im Original. DeepL, Microsoft, Google oder dein eigenes LibreTranslate."
+  },
+  {
+   "h": "Eine Bibliothek, die sich selbst füllt",
+   "p": "Cover, Beschreibungen, Tags und Erscheinungsdaten kommen von itch.io, VNDB und Steam. Uploads in beliebiger Größe machen dort weiter, wo sie abgebrochen sind, auch von einem anderen Gerät."
+  }
+ ],
+ "installH": "Zu Hause starten",
+ "installP": "Du brauchst Linux mit Docker Engine. Compose baut alles aus dem Repository, Redis und der OCR-Dienst starten mit.",
+ "installSmall": "Danach http://dein-server öffnen und das Konto des Besitzers anlegen. Beim ersten Bau werden die OCR-Modelle geladen, einige hundert MB.",
+ "copy": "Kopieren",
+ "copied": "Kopiert",
+ "copyFailed": "Markieren und kopieren",
+ "footer": "Mimikin ist ein Ein-Personen-Projekt, freie Software unter AGPL-3.0. © 2026 Raven.",
+ "changelog": "Änderungsverlauf",
+ "license": "Lizenz"
+}

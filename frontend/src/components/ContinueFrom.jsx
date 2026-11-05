@@ -10,6 +10,7 @@ import { loadResume } from '../resumePoint';
 import { IconClose, IconEdit, IconHistory, IconPin, IconPlay } from './icons';
 import { pageZoom } from '../pageZoom';
 import MetaLine from './MetaLine';
+import { markUrl, saveShotUrl } from '../apiUrl';
 
 // Уголок стрелки — пикселями, как шрифт заголовков и мимик; на ровных клетках, без сглаживания
 const PixelChevron = () => (
@@ -140,7 +141,7 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
           {current === 'saves' && (slots.length === 0 ? <p className="continue-from-empty">{t.saves_none_short}</p> : slots.map((s) => (
             <div key={s.key} className="continue-item">
               <button type="button" className="continue-item-play" onClick={() => onPlay({ slot: s.key })} data-tip={t.save_play}>
-                {s.shot ? <img src={`/api/saves/shot/${encodeURIComponent(game.id)}?key=${encodeURIComponent(s.key)}&v=${Math.round(s.current.at)}`} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconHistory /></span>}
+                {s.shot ? <img src={saveShotUrl(game.id, s.key, Math.round(s.current.at))} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconHistory /></span>}
                 <span className="continue-item-text">
                   <MetaLine className="continue-item-name" parts={[slotName(s.key, t), s.current.summary?.map]} />
                   <MetaLine className="continue-item-sub" parts={saveLine(s)} />
@@ -157,7 +158,7 @@ const ContinueFrom = ({ game, t, lang, notify, open: openInitially = false, relo
           {current === 'moments' && (marks.length === 0 ? <p className="continue-from-empty">{t.marks_empty}</p> : marks.map((m) => (
             <div key={m.id} className="continue-item">
               <button type="button" className="continue-item-play" onClick={() => onPlay({ mark: m.id })} data-tip={t.mark_play}>
-                {m.thumb ? <img src={marksApi(game.id, `/${m.id}/thumb`)} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconPin /></span>}
+                {m.thumb ? <img src={markUrl(game.id, m.id, 'thumb')} alt="" loading="lazy" /> : <span className="continue-item-ph"><IconPin /></span>}
                 <span className="continue-item-text">
                   {editing?.id === m.id ? null : <span className="continue-item-name">{m.exit ? (m.mid && m.label ? `${t.resume_exit}: ${m.label}` : t.resume_exit) : m.label || m.map || '—'}</span>}
                   <MetaLine className="continue-item-sub" parts={[m.exit ? m.map || (m.mid ? '' : m.label) : m.label && m.map !== m.label ? m.map : '', timeAgo(m.at, lang)]} />

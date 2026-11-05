@@ -1,7 +1,8 @@
+import { galleryUrl } from '../apiUrl';
 // Загрузка модели Live2D для просмотра альбома (Live2DView). Библиотека и pixi тяжёлые — подтягиваются только здесь, когда
 // модель действительно открывают. Ядро Cubism (Live2DCubismCore) в сборку не входит: у него закрытая лицензия Live2D,
 // его нельзя раздавать — браузер берёт копию из папки самой игры, через сервер (галерея знает её путь: album.live2d.core)
-export const live2dUrl = (id, rel, max = 0) => `/api/gallery/${encodeURIComponent(id)}/live2d?f=${encodeURIComponent(rel)}${max ? `&max=${max}` : ''}`;
+export const live2dUrl = (id, rel, max = 0) => galleryUrl(id, 'live2d', rel, max);
 
 // Стороны, на которые сервер умеет ужимать текстуру (gallery.js, L2D_MAX)
 const SIDES = [1024, 2048, 4096, 8192];

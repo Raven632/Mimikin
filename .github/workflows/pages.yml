@@ -1,0 +1,141 @@
+name: Demo site
+
+# Сайт проекта на GitHub Pages: страница о Mimikin (en, ru, de) и живое демо — настоящий интерфейс
+# с выдуманными играми, без сервера: всё в браузере, после перезагрузки всё как было.
+# Собирается после зелёного CI на main — демо не показывает коммит с красными тестами.
+# Отдельным файлом, как release.yml: сбой выкладки не красит CI.
+# Один раз в настройках репозитория: Settings → Pages → Source: GitHub Actions
+on:
+  workflow_run:
+    workflows: [ "Node.js CI" ]
+    types: [ completed ]
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Одна выкладка за раз; начатую не обрываем — иначе на сайте может остаться половина старого
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  # workflow_run приходит в порядке окончания CI, а не коммитов: CI старого коммита мог закончиться позже нового.
+  # Выкладываем только если проверенный коммит всё ещё конец main — иначе на сайт ушла бы старая версия
+  fresh:
+    name: Commit is main head
+    if: github.repository == 'Raven632/Mimikin'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      ok: ${{ steps.head.outputs.ok }}
+    steps:
+    - name: Сравнение с концом main
+      id: head
+      env:
+        SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      run: |
+        head=$(git ls-remote "https://github.com/${{ github.repository }}" refs/heads/main | cut -f1)
+        if [ "$SHA" = "$head" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"
+        else echo "::notice::Коммит $SHA не конец main ($head) — выкладку сделает CI более нового"; echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+
+  build:
+    name: Build site
+    needs: fresh
+    # Только открытый репозиторий (у приватного на бесплатном тарифе Pages нет; форки — не наши)
+    # и только CI пуша: CI pull request'а Dependabot сюда не доходит
+    if: >-
+      needs.fresh.outputs.ok == 'true' &&
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' ||
+       (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
+    runs-on: ubuntu-latest
+    # Запись данных демо (сервер, ffmpeg, обход адресов) добавляет к сборке несколько минут
+    timeout-minutes: 20
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+      with:
+        # Ровно тот коммит, который проверил CI, а не то, что успело прийти в main позже
+        ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+    # Адрес сайта (base_url) — отсюда: переименование репозитория или свой домен не требуют правок в коде
+    - name: Настройка Pages
+      id: pages
+      uses: actions/configure-pages@v5
+
+    # Node 22 — как в образе (Dockerfile): запись данных гоняет настоящий сервер, и версия должна совпадать
+    - name: Настройка Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: |
+          api/package-lock.json
+          frontend/package-lock.json
+
+    - name: Установка пакетов интерфейса
+      working-directory: ./frontend
+      run: npm ci
+
+    # CUDA для onnxruntime-node (≈300 МБ) демо не нужна — распознавание картинок в записи не участвует
+    - name: Установка пакетов сервера
+      working-directory: ./api
+      env:
+        ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      run: npm ci
+
+    # ffmpeg и ffprobe — как в образе: запись режет ими обложки, кадры и миниатюры
+    - name: Установка ffmpeg
+      run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+    # Данные демо не лежат в git: сервер этого же коммита записывает их заново (tests/demo/record.js), и они не расходятся
+    # с интерфейсом. Запись ждёт путей, как в контейнере образа (/app/api, /frontend-demo, /games): те же пути
+    # попадают в ответы («Настройки» показывают /games), и данные выходят теми же байтами, что у tests/demo/record.sh
+    - name: Запись данных демо
+      env:
+        TZ: UTC
+      run: |
+        sudo ln -s "$GITHUB_WORKSPACE" /app
+        sudo ln -s "$GITHUB_WORKSPACE/frontend/demo" /frontend-demo
+        sudo mkdir /games && sudo chown "$(id -u):$(id -g)" /games
+        DEMO_OUT="$GITHUB_WORKSPACE/frontend/demo-data" timeout 900 node tests/demo/record.js
+
+    - name: Сборка демо
+      working-directory: ./frontend
+      run: npm run build:demo -- --outDir ../_site/demo --emptyOutDir
+
+    - name: Страница проекта
+      env:
+        SITE_URL: ${{ steps.pages.outputs.base_url }}
+      run: node site/build.mjs _site
+
+    # Pages принимает до 1 ГБ; демо весит единицы мегабайт — сотня значит, что в сборку попало лишнее
+    - name: Размер сайта
+      run: |
+        du -sh _site
+        size=$(du -sm _site | cut -f1)
+        if [ "$size" -gt 100 ]; then echo "::error::Сайт весит ${size} МБ — в сборку попало лишнее"; exit 1; fi
+
+    - name: Выгрузка сайта
+      uses: actions/upload-pages-artifact@v3
+      with:
+        path: _site
+
+  deploy:
+    name: Deploy site
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write      # выкладка на Pages
+      id-token: write   # Pages проверяет, что выкладка пришла из этого репозитория
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+    - name: Выкладка на GitHub Pages
+      id: deployment
+      uses: actions/deploy-pages@v4

@@ -16,6 +16,7 @@ import { isOwner } from '../me';
 import { fmtOf, fmtSize } from '../transferSize';
 import { pageZoom } from '../pageZoom';
 import { landingBegin, landingEnd } from '../landing';
+import { DEMO } from '../demoHooks';
 
 const IDLE = { active: false };
 // Пока байты в пути, закрыть страницу — значит оборвать загрузку (продолжить потом можно, но зачем)
@@ -116,6 +117,8 @@ const Toolbar = ({
   // выбор всё равно скажет, кому он
   const targetRef = useRef(null);
   const openUpload = (target = null) => {
+    // В демо сервера нет: заметка вместо окна выбора файла
+    if (DEMO && window.mimikinDemo.stop('upload')) return;
     targetRef.current = target;
     fileInputRef.current?.click();
   };
@@ -124,6 +127,7 @@ const Toolbar = ({
   useEffect(() => {
     if (!openUploadRef) return undefined;
     openUploadRef.current = (target) => {
+      if (DEMO && window.mimikinDemo.stop('upload')) return;
       targetRef.current = target || null;
       fileInputRef.current?.click();
     };
@@ -354,7 +358,7 @@ const Toolbar = ({
       setIsDragging(false);
       // Несколько архивов разом — все в очередь; идёт загрузка — встанут за ней
       const files = Array.from(e.dataTransfer.files || []);
-      if (files.length) addNewRef.current(files);
+      if (files.length && !(DEMO && window.mimikinDemo.stop('upload'))) addNewRef.current(files);
     };
 
     window.addEventListener('dragstart', onStart);

@@ -7,7 +7,7 @@
 
 # Mimikin
 
-A self-hosted library for RPG Maker MV and MZ games. Upload the archive and the game runs in a browser tab, phone included.
+A self-hosted library for RPG Maker MV and MZ games. Upload the archive and the game runs in a browser tab, phone included. Try it without installing: [the live demo](https://raven632.github.io/Mimikin/demo/) runs the real interface with made-up games, right in your browser. Nothing is saved; a reload starts over.
 
 English | [Русский](README.ru.md) | [Deutsch](README.de.md)
 
@@ -16,6 +16,7 @@ English | [Русский](README.ru.md) | [Deutsch](README.de.md)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-c9a84c?style=flat-square)](LICENSE)
 ![Tests](https://img.shields.io/badge/tests-506_server%2C_429_UI%2C_13_OCR-3fb950?style=flat-square)
 [![docker compose up](https://img.shields.io/badge/docker_compose-up-2496ED?style=flat-square&logo=docker&logoColor=white)](#quick-start)
+[![Demo](https://img.shields.io/badge/demo-in_the_browser-c9a84c?style=flat-square)](https://raven632.github.io/Mimikin/demo/)
 
 <img src="rest/img/demo.gif" alt="Tour of the demo library: home shelves, a game window, the gallery replaying a scene, the library grid" width="880">
 

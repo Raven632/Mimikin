@@ -7,6 +7,7 @@ import { timeAgo } from '../formatAgo';
 import { formatPlaytime } from '../formatPlaytime';
 import { IconChevronLeft, IconChevronRight, IconClock, IconClose, IconDownload, IconEdit, IconImage, IconPin, IconPlay, IconStarSolid, IconTrash } from './icons';
 import MetaLine from './MetaLine';
+import { markUrl } from '../apiUrl';
 
 // Вкладка «Скриншоты» в окне игры: что запомнили в самой игре (rpg-fixes, setupSceneMarks; хранит utils/marks.js).
 //   Сверху — перемотка: точки, которые игра ставит сама (перед боем, перед выбором, на новой карте, раз в 10 минут).
@@ -105,7 +106,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
   });
   // Обложка — тот же путь, что «Своя обложка» в «Изменить» (routes/games.js): кадр уходит файлом
   const cover = (m) => act('cover', async () => {
-    const blob = await fetch(api(game.id, `/${m.id}/shot`)).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))));
+    const blob = await fetch(markUrl(game.id, m.id, 'shot')).then((r) => (r.ok ? r.blob() : Promise.reject(new Error(String(r.status)))));
     const form = new FormData();
     form.append('cover', blob, 'shot.jpg');
     const r = await fetch(`/api/games/${encodeURIComponent(game.id)}/cover`, { method: 'POST', body: form });
@@ -163,7 +164,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
               return (
                 <button key={m.id} type="button" className="shots-rw" onClick={() => setView({ list: 'rewind', at: i })} data-tip={whyTitle(m, t)}>
                   <span className="shots-rw-pic">
-                    {m.thumb ? <img src={api(game.id, `/${m.id}/thumb`)} alt="" loading="lazy" /> : <span className="shots-ph" />}
+                    {m.thumb ? <img src={markUrl(game.id, m.id, 'thumb')} alt="" loading="lazy" /> : <span className="shots-ph" />}
                     <span className="shots-why"><Why />{t.shots_why_short[whyOf(m)]}</span>
                   </span>
                   <small>{timeAgo(m.at, lang)}</small>
@@ -201,7 +202,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
           <div className="shots-grid">
             {day.items.map((m) => (
               <button key={m.id} type="button" className="shots-card" onClick={() => setView({ list: 'own', at: indexOf(m) })}>
-                {m.thumb || m.full ? <img src={api(game.id, `/${m.id}/${m.full ? 'shot' : 'thumb'}`)} alt="" loading="lazy" /> : <span className="shots-ph" />}
+                {m.thumb || m.full ? <img src={markUrl(game.id, m.id, m.full ? 'shot' : 'thumb')} alt="" loading="lazy" /> : <span className="shots-ph" />}
                 {m.save && onPlay && <span className="shots-play-badge"><IconPlay />{t.shots_play}</span>}
                 <span className="shots-cap">
                   {m.label || m.map || '—'}
@@ -222,7 +223,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
             if (Math.abs(dx) > 40 && !editing) { e.preventDefault(); go(dx < 0 ? 1 : -1); }
           }}
         >
-          <img key={current.id} src={api(game.id, `/${current.id}/${current.full ? 'shot' : 'thumb'}`)} alt="" onClick={(e) => { e.stopPropagation(); go(1); }} />
+          <img key={current.id} src={markUrl(game.id, current.id, current.full ? 'shot' : 'thumb')} alt="" onClick={(e) => { e.stopPropagation(); go(1); }} />
           {list.length > 1 && <>
             <button type="button" className="lightbox-nav prev" aria-label={t.shelf_prev} onClick={(e) => { e.stopPropagation(); go(-1); }}><IconChevronLeft /></button>
             <button type="button" className="lightbox-nav next" aria-label={t.shelf_next} onClick={(e) => { e.stopPropagation(); go(1); }}><IconChevronRight /></button>
@@ -251,7 +252,7 @@ const ShotsPanel = ({ game, t, lang, shots, notify, onPlay, onCover }) => {
                 <button type="button" className="meta-status-btn" disabled={!!busy} onClick={() => cover(current)}><IconImage />{t.shots_cover}</button>
               )}
               {(current.full || current.thumb) && (
-                <a className="meta-status-btn" href={api(game.id, `/${current.id}/${current.full ? 'shot' : 'thumb'}`)} download={`${game.id}-${current.id}.jpg`}><IconDownload />{t.shots_download}</a>
+                <a className="meta-status-btn" href={markUrl(game.id, current.id, current.full ? 'shot' : 'thumb')} download={`${game.id}-${current.id}.jpg`}><IconDownload />{t.shots_download}</a>
               )}
               {current.kind !== 'auto' && <button type="button" className="meta-status-btn subtle" disabled={!!busy} onClick={() => setEditing(current.label || '')}><IconEdit />{t.shots_rename}</button>}
               {current.kind !== 'auto' && <button type="button" className="meta-status-btn subtle" disabled={!!busy} onClick={() => remove(current)}><IconTrash />{t.shots_remove}</button>}

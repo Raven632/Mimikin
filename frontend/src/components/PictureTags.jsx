@@ -5,8 +5,8 @@ import { fitRows } from '../fitRows';
 import SearchBox from './SearchBox';
 import { IconBan, IconCheck, IconClose } from './icons';
 import { isOwner } from '../me';
+import { frameTagsUrl } from '../apiUrl';
 
-const api = (id, q) => `/api/gallery/${encodeURIComponent(id)}/tags${q}`;
 // Тегов у кадра в просмотре — самые уверенные: остальные слабее и только закрывали бы картинку
 const STRIP = 16;
 // Тегов в большой библиотеке — тысячи: все строки сразу делали каждый выбор секундным. Остальные дорисовываются при прокрутке
@@ -19,7 +19,7 @@ export const TagStrip = ({ game, file, t }) => {
   const [res, setRes] = useState({ file: '', tags: null });
   useEffect(() => {
     const ctl = new AbortController();
-    fetch(api(game.id, `?f=${encodeURIComponent(file)}`), { signal: ctl.signal })
+    fetch(frameTagsUrl(game.id, file), { signal: ctl.signal })
       .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
       .then((d) => setRes({ file, tags: d.tags || [] }), (e) => { if (e.name !== 'AbortError') setRes({ file, tags: null }); });
     return () => ctl.abort();

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { formatPlaytime } from '../formatPlaytime';
 import { IconCheck, IconClock, IconImage, IconPin, IconPlay } from './icons';
 import MetaLine from './MetaLine';
+import { journalThumbUrl, markUrl } from '../apiUrl';
 
 // Вкладка «Путь» в окне игры: что человек в игре прошёл, по дням — новые локации, сцены (с кадром), выборы с его
 // ответом, бои, свои снимки. Пишет сама игра (rpg-fixes, setupSceneMarks → api/src/utils/journal.js). Это история, а не
@@ -113,8 +114,8 @@ const PathPanel = ({ game, t, lang, shots, onPlay }) => {
     return <>{e.label ? `«${e.label}»` : t.path_scene}<MetaLine as="small" parts={[e.map, timeOf(e.at, lang)]} /></>;
   };
   const pic = (e) => {
-    if (e.kind === 'scene' && e.thumb) return <img className="path-thumb" src={api(game.id, `/${e.id}/thumb`)} alt="" loading="lazy" onError={(ev) => { ev.currentTarget.style.display = 'none'; }} />;
-    if (e.kind === 'shot' && e.mark) return <img className="path-thumb" src={`/api/marks/${encodeURIComponent(game.id)}/${e.mark}/thumb`} alt="" loading="lazy" onError={(ev) => { ev.currentTarget.style.display = 'none'; }} />;
+    if (e.kind === 'scene' && e.thumb) return <img className="path-thumb" src={journalThumbUrl(game.id, e.id)} alt="" loading="lazy" onError={(ev) => { ev.currentTarget.style.display = 'none'; }} />;
+    if (e.kind === 'shot' && e.mark) return <img className="path-thumb" src={markUrl(game.id, e.mark, 'thumb')} alt="" loading="lazy" onError={(ev) => { ev.currentTarget.style.display = 'none'; }} />;
     return null;
   };
   const playFrom = (e) => {

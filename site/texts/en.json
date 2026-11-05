@@ -1,0 +1,97 @@
+{
+ "ogLocale": "en_US",
+ "title": "Mimikin: your RPG Maker games in any browser",
+ "description": "Mimikin is a self-hosted library for RPG Maker MV and MZ games. Upload the archive and the game runs in a browser tab, phone included. Try the live demo.",
+ "ogDescription": "A self-hosted library for RPG Maker MV and MZ games. Try the live demo in your browser.",
+ "ogAlt": "Mimikin: a pixel mimic chest next to the library home page",
+ "navLabel": "Page",
+ "langLabel": "Language",
+ "shotsLabel": "Screenshots",
+ "navAbout": "What it does",
+ "navInstall": "Install",
+ "h1": "Your RPG Maker games, playable in any browser",
+ "lead": "Mimikin is a library for RPG Maker MV and MZ games that runs on your own server. Upload the archive and the game opens in a browser tab, phone included. Saves stay on the server, so you can start at the desk and finish on the couch.",
+ "demoBtn": "Try the demo",
+ "demoNote": "The demo is the real interface with made-up games. It runs in your browser, and your changes vanish when you reload.",
+ "sourceBtn": "Source on GitHub",
+ "versionLabel": "Version",
+ "facts": [
+  {
+   "k": "Games",
+   "v": "RPG Maker MV and MZ"
+  },
+  {
+   "k": "Plays in",
+   "v": "Any modern browser, phones included"
+  },
+  {
+   "k": "Runs on",
+   "v": "Your server, with Docker Compose"
+  },
+  {
+   "k": "Interface",
+   "v": "English, Russian, German"
+  },
+  {
+   "k": "License",
+   "v": "Free, AGPL-3.0"
+  }
+ ],
+ "shots": [
+  {
+   "caption": "Home: the game you played last, with Play one click away.",
+   "alt": "Mimikin home page: the game played last with a Play button, recently played games and games not started yet",
+   "thumb": "Home"
+  },
+  {
+   "caption": "Each game gets a window: cover, status, play time, description and screenshots.",
+   "alt": "A game window in Mimikin: cover, status, play time, description and screenshots",
+   "thumb": "Game window"
+  },
+  {
+   "caption": "The same library on a phone.",
+   "alt": "Mimikin on a phone: a game with a Play button and the next games below",
+   "thumb": "Phone"
+  }
+ ],
+ "aboutH": "What it does",
+ "points": [
+  {
+   "h": "PC games on a phone",
+   "p": "Windows builds of MV and MZ games run in Safari on an iPhone. Mimikin fills in what NW.js would provide: file access, sound on iPhone, videos, fonts, folder names in the wrong letter case."
+  },
+  {
+   "h": "Saves live on your server",
+   "p": "Every device plays from the same slots. Overwritten slots go to a save history, and a save made offline never overwrites a newer one from another device."
+  },
+  {
+   "h": "Rewind",
+   "p": "<kbd>P</kbd> keeps a moment: a screenshot plus a save you can play from. <kbd>Backspace</kbd> steps back to points set before scenes, choices and battles, down to a single line of dialogue."
+  },
+  {
+   "h": "A gallery from the game's own files",
+   "p": "CG, characters and backgrounds sorted into albums, frame sequences played as animation, a sound room. You don't have to play first."
+  },
+  {
+   "h": "Machine translation that leaves the game alone",
+   "p": "Dialogue, plugin texts and labels drawn on pictures. The text is swapped in as the files are served, so the game on disk stays original. DeepL, Microsoft, Google or your own LibreTranslate."
+  },
+  {
+   "h": "A library that fills itself in",
+   "p": "Covers, descriptions, tags and release dates come from itch.io, VNDB and Steam. Uploads of any size resume where they stopped, even from another device."
+  }
+ ],
+ "installH": "Run it at home",
+ "installP": "You need Linux with Docker Engine. Compose builds everything from the repository; Redis and the OCR service start with it.",
+ "installSmall": "Then open http://your-server and create the owner account. The first build downloads the OCR models, a few hundred MB.",
+ "copy": "Copy",
+ "copied": "Copied",
+ "copyFailed": "Select and copy",
+ "footer": "Mimikin is a one-person project, free software under AGPL-3.0. © 2026 Raven.",
+ "changelog": "Changelog",
+ "license": "License",
+ "nfTitle": "Page not found: Mimikin",
+ "nfH": "This page does not exist",
+ "nfP": "The address may be misspelled, or the page moved. The project page and the live demo are still here.",
+ "nfHome": "Project page"
+}

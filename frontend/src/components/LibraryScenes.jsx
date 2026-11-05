@@ -5,11 +5,12 @@ import StateView from './StateView';
 import { TagPanel, TagPicked } from './PictureTags';
 import { IconPlay, IconShuffle, IconTag } from './icons';
 import { readSpeed, readSpineCover } from '../galleryView';
+import { galleryUrl } from '../apiUrl';
 
 // Плиток у игры до «Ещё N сцен» — один ряд, как его сложит .gallery-grid (от 220 px, зазор 12, окно — 16 px с боков);
 // на телефоне — два ряда по две. Считается при открытии окна
 const perRow = () => (window.matchMedia('(max-width: 560px)').matches ? 4 : Math.min(12, Math.max(2, Math.floor((window.innerWidth - 20) / 232))));
-const api = (id, what, file) => `/api/gallery/${encodeURIComponent(id)}/${what}?f=${encodeURIComponent(file)}`;
+const api = galleryUrl;
 
 // Окно «Сцены» без запроса: все сцены библиотеки по играм (сервер: /api/scenes, services/libraryScenes.js). Чипы
 // «Сцены» и «Диалоги» — как вкладки галереи игры, «С голосом» и «С анимацией» — отбор; у каждой игры ряд плиток и

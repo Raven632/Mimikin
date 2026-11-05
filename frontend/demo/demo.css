@@ -1,0 +1,77 @@
+/* Демо: знак «Демо» и подсказка на экране входа. Цвета и размеры — из base.css, своего нового ничего. Знак — у нижнего края
+   слева, над страницей входа (она fixed, z-index 9000) и под тостом (9999); окна приложения он не закрывает, потому что мал.
+   В потоке страницы места не занимает */
+.demo-bar {
+  position: fixed;
+  left: 12px;
+  bottom: calc(12px + var(--safe-bottom));
+  z-index: 9100;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+/* Рамка прямоугольная, а не пилюля, и без заливки цветом: чёрная, с золотой линией, как знак в шапке */
+.demo-mark {
+  appearance: none;
+  min-height: 28px;
+  padding: 0 12px;
+  background: var(--bg-deep);
+  border: 1px solid var(--gold-dim);
+  border-radius: 2px;
+  color: var(--gold-light);
+  font: inherit;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.demo-mark[aria-expanded="true"] { border-color: var(--gold); }
+
+@media (hover: hover) {
+  .demo-mark:hover { border-color: var(--gold); }
+}
+
+.demo-mark:focus-visible, .demo-bar-btn:focus-visible { outline: 2px solid var(--gold); outline-offset: 2px; }
+
+/* Два действия над знаком: окно в стиле остальных всплывающих списков, без тени */
+.demo-bar-menu {
+  display: flex;
+  flex-direction: column;
+  min-width: 170px;
+  padding: 4px;
+  background: var(--bg-card);
+  border: 1px solid var(--line-window);
+  border-radius: var(--radius-sm);
+}
+
+/* Кнопка и ссылка выглядят одинаково: текст без рамки, золотой под рукой */
+.demo-bar-btn {
+  appearance: none;
+  display: flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 10px;
+  background: none;
+  border: 0;
+  border-radius: 2px;
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-sm);
+  text-align: left;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+@media (hover: hover) {
+  .demo-bar-btn:hover { background: var(--surface-btn-hover); color: var(--gold-light); }
+}
+
+@media (pointer: coarse) {
+  .demo-mark { min-height: 36px; }
+  .demo-bar-btn { min-height: 44px; }
+}
+
+/* Подсказка про вход (LoginModal, класс auth-demo): над обычной припиской, золотистым, чтобы её заметили */
+.auth-demo { color: var(--gold-muted); }

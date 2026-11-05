@@ -1,6 +1,7 @@
+import { galleryUrl } from '../apiUrl';
 // Загрузка набора Spine: общая для просмотра альбома (SpineView) и врезок в плеере сцены (SceneSpine). Библиотеки тяжёлые —
 // pixi и рантайм подтягиваются только здесь, когда набор действительно открывают
-export const spineUrl = (id, rel) => `/api/gallery/${encodeURIComponent(id)}/spine?f=${encodeURIComponent(rel)}`;
+export const spineUrl = (id, rel) => galleryUrl(id, 'spine', rel);
 
 // Рантайм по версии скелета: 3.7 и 3.8 читают каждый свой, 4.0 и 4.1 — один (как в pixi-spine)
 export const runtime = (version) => (/^3\.7/.test(version) ? import('@pixi-spine/runtime-3.7') : /^3\./.test(version) ? import('@pixi-spine/runtime-3.8') : import('@pixi-spine/runtime-4.1'));

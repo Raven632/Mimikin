@@ -7,7 +7,7 @@
 
 # Mimikin
 
-Библиотека игр на RPG Maker MV и MZ на вашем сервере. Загружаете архив, и игра идёт во вкладке браузера, хоть на телефоне.
+Библиотека игр на RPG Maker MV и MZ на вашем сервере. Загружаете архив, и игра идёт во вкладке браузера, хоть на телефоне. Попробовать без установки: [демо в браузере](https://raven632.github.io/Mimikin/demo/?lang=ru) — настоящий интерфейс с выдуманными играми. Ничего не сохраняется: после перезагрузки всё как было.
 
 [English](README.md) | Русский | [Deutsch](README.de.md)
 
@@ -16,6 +16,7 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0-c9a84c?style=flat-square)](LICENSE)
 ![Tests](https://img.shields.io/badge/tests-506_server%2C_429_UI%2C_13_OCR-3fb950?style=flat-square)
 [![docker compose up](https://img.shields.io/badge/docker_compose-up-2496ED?style=flat-square&logo=docker&logoColor=white)](#быстрый-старт)
+[![Demo](https://img.shields.io/badge/demo-in_the_browser-c9a84c?style=flat-square)](https://raven632.github.io/Mimikin/demo/?lang=ru)
 
 <img src="rest/img/demo.gif" alt="Обзор демо-библиотеки: полки на главной, окно игры, галерея с проигрыванием сцены, сетка библиотеки" width="880">
 

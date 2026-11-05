@@ -1,8 +1,9 @@
 import RetryImg from './RetryImg';
 import { IconFork } from './icons';
 import { lineParts } from '../lineSearch';
+import { galleryUrl } from '../apiUrl';
 
-const thumb = (game, file) => `/api/gallery/${encodeURIComponent(game)}/thumb?f=${encodeURIComponent(file)}`;
+const thumb = (game, file) => galleryUrl(game, 'thumb', file);
 
 // Найденная реплика (полка «В репликах» и окно «Поиск по репликам»): кадр, который на экране к этой реплике, затемнён, а
 // поверх — сама реплика, как у плитки диалога в «Сценах» (SceneList). Найденные слова — золотом с тонким подчёркиванием.

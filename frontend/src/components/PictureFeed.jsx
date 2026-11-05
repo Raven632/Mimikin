@@ -5,10 +5,11 @@ import { useCoversHidden } from '../coversHidden';
 import { readSpeed, shuffled } from '../galleryView';
 import StateView from './StateView';
 import { IconClose, IconPlay } from './icons';
+import { galleryUrl } from '../apiUrl';
 
 const GameGallery = lazy(() => import('./GameGallery'));
 const SceneView = lazy(() => import('./SceneView'));
-const url = (what, game, file) => `/api/gallery/${encodeURIComponent(game)}/${what}?f=${encodeURIComponent(file)}`;
+const url = (what, game, file) => galleryUrl(game, what, file);
 
 // Кадр ленты. На весь экран телефона миниатюры мало, а полных картинок в ленте сотни: миниатюра грузится, когда кадр близко к
 // экрану, и только после неё — полная. Размер до загрузки нужен всегда: кадр нулевой высоты браузер считает видимым и грузит все сразу

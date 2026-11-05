@@ -1,5 +1,7 @@
 // Тексты интерфейса по языкам. Раньше все три языка (115 КБ) лежали в главном файле приложения —
 // теперь при первой загрузке приходит только выбранный, остальные — когда язык переключат
+import { DEMO } from '../demoHooks';
+
 const loaders = {
   ru: () => import('./ru.js'),
   en: () => import('./en.js'),
@@ -26,7 +28,11 @@ export function savedLang() {
 
 export async function loadLocale(lang) {
   const key = validLang(lang);
-  loaded[key] ??= (await loaders[key]()).default;
+  // В демо-сборке тексты языка дополняют своими (отказы «демо», заметки): window.mimikinDemo.extendLocale задаёт frontend/demo/install.js
+  if (!loaded[key]) {
+    const texts = (await loaders[key]()).default;
+    loaded[key] = DEMO ? window.mimikinDemo.extendLocale(key, texts) : texts;
+  }
   return loaded[key];
 }
 

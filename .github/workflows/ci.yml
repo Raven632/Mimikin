@@ -156,6 +156,100 @@ jobs:
         path: tests/e2e/report
         retention-days: 7
 
+  # Демо для сайта (pages.yml): запись данных, сборка, проверки и обход страницы в браузере без сети. Ломается — видно уже
+  # в pull request, а не после слияния. В needs у mark-deployable его нет: сбой демо не задерживает выкладку тем, кто
+  # ставит библиотеку к себе
+  demo:
+    name: Demo site
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+    - name: Скачивание кода
+      uses: actions/checkout@v4
+
+    - name: Настройка Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+        cache: npm
+        cache-dependency-path: |
+          api/package-lock.json
+          frontend/package-lock.json
+          tests/demo/package-lock.json
+
+    - name: Установка пакетов интерфейса
+      working-directory: ./frontend
+      run: npm ci
+
+    - name: Установка пакетов сервера
+      working-directory: ./api
+      env:
+        ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      run: npm ci
+
+    - name: Установка ffmpeg
+      run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg
+
+    # Пути — как в контейнере образа, чтобы данные вышли теми же байтами, что у tests/demo/record.sh (подробнее — в pages.yml).
+    # DEMO_STRICT: предупреждение записи здесь — ошибка, в pages.yml оно только в журнале
+    - name: Запись данных демо
+      env:
+        TZ: UTC
+      run: |
+        sudo ln -s "$GITHUB_WORKSPACE" /app
+        sudo ln -s "$GITHUB_WORKSPACE/frontend/demo" /frontend-demo
+        sudo mkdir /games && sudo chown "$(id -u):$(id -g)" /games
+        DEMO_OUT="$GITHUB_WORKSPACE/frontend/demo-data" DEMO_STRICT=1 timeout 900 node tests/demo/record.js
+
+    - name: Сборка демо
+      working-directory: ./frontend
+      run: npm run build:demo
+
+    # Обычная сборка не несёт от демо ни байта: ни хука, ни пустышки сокета, ни полосы демо
+    - name: Обычная сборка без демо
+      working-directory: ./frontend
+      run: |
+        npm run build
+        if grep -rlE 'mimikinDemo|demo-off|fakeSocket' dist; then echo "::error::В обычной сборке остался код демо"; exit 1; fi
+
+    # Каждый адрес /api/ в коде интерфейса должен быть записан или обработан в демо; новый без ответа — ошибка с файлом и строкой
+    - name: Покрытие адресов
+      run: node tests/demo/coverage.mjs
+
+    # Настоящий сервер и ответ демо на одни и те же запросы: форма ответа не должна разойтись
+    - name: Сверка ответов с настоящим сервером
+      working-directory: ./api
+      env:
+        ONNXRUNTIME_NODE_INSTALL_CUDA: skip
+      run: node --test --test-force-exit ../tests/demo/contract.test.mjs
+
+    # Таблица ответов демо без браузера: маршруты, обработчики, ключи и сдвиг времени
+    - name: Проверки таблицы демо
+      run: node --test --test-force-exit tests/demo/router.test.mjs tests/demo/handlers.test.mjs tests/demo/record-guard.test.mjs
+
+    # Свои пакеты Playwright у tests/demo: тест импортирует @playwright/test из своей папки
+    - name: Установка Playwright
+      working-directory: ./tests/demo
+      run: npm ci && npx playwright install --with-deps chromium webkit
+
+    # Обход собранного демо на настольном размере и на телефоне, в Chromium и WebKit: упадёт на любом запросе /api/ или
+    # /socket.io/, дошедшем до сети, на ошибке в консоли и на «[demo] unhandled»
+    - name: Обход демо
+      working-directory: ./tests/demo
+      env:
+        CI: 'true'
+      run: npx playwright test
+
+    - name: Отчёт Playwright
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: demo-report
+        path: tests/demo/report
+        retention-days: 7
+        if-no-files-found: ignore
+
   # Тесты и сборка прошли — ветка deploy переезжает на этот коммит. Сервер забирает именно её
   # (deploy/pull-deploy.sh): так ему не нужно спрашивать у API GitHub, зелёный ли CI, — у приватного
   # репозитория этот вопрос без токена не задать. Более старый коммит, чей CI закончился позже,

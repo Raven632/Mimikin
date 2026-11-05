@@ -6,8 +6,6 @@ import { isOwner } from '../me';
 // альбома (SpineView, Live2DView) или фоном, не дожидаясь просмотра (captureRig, useRigCovers). Снятое кладётся в браузер
 // (galleryView.js) и уходит на сервер (saveRigCover) — на других устройствах плитка с картинкой сразу
 
-export const rigCoverUrl = (gameId, key) => `/api/gallery/${encodeURIComponent(gameId)}/rig-cover?key=${encodeURIComponent(key)}`;
-
 // Кадр сцены → JPEG-строка 320 px в ширину. Сразу после render буфер WebGL ещё цел — его можно скопировать без
 // preserveDrawingBuffer. Пустой кадр (модель не успела нарисоваться) и почти чёрный (движение гасит свет: у части моделей
 // первое движение ставит тень на всё тело) — null: такой кадр не должен стать обложкой, ему подберут другое движение
