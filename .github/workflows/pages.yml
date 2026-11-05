@@ -55,7 +55,7 @@ jobs:
 
     steps:
     - name: Скачивание кода
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         # Ровно тот коммит, который проверил CI, а не то, что успело прийти в main позже
         ref: ${{ github.event.workflow_run.head_sha || github.sha }}
