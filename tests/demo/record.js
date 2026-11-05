@@ -104,6 +104,27 @@ async function stopServer(child) {
     await Promise.race([child.done, sleep(15000)]);
 }
 
+// Через 3 и 4 с после запуска сервер дочитывает «где остановился» из сейвов и язык игр (server.js, backfillProgress и
+// fillTextLang). Список игр, снятый раньше, выходит без progress — так и было на быстрой машине GitHub, а на медленной
+// успевало. Поэтому ждём строку журнала о прогрессе и два одинаковых ответа /api/games подряд
+async function settle(logFile) {
+    const done = () => fs.readFileSync(logFile, 'utf8').includes('[Progress]');
+    for (let i = 0; i < 60 && !done(); i++) await sleep(500);
+    if (!done()) {
+        const text = 'сервер не дочитал прогресс из сейвов за 30 с';
+        if (STRICT) throw new Error(text);
+        warn(text);
+    }
+    let last = '';
+    for (let i = 0; i < 20; i++) {
+        const now = await (await fetch(`${BASE}/api/games`, { headers: { cookie } })).text();
+        if (now === last) return;
+        last = now;
+        await sleep(1000);
+    }
+    warn('список игр не успокоился за 20 с');
+}
+
 let cookie = '';
 async function login() {
     const r = await fetch(`${BASE}/api/login`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ username: USER, password: PASS }) });
@@ -206,6 +227,7 @@ async function main() {
     const watchdog = setTimeout(() => { say('запись не уложилась в 20 минут'); server.kill(); process.exit(3); }, 1200000);
     try {
         await login();
+        await settle(SERVER_LOG);
         await record(keys, router, server);
     } finally {
         clearTimeout(watchdog);

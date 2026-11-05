@@ -76,6 +76,11 @@ before(async () => {
   }
   assert.ok(up, 'сервер не поднялся за 90 с');
   await realLogin();
+  // Как в record.js (settle): через 3 с сервер дочитывает «где остановился» из сейвов. Сравнивать раньше — значит
+  // сравнивать то с прогрессом, то без, смотря по скорости машины
+  const logText = () => fs.readFileSync(path.join(lib, '..', `contract-server-${process.pid}.log`), 'utf8');
+  for (let i = 0; i < 60 && !logText().includes('[Progress]'); i++) await sleep(500);
+  assert.ok(logText().includes('[Progress]'), 'сервер не дочитал прогресс из сейвов за 30 с');
   const list = await gamesNow();
   const plain = list.filter((g) => !g.shelf);
   G = { a: plain[0].id, b: plain[1].id, c: plain[2].id, d: plain[3].id };
